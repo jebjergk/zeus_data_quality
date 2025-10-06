@@ -123,6 +123,30 @@ Zeus DQ lets you define, apply, and schedule **data quality checks** directly in
 """)
     st.markdown("<div class='sf-hr'></div>", unsafe_allow_html=True)
 
+    st.subheader("How Zeus DQ helps")
+    st.markdown(
+        """
+✅ **Monitor critical tables** – pick Snowflake objects with the sidebar picker and keep an eye on freshness and row counts.
+
+✅ **Protect key columns** – add column checks that ensure values stay unique, fall within ranges, and follow expected patterns.
+
+✅ **Investigate failures fast** – attach views for failing rows, run checks on demand, and review samples without leaving Snowsight.
+"""
+    )
+
+    st.subheader("Getting started")
+    st.markdown(
+        """
+1. Use the **Configurations** section to create or edit a data quality config.
+2. Select the target table, choose the columns you care about, and enable the checks you need.
+3. Save as a draft or **Save & Apply** to create monitoring views and schedule the daily task.
+"""
+    )
+
+    st.info(
+        "Need a refresher? Switch to the Configurations page with the sidebar, or edit an existing setup to reuse its defaults."
+    )
+
 def render_config_list():
     st.header("Configurations")
     notices = st.session_state.pop("last_notices", None)
