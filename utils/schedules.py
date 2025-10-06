@@ -4,11 +4,12 @@ from utils.meta import _q
 def ensure_task_for_config(session, config) -> Dict[str, Any]:
     task_name = f"DQ_TASK_{config.config_id}"
     sql_body = f"CALL RUN_DQ_CONFIG('{config.config_id}')"
+    cron_schedule = "USING CRON 0 8 * * * Europe/Berlin"
     try:
         session.sql(f"""
             CREATE OR REPLACE TASK {_q(task_name)}
             WAREHOUSE = IDENTIFIER(CURRENT_WAREHOUSE())
-            SCHEDULE = USING CRON 0 8 * * * Europe/Berlin
+            SCHEDULE = '{cron_schedule}'
             AS {sql_body}
         """).collect()
         session.sql(f"ALTER TASK {_q(task_name)} RESUME").collect()
