@@ -1,0 +1,198 @@
+from __future__ import annotations
+from dataclasses import dataclass
+from typing import Any, Dict, List, Optional
+
+try:
+    from snowflake.snowpark import Session
+except Exception:
+    Session = Any  # type: ignore
+
+# Override with fully-qualified names if desired (e.g., "DB.SCHEMA.DQ_CONFIG")
+DQ_CONFIG_TBL: str = "DQ_CONFIG"
+DQ_CHECK_TBL: str = "DQ_CHECK"
+
+# ---------- Models ----------
+@dataclass
+class DQConfig:
+    config_id: str
+    name: str
+    description: Optional[str]
+    target_table_fqn: str
+    run_as_role: Optional[str]
+    dmf_role: Optional[str]
+    status: str
+    owner: Optional[str]
+
+@dataclass
+class DQCheck:
+    config_id: str
+    check_id: str
+    table_fqn: str
+    column_name: Optional[str]
+    rule_expr: str
+    severity: str
+    sample_rows: int = 0
+    check_type: Optional[str] = None
+    params_json: Optional[str] = None
+
+# ---------- Helpers ----------
+def _q(ident: str) -> str:
+    parts = [p.strip('"') for p in ident.split('.')]
+    return '.'.join([f'"{p}"' for p in parts])
+
+def fq_table(database: str, schema: str, table: str) -> str:
+    return f'{_q(database.upper())}.{_q(schema.upper())}.{_q(table.upper())}'
+
+def _normalize_row(row) -> Dict[str, Any]:
+    d = row.asDict() if hasattr(row, "asDict") else dict(row)
+    return {str(k).lower(): v for k, v in d.items()}
+
+def ensure_meta_tables(session: Session):
+    if not session: return
+    session.sql(f"""
+        CREATE TABLE IF NOT EXISTS {_q(DQ_CONFIG_TBL)} (
+          CONFIG_ID STRING PRIMARY KEY,
+          NAME STRING,
+          DESCRIPTION STRING,
+          TARGET_TABLE_FQN STRING,
+          RUN_AS_ROLE STRING,
+          DMF_ROLE STRING,
+          STATUS STRING,
+          OWNER STRING,
+          CREATED_AT TIMESTAMP_LTZ DEFAULT CURRENT_TIMESTAMP(),
+          UPDATED_AT TIMESTAMP_LTZ
+        )
+    """).collect()
+    session.sql(f"""
+        CREATE TABLE IF NOT EXISTS {_q(DQ_CHECK_TBL)} (
+          CONFIG_ID STRING,
+          CHECK_ID STRING,
+          TABLE_FQN STRING,
+          COLUMN_NAME STRING,
+          RULE_EXPR STRING,
+          SEVERITY STRING,
+          SAMPLE_ROWS NUMBER DEFAULT 0,
+          CHECK_TYPE STRING,
+          PARAMS_JSON STRING,
+          PRIMARY KEY (CONFIG_ID, CHECK_ID)
+        )
+    """).collect()
+
+# ---------- CRUD ----------
+def upsert_config(session: Session, cfg: DQConfig):
+    ensure_meta_tables(session)
+    session.sql(f"""
+        MERGE INTO {_q(DQ_CONFIG_TBL)} t
+        USING (SELECT ? as CONFIG_ID, ? as NAME, ? as DESCRIPTION, ? as TARGET_TABLE_FQN,
+                      ? as RUN_AS_ROLE, ? as DMF_ROLE, ? as STATUS, ? as OWNER, CURRENT_TIMESTAMP() as UPDATED_AT) s
+        ON t.CONFIG_ID = s.CONFIG_ID
+        WHEN MATCHED THEN UPDATE SET
+          NAME = s.NAME, DESCRIPTION = s.DESCRIPTION, TARGET_TABLE_FQN = s.TARGET_TABLE_FQN,
+          RUN_AS_ROLE = s.RUN_AS_ROLE, DMF_ROLE = s.DMF_ROLE, STATUS = s.STATUS,
+          OWNER = s.OWNER, UPDATED_AT = s.UPDATED_AT
+        WHEN NOT MATCHED THEN INSERT (CONFIG_ID, NAME, DESCRIPTION, TARGET_TABLE_FQN, RUN_AS_ROLE, DMF_ROLE, STATUS, OWNER, UPDATED_AT)
+        VALUES (s.CONFIG_ID, s.NAME, s.DESCRIPTION, s.TARGET_TABLE_FQN, s.RUN_AS_ROLE, s.DMF_ROLE, s.STATUS, s.OWNER, s.UPDATED_AT)
+    """, params=[
+        cfg.config_id, cfg.name, cfg.description, cfg.target_table_fqn,
+        cfg.run_as_role, cfg.dmf_role, cfg.status, cfg.owner
+    ]).collect()
+
+def list_configs(session: Session) -> List[DQConfig]:
+    if not session: return []
+    ensure_meta_tables(session)
+    df = session.sql(f"SELECT CONFIG_ID, NAME, DESCRIPTION, TARGET_TABLE_FQN, RUN_AS_ROLE, DMF_ROLE, STATUS, OWNER FROM {_q(DQ_CONFIG_TBL)} ORDER BY STATUS DESC, NAME")
+    out: List[DQConfig] = []
+    for r in df.collect():
+        d = _normalize_row(r)
+        out.append(DQConfig(
+            config_id=d["config_id"], name=d["name"], description=d.get("description"),
+            target_table_fqn=d["target_table_fqn"], run_as_role=d.get("run_as_role"),
+            dmf_role=d.get("dmf_role"), status=d.get("status") or "DRAFT", owner=d.get("owner")
+        ))
+    return out
+
+def get_config(session: Session, config_id: str) -> Optional[DQConfig]:
+    if not session: return None
+    df = session.sql(f"SELECT CONFIG_ID, NAME, DESCRIPTION, TARGET_TABLE_FQN, RUN_AS_ROLE, DMF_ROLE, STATUS, OWNER FROM {_q(DQ_CONFIG_TBL)} WHERE CONFIG_ID = ?", params=[config_id])
+    rows = df.collect()
+    if not rows: return None
+    d = _normalize_row(rows[0])
+    return DQConfig(
+        config_id=d["config_id"], name=d["name"], description=d.get("description"),
+        target_table_fqn=d["target_table_fqn"], run_as_role=d.get("run_as_role"),
+        dmf_role=d.get("dmf_role"), status=d.get("status") or "DRAFT", owner=d.get("owner")
+    )
+
+def delete_config(session: Session, config_id: str):
+    if not session: return
+    session.sql(f"DELETE FROM {_q(DQ_CHECK_TBL)} WHERE CONFIG_ID = ?", params=[config_id]).collect()
+    session.sql(f"DELETE FROM {_q(DQ_CONFIG_TBL)} WHERE CONFIG_ID = ?", params=[config_id]).collect()
+
+def upsert_checks(session: Session, checks: List[DQCheck]):
+    if not session or not checks: return
+    ensure_meta_tables(session)
+    cfg_id = checks[0].config_id
+    session.sql(f"DELETE FROM {_q(DQ_CHECK_TBL)} WHERE CONFIG_ID = ?", params=[cfg_id]).collect()
+    for c in checks:
+        session.sql(f"""
+            INSERT INTO {_q(DQ_CHECK_TBL)} (CONFIG_ID, CHECK_ID, TABLE_FQN, COLUMN_NAME, RULE_EXPR, SEVERITY, SAMPLE_ROWS, CHECK_TYPE, PARAMS_JSON)
+            SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?
+        """, params=[c.config_id, c.check_id, c.table_fqn, c.column_name, c.rule_expr, c.severity, int(c.sample_rows), c.check_type, c.params_json]).collect()
+
+def get_checks(session: Session, config_id: str) -> List[DQCheck]:
+    if not session: return []
+    df = session.sql(f"SELECT CONFIG_ID, CHECK_ID, TABLE_FQN, COLUMN_NAME, RULE_EXPR, SEVERITY, SAMPLE_ROWS, CHECK_TYPE, PARAMS_JSON FROM {_q(DQ_CHECK_TBL)} WHERE CONFIG_ID = ? ORDER BY CHECK_ID", params=[config_id])
+    out: List[DQCheck] = []
+    for r in df.collect():
+        d = _normalize_row(r)
+        out.append(DQCheck(
+            config_id=d["config_id"], check_id=d["check_id"], table_fqn=d["table_fqn"],
+            column_name=d.get("column_name"), rule_expr=d["rule_expr"], severity=d.get("severity") or "ERROR",
+            sample_rows=int(d.get("sample_rows") or 0), check_type=d.get("check_type"), params_json=d.get("params_json")
+        ))
+    return out
+
+# ---------- Discovery (INFO_SCHEMA with safe fallbacks) ----------
+def list_databases(session: Session) -> List[str]:
+    if not session: return []
+    try:
+        df = session.sql("SELECT DATABASE_NAME FROM SNOWFLAKE.INFORMATION_SCHEMA.DATABASES ORDER BY 1")
+        return [r[0] for r in df.collect()]
+    except Exception:
+        return []
+
+def list_schemas(session: Session, database: str) -> List[str]:
+    if not session or not database: return []
+    try:
+        df = session.sql(f'SELECT SCHEMA_NAME FROM {_q(database)}.INFORMATION_SCHEMA.SCHEMATA ORDER BY 1')
+        return [r[0] for r in df.collect()]
+    except Exception:
+        try:
+            df = session.sql(f'SHOW SCHEMAS IN DATABASE {_q(database)}')
+            return [r[1] for r in df.collect()]  # NAME
+        except Exception:
+            return []
+
+def list_tables(session: Session, database: str, schema: str) -> List[str]:
+    if not session or not (database and schema): return []
+    try:
+        df = session.sql(f"SELECT TABLE_NAME FROM {_q(database)}.INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = ? AND TABLE_TYPE='BASE TABLE' ORDER BY 1", params=[schema.upper()])
+        return [r[0] for r in df.collect()]
+    except Exception:
+        try:
+            df = session.sql(f"SHOW TABLES IN SCHEMA {_q(database)}.{_q(schema)}")
+            return [r[1] for r in df.collect()]  # NAME
+        except Exception:
+            return []
+
+def list_columns(session: Session, database: str, schema: str, table: str) -> List[str]:
+    if not session or not (database and schema and table): return []
+    try:
+        df = session.sql(f"SELECT COLUMN_NAME FROM {_q(database)}.INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? ORDER BY ORDINAL_POSITION", params=[schema.upper(), table.upper()])
+        return [r[0] for r in df.collect()]
+    except Exception:
+        try:
+            df = session.sql(f"DESC TABLE {_q(database)}.{_q(schema)}.{_q(table)}")
+            return [r[0] for r in df.collect()]  # NAME
+        except Exception:
+            return []
