@@ -43,30 +43,73 @@ st.markdown("""
 def _keyify(s: str) -> str:
     return "".join(ch if ch.isalnum() else "_" for ch in s).lower()
 
-def stateless_table_picker(preselect_fqn: Optional[str]):
-    """Simple, stateless DB → Schema → Table picker. Returns (db, schema, table, fqn)."""
-    def split_fqn(fqn):
-        if not fqn or fqn.count(".") != 2: return None, None, None
-        a,b,c = [p.strip('"') for p in fqn.split(".")]
-        return a,b,c
-    pre_db, pre_sch, pre_tbl = split_fqn(preselect_fqn or "")
+# Planned steps:
+# 1) (streamlit_app.py, table_picker_ui, Introduce stateless three-select picker integrated with config editor.)
+# 2) (streamlit_app.py, render_config_editor, Add validation messaging for incomplete selections.)
+# 3) (streamlit_app.py, render_config_editor, Persist column defaults per target selection.)
 
-    dbs = list_databases(session)
-    db_index = next((i for i,v in enumerate(dbs) if pre_db and v.upper()==pre_db.upper()), 0) if dbs else 0
-    db_sel = st.selectbox("Database", dbs or ["— none —"], index=db_index if dbs else 0)
-    if not dbs or db_sel == "— none —": return None, None, None, ""
+def table_picker_ui(session, preselect_fqn: Optional[str] = None):
+    """Render a stateless Database → Schema → Table picker."""
 
-    schemas = list_schemas(session, db_sel)
-    sch_index = next((i for i,v in enumerate(schemas) if pre_sch and v.upper()==pre_sch.upper()), 0) if schemas else 0
-    sch_sel = st.selectbox("Schema", schemas or ["— none —"], index=sch_index if schemas else 0)
-    if not schemas or sch_sel == "— none —": return db_sel, None, None, ""
+    def _split_fqn(fqn: Optional[str]):
+        if not fqn:
+            return None, None, None
+        parts = [segment.strip('"') for segment in fqn.split(".")]
+        if len(parts) != 3:
+            return None, None, None
+        return parts[0], parts[1], parts[2]
 
-    tables = list_tables(session, db_sel, sch_sel)
-    tbl_index = next((i for i,v in enumerate(tables) if pre_tbl and v.upper()==pre_tbl.upper()), 0) if tables else 0
-    tbl_sel = st.selectbox("Table", tables or ["— none —"], index=tbl_index if tables else 0)
-    if not tables or tbl_sel == "— none —": return db_sel, sch_sel, None, ""
+    def _default_index(options: List[str], target: Optional[str]) -> int:
+        if not options or not target:
+            return 0
+        target_upper = target.upper()
+        for idx, option in enumerate(options):
+            if option.upper() == target_upper:
+                return idx
+        return 0
 
-    return db_sel, sch_sel, tbl_sel, fq_table(db_sel, sch_sel, tbl_sel)
+    pre_db, pre_schema, pre_table = _split_fqn(preselect_fqn)
+
+    col_db, col_schema, col_table = st.columns(3)
+
+    db_options = list_databases(session) or []
+    with col_db:
+        db_choice = st.selectbox(
+            "Database",
+            db_options if db_options else ["—"],
+            index=_default_index(db_options, pre_db) if db_options else 0,
+        )
+    selected_db = db_choice if db_options else None
+
+    schema_options = list_schemas(session, selected_db) if selected_db else []
+    with col_schema:
+        schema_choice = st.selectbox(
+            "Schema",
+            schema_options if schema_options else ["—"],
+            index=_default_index(schema_options, pre_schema) if schema_options else 0,
+        )
+    selected_schema = schema_choice if schema_options else None
+
+    table_options = (
+        list_tables(session, selected_db, selected_schema)
+        if selected_db and selected_schema
+        else []
+    )
+    with col_table:
+        table_choice = st.selectbox(
+            "Table",
+            table_options if table_options else ["—"],
+            index=_default_index(table_options, pre_table) if table_options else 0,
+        )
+    selected_table = table_choice if table_options else None
+
+    fqn = (
+        fq_table(selected_db, selected_schema, selected_table)
+        if selected_db and selected_schema and selected_table
+        else None
+    )
+
+    return selected_db, selected_schema, selected_table, fqn
 
 def render_home():
     st.title("Zeus Data Quality")
@@ -143,7 +186,7 @@ def render_config_editor():
     # Target (picker is stateless, we persist a single FQN)
     st.subheader("Target")
     base_fqn = st.session_state.get("editor_target_fqn") or (cfg.target_table_fqn if cfg else None)
-    db_sel, sch_sel, tbl_sel, target_table = stateless_table_picker(base_fqn)
+    db_sel, sch_sel, tbl_sel, target_table = table_picker_ui(session, preselect_fqn=base_fqn)
     if target_table:
         st.session_state["editor_target_fqn"] = target_table
     st.caption(f"Target Table: {target_table or '— not selected —'}")
