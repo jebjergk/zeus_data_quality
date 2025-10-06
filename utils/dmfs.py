@@ -1,3 +1,4 @@
+import re
 from typing import List, Set, Tuple
 from utils.meta import DQConfig, DQCheck, _q, DQ_CONFIG_TBL, DQ_CHECK_TBL
 
@@ -9,7 +10,8 @@ def _split_fqn(fqn: str) -> Tuple[str,str,str]:
     return tuple(p.strip('"') for p in parts)  # type: ignore
 
 def _view_name(config_id: str, check_id: str) -> str:
-    return f"DQ_{config_id}_{check_id}_FAILS".upper()
+    raw = f"DQ_{config_id}_{check_id}_FAILS".upper()
+    return re.sub(r"[^A-Z0-9_]", "_", raw)
 
 def attach_dmfs(session, config: DQConfig, checks: List[DQCheck]) -> List[str]:
     created: List[str] = []
