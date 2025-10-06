@@ -431,12 +431,27 @@ def render_config_editor():
 
         if apply_now and status == 'ACTIVE':
             sched = schedules.ensure_task_for_config(session, dq_cfg)
-            if sched.get("status") == "TASK_CREATED":
+            sched_status = sched.get("status")
+            if sched_status == "TASK_CREATED":
                 sched_msg = f"Scheduled daily 08:00 Europe/Berlin via **{sched['task']}**."
                 st.success(sched_msg)
                 remember("success", sched_msg)
+            elif sched_status == "NO_WAREHOUSE":
+                warn_msg = (
+                    "No active warehouse is set for this session. "
+                    "Run `USE WAREHOUSE <name>` in Snowflake or set a default warehouse, then save & apply again."
+                )
+                st.warning(warn_msg)
+                remember("warning", warn_msg)
             else:
-                warn_msg = "Could not create task; stored fallback intent."
+                reason = sched.get("reason")
+                if reason:
+                    warn_msg = (
+                        f"Could not create task {sched.get('task') or ''}: {reason}. "
+                        "Task intent was stored for manual follow-up."
+                    )
+                else:
+                    warn_msg = "Could not create task automatically; stored fallback intent."
                 st.warning(warn_msg)
                 remember("warning", warn_msg)
 
