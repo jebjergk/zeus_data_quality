@@ -187,6 +187,9 @@ def render_config_editor():
     st.subheader("Target")
     base_fqn = st.session_state.get("editor_target_fqn") or (cfg.target_table_fqn if cfg else None)
     db_sel, sch_sel, tbl_sel, target_table = table_picker_ui(session, preselect_fqn=base_fqn)
+    with st.expander("Debug (dev only)"):
+        st.write("editor_target_fqn", st.session_state.get("editor_target_fqn"))
+        st.write("Selected columns", st.session_state.get("dq_cols_ms", []))
     if target_table:
         st.session_state["editor_target_fqn"] = target_table
     st.caption(f"Target Table: {target_table or '— not selected —'}")
