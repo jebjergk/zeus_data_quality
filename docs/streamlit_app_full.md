@@ -1,5 +1,8 @@
+# `streamlit_app.py` (current revision)
+
+```python
 import json
-from typing import Dict, List, Optional
+from typing import List, Optional
 from uuid import uuid4
 
 import streamlit as st
@@ -82,21 +85,6 @@ Zeus DQ lets you define, apply, and schedule **data quality checks** directly in
 
 def render_config_list():
     st.header("Configurations")
-    notices = st.session_state.pop("last_notices", None)
-    if notices:
-        for note in notices:
-            kind = note.get("type", "info")
-            message = note.get("message", "")
-            if not message:
-                continue
-            if kind == "success":
-                st.success(message)
-            elif kind == "warning":
-                st.warning(message)
-            elif kind == "error":
-                st.error(message)
-            else:
-                st.info(message)
     # Create button on right
     _, _, create_col = st.columns([6, 2, 2])
     with create_col:
@@ -134,9 +122,7 @@ def render_config_list():
             with a2:
                 if st.button("🗑️ Delete", key=f"del_{cfg.config_id}"):
                     out = delete_config_full(session, cfg.config_id)
-                    msg = f"Deleted `{cfg.name}` — dropped {len(out.get('dmfs_dropped', []))} view(s)."
-                    st.success(msg)
-                    st.session_state["last_notices"] = [{"type": "success", "message": msg}]
+                    st.success(f"Deleted `{cfg.name}` — dropped {len(out.get('dmfs_dropped', []))} view(s).")
                     st.rerun()
         st.markdown("</div>", unsafe_allow_html=True)
         if i < len(cfgs)-1:
@@ -376,16 +362,8 @@ def render_config_editor():
             return
         if delete_btn and cfg:
             out = delete_config_full(session, cfg.config_id)
-            msg = f"Deleted config {cfg.config_id}. Dropped: {len(out.get('dmfs_dropped', []))} view(s)."
-            st.success(msg)
-            st.session_state["last_notices"] = [{"type": "success", "message": msg}]
+            st.success(f"Deleted config {cfg.config_id}. Dropped: {len(out.get('dmfs_dropped', []))} view(s).")
             st.session_state["cfg_mode"] = "list"; st.rerun(); return
-
-        post_submit_notices: List[Dict[str, str]] = []
-
-        def remember(kind: str, message: str) -> None:
-            if message:
-                post_submit_notices.append({"type": kind, "message": message})
 
         new_id = cfg.config_id if cfg else str(uuid4())
         status = 'ACTIVE' if apply_now else 'DRAFT'
@@ -402,60 +380,27 @@ def render_config_editor():
             checks_rebound.append(cr)
 
         out = save_config_and_checks(session, dq_cfg, checks_rebound, apply_now=apply_now)
-        base_msg = f"Saved config {new_id} ({status})."
-        st.success(base_msg)
-        remember("success", base_msg)
-        if apply_now:
-            dmfs_attached = out.get("dmfs_attached") or []
-            if dmfs_attached:
-                dmf_msg = "Attached views:\n- " + "\n- ".join(dmfs_attached)
-                st.success(dmf_msg)
-                remember("success", dmf_msg)
-            else:
-                info_msg = "No row-level failing-row views were required for this configuration."
-                st.info(info_msg)
-                remember("info", info_msg)
+        if apply_now and out.get("dmfs_attached"):
+            st.success("Attached views:\n- " + "\n- ".join(out["dmfs_attached"]))
+        else:
+            st.success(f"Saved config {new_id} ({status}).")
 
         if run_now_btn or apply_now:
             results = run_now(session, dq_cfg, checks_rebound)
             st.info("Run Now results:")
-            summary_lines: List[str] = []
             for r in results["checks"]:
                 agg = " (aggregate)" if r.get("aggregate") else ""
                 st.write(f"**{r['check_id']}** — {r.get('type','')} — failures: {r['failures']}{agg}")
-                summary_lines.append(f"{r['check_id']} — {r.get('type','')} — failures: {r['failures']}{agg}")
                 if r.get("sample"):
                     st.dataframe(r["sample"])
-            if summary_lines:
-                remember("info", "Run Now results:\n" + "\n".join(summary_lines))
 
         if apply_now and status == 'ACTIVE':
             sched = schedules.ensure_task_for_config(session, dq_cfg)
-            sched_status = sched.get("status")
-            if sched_status == "TASK_CREATED":
-                sched_msg = f"Scheduled daily 08:00 Europe/Berlin via **{sched['task']}**."
-                st.success(sched_msg)
-                remember("success", sched_msg)
-            elif sched_status == "NO_WAREHOUSE":
-                warn_msg = (
-                    "No active warehouse is set for this session. "
-                    "Run `USE WAREHOUSE <name>` in Snowflake or set a default warehouse, then save & apply again."
-                )
-                st.warning(warn_msg)
-                remember("warning", warn_msg)
+            if sched.get("status") == "TASK_CREATED":
+                st.success(f"Scheduled daily 08:00 Europe/Berlin via **{sched['task']}**.")
             else:
-                reason = sched.get("reason")
-                if reason:
-                    warn_msg = (
-                        f"Could not create task {sched.get('task') or ''}: {reason}. "
-                        "Task intent was stored for manual follow-up."
-                    )
-                else:
-                    warn_msg = "Could not create task automatically; stored fallback intent."
-                st.warning(warn_msg)
-                remember("warning", warn_msg)
+                st.warning("Could not create task; stored fallback intent.")
 
-        st.session_state["last_notices"] = post_submit_notices
         st.session_state["cfg_mode"] = "list"; st.rerun()
 
 # ---------- Sidebar + routing ----------
@@ -476,3 +421,4 @@ if st.session_state.get("page","home") == "cfg":
         render_config_editor()
 else:
     render_home()
+```
