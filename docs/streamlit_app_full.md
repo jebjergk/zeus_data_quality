@@ -1,3 +1,6 @@
+# `streamlit_app.py` (current revision)
+
+```python
 import json
 from typing import List, Optional
 from uuid import uuid4
@@ -418,3 +421,4 @@ if st.session_state.get("page","home") == "cfg":
         render_config_editor()
 else:
     render_home()
+```
