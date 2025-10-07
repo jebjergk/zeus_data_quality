@@ -47,11 +47,12 @@ def ensure_task_for_config(session, config) -> Dict[str, Any]:
         return {"status": "NO_WAREHOUSE", "task": task_name}
 
     sql_body = f"CALL RUN_DQ_CONFIG('{config.config_id}')"
+    schedule_expression = f"USING CRON {cron} {timezone}"
     try:
         session.sql(f"""
             CREATE OR REPLACE TASK {_q(task_name)}
             WAREHOUSE = {_q(warehouse)}
-            SCHEDULE = USING CRON {cron} {timezone}
+            SCHEDULE = '{schedule_expression}'
             AS {sql_body}
         """).collect()
         session.sql(f"ALTER TASK {_q(task_name)} RESUME").collect()
