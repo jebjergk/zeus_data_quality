@@ -49,7 +49,7 @@ def build_rule_for_table_check(fqn: str, ttype: str, params: dict) -> str:
     ttype = (ttype or "").upper()
     if ttype == "FRESHNESS":
         ts_col = params.get("timestamp_column", "LOAD_TIMESTAMP")
-        max_age = int(params.get("max_age_minutes", 1440))
+        max_age = int(params.get("max_age_minutes", 1920))
         return f"SELECT TIMESTAMPDIFF('minute', MAX(\"{ts_col}\"), CURRENT_TIMESTAMP()) <= {max_age} AS OK FROM {_q(fqn)}"
     if ttype == "ROW_COUNT":
         min_rows = int(params.get("min_rows", 1))
