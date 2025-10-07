@@ -1,5 +1,7 @@
+"""Convenience helpers for attaching and detaching Data Monitoring Framework views."""
+
 import re
-from typing import List, Optional, Set, Tuple
+from typing import List, Set, Tuple
 from utils.meta import DQConfig, DQCheck, _q, DQ_CONFIG_TBL, DQ_CHECK_TBL, metadata_db_schema
 
 AGG_PREFIX = "AGG:"

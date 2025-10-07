@@ -1,3 +1,10 @@
+"""Utility helpers and data models for interacting with DQ metadata tables.
+
+The functions in this module intentionally avoid depending on Snowpark at
+import time so they can be reused in environments where the Snowpark Python
+client is not installed.  Snowflake objects are loaded lazily via duck typing.
+"""
+
 from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
