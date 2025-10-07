@@ -22,6 +22,9 @@ class DQConfig:
     dmf_role: Optional[str]
     status: str
     owner: Optional[str]
+    schedule_cron: Optional[str] = None
+    schedule_timezone: Optional[str] = None
+    schedule_enabled: bool = True
 
 @dataclass
 class DQCheck:
@@ -59,10 +62,16 @@ def ensure_meta_tables(session: Session):
           DMF_ROLE STRING,
           STATUS STRING,
           OWNER STRING,
+          SCHEDULE_CRON STRING,
+          SCHEDULE_TIMEZONE STRING,
+          SCHEDULE_ENABLED BOOLEAN,
           CREATED_AT TIMESTAMP_LTZ DEFAULT CURRENT_TIMESTAMP(),
           UPDATED_AT TIMESTAMP_LTZ
         )
     """).collect()
+    session.sql(f"ALTER TABLE {_q(DQ_CONFIG_TBL)} ADD COLUMN IF NOT EXISTS SCHEDULE_CRON STRING").collect()
+    session.sql(f"ALTER TABLE {_q(DQ_CONFIG_TBL)} ADD COLUMN IF NOT EXISTS SCHEDULE_TIMEZONE STRING").collect()
+    session.sql(f"ALTER TABLE {_q(DQ_CONFIG_TBL)} ADD COLUMN IF NOT EXISTS SCHEDULE_ENABLED BOOLEAN").collect()
     session.sql(f"""
         CREATE TABLE IF NOT EXISTS {_q(DQ_CHECK_TBL)} (
           CONFIG_ID STRING,
@@ -84,43 +93,86 @@ def upsert_config(session: Session, cfg: DQConfig):
     session.sql(f"""
         MERGE INTO {_q(DQ_CONFIG_TBL)} t
         USING (SELECT ? as CONFIG_ID, ? as NAME, ? as DESCRIPTION, ? as TARGET_TABLE_FQN,
-                      ? as RUN_AS_ROLE, ? as DMF_ROLE, ? as STATUS, ? as OWNER, CURRENT_TIMESTAMP() as UPDATED_AT) s
+                      ? as RUN_AS_ROLE, ? as DMF_ROLE, ? as STATUS, ? as OWNER,
+                      ? as SCHEDULE_CRON, ? as SCHEDULE_TIMEZONE, ? as SCHEDULE_ENABLED,
+                      CURRENT_TIMESTAMP() as UPDATED_AT) s
         ON t.CONFIG_ID = s.CONFIG_ID
         WHEN MATCHED THEN UPDATE SET
           NAME = s.NAME, DESCRIPTION = s.DESCRIPTION, TARGET_TABLE_FQN = s.TARGET_TABLE_FQN,
           RUN_AS_ROLE = s.RUN_AS_ROLE, DMF_ROLE = s.DMF_ROLE, STATUS = s.STATUS,
-          OWNER = s.OWNER, UPDATED_AT = s.UPDATED_AT
-        WHEN NOT MATCHED THEN INSERT (CONFIG_ID, NAME, DESCRIPTION, TARGET_TABLE_FQN, RUN_AS_ROLE, DMF_ROLE, STATUS, OWNER, UPDATED_AT)
-        VALUES (s.CONFIG_ID, s.NAME, s.DESCRIPTION, s.TARGET_TABLE_FQN, s.RUN_AS_ROLE, s.DMF_ROLE, s.STATUS, s.OWNER, s.UPDATED_AT)
+          OWNER = s.OWNER, SCHEDULE_CRON = s.SCHEDULE_CRON,
+          SCHEDULE_TIMEZONE = s.SCHEDULE_TIMEZONE,
+          SCHEDULE_ENABLED = s.SCHEDULE_ENABLED,
+          UPDATED_AT = s.UPDATED_AT
+        WHEN NOT MATCHED THEN INSERT (CONFIG_ID, NAME, DESCRIPTION, TARGET_TABLE_FQN, RUN_AS_ROLE, DMF_ROLE, STATUS, OWNER,
+                                      SCHEDULE_CRON, SCHEDULE_TIMEZONE, SCHEDULE_ENABLED, UPDATED_AT)
+        VALUES (s.CONFIG_ID, s.NAME, s.DESCRIPTION, s.TARGET_TABLE_FQN, s.RUN_AS_ROLE, s.DMF_ROLE, s.STATUS, s.OWNER,
+                s.SCHEDULE_CRON, s.SCHEDULE_TIMEZONE, s.SCHEDULE_ENABLED, s.UPDATED_AT)
     """, params=[
         cfg.config_id, cfg.name, cfg.description, cfg.target_table_fqn,
-        cfg.run_as_role, cfg.dmf_role, cfg.status, cfg.owner
+        cfg.run_as_role, cfg.dmf_role, cfg.status, cfg.owner,
+        cfg.schedule_cron, cfg.schedule_timezone, cfg.schedule_enabled
     ]).collect()
 
 def list_configs(session: Session) -> List[DQConfig]:
     if not session: return []
     ensure_meta_tables(session)
-    df = session.sql(f"SELECT CONFIG_ID, NAME, DESCRIPTION, TARGET_TABLE_FQN, RUN_AS_ROLE, DMF_ROLE, STATUS, OWNER FROM {_q(DQ_CONFIG_TBL)} ORDER BY STATUS DESC, NAME")
+    df = session.sql(
+        f"""
+        SELECT CONFIG_ID, NAME, DESCRIPTION, TARGET_TABLE_FQN, RUN_AS_ROLE, DMF_ROLE, STATUS, OWNER,
+               SCHEDULE_CRON, SCHEDULE_TIMEZONE, SCHEDULE_ENABLED
+        FROM {_q(DQ_CONFIG_TBL)}
+        ORDER BY STATUS DESC, NAME
+        """
+    )
     out: List[DQConfig] = []
     for r in df.collect():
         d = _normalize_row(r)
+        schedule_enabled_raw = d.get("schedule_enabled")
+        if schedule_enabled_raw is None:
+            schedule_enabled = True
+        elif isinstance(schedule_enabled_raw, str):
+            schedule_enabled = schedule_enabled_raw.strip().upper() in {"TRUE", "T", "YES", "Y", "1"}
+        else:
+            schedule_enabled = bool(schedule_enabled_raw)
         out.append(DQConfig(
             config_id=d["config_id"], name=d["name"], description=d.get("description"),
             target_table_fqn=d["target_table_fqn"], run_as_role=d.get("run_as_role"),
-            dmf_role=d.get("dmf_role"), status=d.get("status") or "DRAFT", owner=d.get("owner")
+            dmf_role=d.get("dmf_role"), status=d.get("status") or "DRAFT", owner=d.get("owner"),
+            schedule_cron=d.get("schedule_cron"),
+            schedule_timezone=d.get("schedule_timezone"),
+            schedule_enabled=schedule_enabled
         ))
     return out
 
 def get_config(session: Session, config_id: str) -> Optional[DQConfig]:
     if not session: return None
-    df = session.sql(f"SELECT CONFIG_ID, NAME, DESCRIPTION, TARGET_TABLE_FQN, RUN_AS_ROLE, DMF_ROLE, STATUS, OWNER FROM {_q(DQ_CONFIG_TBL)} WHERE CONFIG_ID = ?", params=[config_id])
+    df = session.sql(
+        f"""
+        SELECT CONFIG_ID, NAME, DESCRIPTION, TARGET_TABLE_FQN, RUN_AS_ROLE, DMF_ROLE, STATUS, OWNER,
+               SCHEDULE_CRON, SCHEDULE_TIMEZONE, SCHEDULE_ENABLED
+        FROM {_q(DQ_CONFIG_TBL)}
+        WHERE CONFIG_ID = ?
+        """,
+        params=[config_id],
+    )
     rows = df.collect()
     if not rows: return None
     d = _normalize_row(rows[0])
+    schedule_enabled_raw = d.get("schedule_enabled")
+    if schedule_enabled_raw is None:
+        schedule_enabled = True
+    elif isinstance(schedule_enabled_raw, str):
+        schedule_enabled = schedule_enabled_raw.strip().upper() in {"TRUE", "T", "YES", "Y", "1"}
+    else:
+        schedule_enabled = bool(schedule_enabled_raw)
     return DQConfig(
         config_id=d["config_id"], name=d["name"], description=d.get("description"),
         target_table_fqn=d["target_table_fqn"], run_as_role=d.get("run_as_role"),
-        dmf_role=d.get("dmf_role"), status=d.get("status") or "DRAFT", owner=d.get("owner")
+        dmf_role=d.get("dmf_role"), status=d.get("status") or "DRAFT", owner=d.get("owner"),
+        schedule_cron=d.get("schedule_cron"),
+        schedule_timezone=d.get("schedule_timezone"),
+        schedule_enabled=schedule_enabled
     )
 
 def delete_config(session: Session, config_id: str):

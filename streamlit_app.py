@@ -387,6 +387,26 @@ def render_config_editor():
                 params_json=json.dumps(rc_params)
             ))
 
+        st.markdown("### Schedule")
+        existing_cron = getattr(cfg, "schedule_cron", None) if cfg else None
+        existing_timezone = getattr(cfg, "schedule_timezone", None) if cfg else None
+        existing_enabled = getattr(cfg, "schedule_enabled", True) if cfg else True
+        default_cron = existing_cron or "0 8 * * *"
+        default_timezone = existing_timezone or "Europe/Berlin"
+        schedule_enabled = st.checkbox("Enable daily task", value=bool(existing_enabled))
+        cron_expr = st.text_input(
+            "Cron expression",
+            value=default_cron,
+            help="Snowflake `USING CRON` expression (e.g. `0 8 * * *`).",
+            disabled=not schedule_enabled
+        )
+        timezone_expr = st.text_input(
+            "Timezone",
+            value=default_timezone,
+            help="IANA timezone name (e.g. `Europe/Berlin`).",
+            disabled=not schedule_enabled
+        )
+
         c1, c2, c3, c4 = st.columns(4)
         with c1: apply_now = st.form_submit_button("Save & Apply")
         with c2: save_draft = st.form_submit_button("Save as Draft")
@@ -417,7 +437,10 @@ def render_config_editor():
         dq_cfg = DQConfig(
             config_id=new_id, name=name, description=(desc or None),
             target_table_fqn=target_table, run_as_role=(state.get('run_as_role') or None),
-            dmf_role=(state.get('dmf_role') or None), status=status, owner=None
+            dmf_role=(state.get('dmf_role') or None), status=status, owner=None,
+            schedule_cron=(cron_expr.strip() if cron_expr else "0 8 * * *"),
+            schedule_timezone=(timezone_expr.strip() if timezone_expr else "Europe/Berlin"),
+            schedule_enabled=bool(schedule_enabled)
         )
         # rebind ids
         checks_rebound: List[DQCheck] = []
@@ -457,9 +480,19 @@ def render_config_editor():
             sched = schedules.ensure_task_for_config(session, dq_cfg)
             sched_status = sched.get("status")
             if sched_status == "TASK_CREATED":
-                sched_msg = f"Scheduled daily 08:00 Europe/Berlin via **{sched['task']}**."
+                cron_disp = dq_cfg.schedule_cron or "0 8 * * *"
+                tz_disp = dq_cfg.schedule_timezone or "Europe/Berlin"
+                sched_msg = f"Scheduled **{sched['task']}** (`{cron_disp}` {tz_disp})."
                 st.success(sched_msg)
                 remember("success", sched_msg)
+            elif sched_status == "SCHEDULE_DISABLED":
+                info_msg = "Schedule disabled — skipped automatic task creation."
+                st.info(info_msg)
+                remember("info", info_msg)
+            elif sched_status == "INVALID_SCHEDULE":
+                warn_msg = sched.get("reason") or "Schedule settings were invalid; task not created."
+                st.warning(warn_msg)
+                remember("warning", warn_msg)
             elif sched_status == "NO_WAREHOUSE":
                 warn_msg = (
                     "No active warehouse is set for this session. "
