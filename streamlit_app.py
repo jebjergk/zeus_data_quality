@@ -294,8 +294,18 @@ def render_config_editor():
                 checked = ("NULL_COUNT" in [(ec.check_type or "").upper() for ec in existing_checks if ec.column_name == col])
                 c_null = st.checkbox("NULL_COUNT", value=checked, key=f"{sk}_chk_nullcount")
                 if c_null and target_table:
-                    max_nulls = st.number_input("Max NULL rows", min_value=0, value=int(ex.get("params", {}).get("max_nulls", 0)), key=f"{sk}_p_nc_max")
-                    sev = st.selectbox("Severity (NULL_COUNT)", ["ERROR", "WARN"], index=(0 if ex.get("severity","ERROR")=="ERROR" else 1), key=f"{sk}_sev_null")
+                    max_nulls = st.number_input(
+                        "Max NULL rows",
+                        min_value=0,
+                        value=int(ex.get("params", {}).get("max_nulls", 0)),
+                        key=f"{sk}_p_nc_max",
+                    )
+                    sev = st.selectbox(
+                        "Severity (NULL_COUNT)",
+                        ["ERROR", "WARN"],
+                        index=(0 if ex.get("severity", "ERROR") == "ERROR" else 1),
+                        key=f"{sk}_sev_null",
+                    )
                     params = {"max_nulls": int(max_nulls)}
                     rule, is_agg = build_rule_for_column_check(target_table, col, "NULL_COUNT", params)
                     check_rows.append(DQCheck(
