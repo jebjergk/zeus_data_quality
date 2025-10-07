@@ -257,8 +257,24 @@ def render_config_editor():
                 checked = ("UNIQUE" in [(ec.check_type or "").upper() for ec in existing_checks if ec.column_name == col])
                 c_unique = st.checkbox("UNIQUE", value=checked, key=f"{sk}_chk_unique")
                 if c_unique and target_table:
-                    p_ignore_nulls = st.checkbox("Ignore NULLs", value=ex.get("params", {}).get("ignore_nulls", True), key=f"{sk}_p_un_ignore")
-                    sev = st.selectbox("Severity (UNIQUE)", ["ERROR", "WARN"], index=(0 if ex.get("severity","ERROR")=="ERROR" else 1), key=f"{sk}_sev_unique")
+                    p_ignore_nulls = st.checkbox(
+                        "Ignore NULLs",
+                        value=ex.get("params", {}).get("ignore_nulls", True),
+                        key=f"{sk}_p_un_ignore"
+                    )
+                    severity_options = ["ERROR", "WARN"]
+                    existing_severity = ex.get("severity", "ERROR")
+                    severity_index = (
+                        severity_options.index(existing_severity)
+                        if existing_severity in severity_options
+                        else 0
+                    )
+                    sev = st.selectbox(
+                        "Severity (UNIQUE)",
+                        severity_options,
+                        index=severity_index,
+                        key=f"{sk}_sev_unique"
+                    )
                     params = {"ignore_nulls": p_ignore_nulls}
                     rule, is_agg = build_rule_for_column_check(target_table, col, "UNIQUE", params)
                     check_rows.append(DQCheck(
