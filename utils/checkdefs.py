@@ -37,7 +37,11 @@ def build_rule_for_column_check(fqn: str, col: str, ctype: str, params: dict):
         allowed_csv = params.get("allowed_values_csv", "")
         values = [v.strip() for v in allowed_csv.split(",") if v.strip() != ""]
         if not values: return "(TRUE)", False
-        quoted = ", ".join([f"'{v.replace(\"'\",\"''\")}'" for v in values])
+        quoted_values = []
+        for raw in values:
+            sanitized = raw.replace("'", "''")
+            quoted_values.append("'" + sanitized + "'")
+        quoted = ", ".join(quoted_values)
         return f"({colq} IN ({quoted}))", False
     return "(TRUE)", False
 

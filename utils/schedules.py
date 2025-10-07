@@ -27,6 +27,21 @@ def _current_warehouse(session) -> Optional[str]:
 
 def ensure_task_for_config(session, config) -> Dict[str, Any]:
     task_name = f"DQ_TASK_{config.config_id}"
+    schedule_enabled = getattr(config, "schedule_enabled", True)
+    if not schedule_enabled:
+        return {"status": "SCHEDULE_DISABLED", "task": task_name}
+
+    cron = (getattr(config, "schedule_cron", None) or "0 8 * * *").strip()
+    timezone = (getattr(config, "schedule_timezone", None) or "Europe/Berlin").strip()
+    if not cron:
+        cron = "0 8 * * *"
+    if not timezone:
+        timezone = "Europe/Berlin"
+
+    for value in (cron, timezone):
+        if any(ch in value for ch in "'\";\n\r"):
+            return {"status": "INVALID_SCHEDULE", "task": task_name, "reason": "Unsafe schedule characters"}
+
     warehouse = _current_warehouse(session)
     if not warehouse:
         return {"status": "NO_WAREHOUSE", "task": task_name}
@@ -36,7 +51,7 @@ def ensure_task_for_config(session, config) -> Dict[str, Any]:
         session.sql(f"""
             CREATE OR REPLACE TASK {_q(task_name)}
             WAREHOUSE = {_q(warehouse)}
-            SCHEDULE = USING CRON 0 8 * * * Europe/Berlin
+            SCHEDULE = USING CRON {cron} {timezone}
             AS {sql_body}
         """).collect()
         session.sql(f"ALTER TASK {_q(task_name)} RESUME").collect()
