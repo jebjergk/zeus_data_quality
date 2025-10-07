@@ -130,10 +130,33 @@ def render_config_list():
             st.session_state["editor_target_fqn"] = None
             st.rerun()
 
+    search_query = st.text_input(
+        "Search configurations",
+        key="config_list_search",
+        placeholder="Search by name, table, status, role, or ID",
+        label_visibility="collapsed",
+    )
+
     cfgs = list_configs(session)
     if not cfgs:
         st.info("No configurations yet. Click **Create** to add one.")
         return
+
+    if search_query:
+        q = search_query.lower()
+        cfgs = [
+            cfg
+            for cfg in cfgs
+            if q in (cfg.name or "").lower()
+            or q in (cfg.target_table_fqn or "").lower()
+            or q in (cfg.status or "").lower()
+            or q in (cfg.run_as_role or "").lower()
+            or q in (cfg.config_id or "").lower()
+        ]
+
+        if not cfgs:
+            st.info("No configurations match your search.")
+            return
 
     for i, cfg in enumerate(cfgs):
         active = (cfg.status or "").upper() == "ACTIVE"
