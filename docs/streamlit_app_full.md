@@ -324,7 +324,7 @@ def render_config_editor():
         # Table-level (always)
         st.markdown("### Table-level checks (always included)")
         ts_col = st.text_input("Freshness timestamp column", value="LOAD_TIMESTAMP")
-        max_age = st.number_input("Freshness max age (minutes)", min_value=1, value=720)
+        max_age = st.number_input("Freshness max age (minutes)", min_value=1, value=1920)
         min_rows = st.number_input("Minimum row count", min_value=0, value=1)
 
         if target_table:
