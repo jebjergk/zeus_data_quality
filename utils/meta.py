@@ -1,6 +1,6 @@
 from __future__ import annotations
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 try:
     from snowflake.snowpark import Session
@@ -49,6 +49,57 @@ def fq_table(database: str, schema: str, table: str) -> str:
 def _normalize_row(row) -> Dict[str, Any]:
     d = row.asDict() if hasattr(row, "asDict") else dict(row)
     return {str(k).lower(): v for k, v in d.items()}
+
+def _parse_relation_name(name: str) -> Tuple[Optional[str], Optional[str], str]:
+    parts = [p.strip('"') for p in name.split('.') if p]
+    if len(parts) == 3:
+        return parts[0], parts[1], parts[2]
+    if len(parts) == 2:
+        return None, parts[0], parts[1]
+    if len(parts) == 1:
+        return None, None, parts[0]
+    raise ValueError("Invalid relation name")
+
+def _current_db_schema(session: Session) -> Tuple[Optional[str], Optional[str]]:
+    current_db: Optional[str] = None
+    current_schema: Optional[str] = None
+    if session:
+        for attr, holder in (("get_current_database", "db"), ("get_current_schema", "schema")):
+            try:
+                getter = getattr(session, attr)
+                value = getter()
+                if holder == "db" and value:
+                    current_db = value
+                elif holder == "schema" and value:
+                    current_schema = value
+            except Exception:
+                continue
+        if not (current_db and current_schema):
+            try:
+                row = session.sql("SELECT CURRENT_DATABASE(), CURRENT_SCHEMA()").collect()[0]
+                if hasattr(row, "asDict"):
+                    d = row.asDict()
+                    current_db = current_db or d.get("CURRENT_DATABASE()") or d.get("CURRENT_DATABASE")
+                    current_schema = current_schema or d.get("CURRENT_SCHEMA()") or d.get("CURRENT_SCHEMA")
+                else:
+                    current_db = current_db or row[0]
+                    current_schema = current_schema or row[1]
+            except Exception:
+                pass
+    return current_db, current_schema
+
+def metadata_db_schema(session: Session) -> Tuple[str, str]:
+    cfg_db, cfg_schema, _ = _parse_relation_name(DQ_CONFIG_TBL)
+    chk_db, chk_schema, _ = _parse_relation_name(DQ_CHECK_TBL)
+    current_db, current_schema = _current_db_schema(session)
+
+    db = (cfg_db or chk_db or current_db)
+    schema = (cfg_schema or chk_schema or current_schema)
+
+    if not db or not schema:
+        raise ValueError("Unable to determine metadata schema for DQ views")
+
+    return db, schema
 
 def ensure_meta_tables(session: Session):
     if not session: return
