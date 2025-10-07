@@ -43,6 +43,21 @@ st.markdown("""
 def _keyify(s: str) -> str:
     return "".join(ch if ch.isalnum() else "_" for ch in s).lower()
 
+
+def severity_select(
+    label: str,
+    *,
+    key: str,
+    existing: Optional[str],
+    options: Optional[List[str]] = None,
+) -> str:
+    """Render a severity selectbox with defensive defaults."""
+
+    choices = options or ["ERROR", "WARN"]
+    normalized = existing if existing in choices else choices[0]
+    index = choices.index(normalized) if choices else 0
+    return st.selectbox(label, choices, index=index, key=key)
+
 def stateless_table_picker(preselect_fqn: Optional[str]):
     """Simple, stateless DB → Schema → Table picker. Returns (db, schema, table, fqn)."""
     def split_fqn(fqn):
@@ -257,8 +272,16 @@ def render_config_editor():
                 checked = ("UNIQUE" in [(ec.check_type or "").upper() for ec in existing_checks if ec.column_name == col])
                 c_unique = st.checkbox("UNIQUE", value=checked, key=f"{sk}_chk_unique")
                 if c_unique and target_table:
-                    p_ignore_nulls = st.checkbox("Ignore NULLs", value=ex.get("params", {}).get("ignore_nulls", True), key=f"{sk}_p_un_ignore")
-                    sev = st.selectbox("Severity (UNIQUE)", ["ERROR", "WARN"], index=(0 if ex.get("severity","ERROR")=="ERROR" else 1), key=f"{sk}_sev_unique")
+                    p_ignore_nulls = st.checkbox(
+                        "Ignore NULLs",
+                        value=ex.get("params", {}).get("ignore_nulls", True),
+                        key=f"{sk}_p_un_ignore"
+                    )
+                    sev = severity_select(
+                        "Severity (UNIQUE)",
+                        key=f"{sk}_sev_unique",
+                        existing=ex.get("severity"),
+                    )
                     params = {"ignore_nulls": p_ignore_nulls}
                     rule, is_agg = build_rule_for_column_check(target_table, col, "UNIQUE", params)
                     check_rows.append(DQCheck(
@@ -279,7 +302,11 @@ def render_config_editor():
                 c_null = st.checkbox("NULL_COUNT", value=checked, key=f"{sk}_chk_nullcount")
                 if c_null and target_table:
                     max_nulls = st.number_input("Max NULL rows", min_value=0, value=int(ex.get("params", {}).get("max_nulls", 0)), key=f"{sk}_p_nc_max")
-                    sev = st.selectbox("Severity (NULL_COUNT)", ["ERROR", "WARN"], index=(0 if ex.get("severity","ERROR")=="ERROR" else 1), key=f"{sk}_sev_null")
+                    sev = severity_select(
+                        "Severity (NULL_COUNT)",
+                        key=f"{sk}_sev_null",
+                        existing=ex.get("severity"),
+                    )
                     params = {"max_nulls": int(max_nulls)}
                     rule, is_agg = build_rule_for_column_check(target_table, col, "NULL_COUNT", params)
                     check_rows.append(DQCheck(
@@ -301,7 +328,11 @@ def render_config_editor():
                 if c_minmax and target_table:
                     min_v = st.text_input("Min (inclusive)", value=str(ex.get("params", {}).get("min","")), key=f"{sk}_p_mm_min")
                     max_v = st.text_input("Max (inclusive)", value=str(ex.get("params", {}).get("max","")), key=f"{sk}_p_mm_max")
-                    sev = st.selectbox("Severity (MIN_MAX)", ["ERROR", "WARN"], index=(0 if ex.get("severity","ERROR")=="ERROR" else 1), key=f"{sk}_sev_mm")
+                    sev = severity_select(
+                        "Severity (MIN_MAX)",
+                        key=f"{sk}_sev_mm",
+                        existing=ex.get("severity"),
+                    )
                     params = {"min": min_v, "max": max_v}
                     rule, is_agg = build_rule_for_column_check(target_table, col, "MIN_MAX", params)
                     check_rows.append(DQCheck(
@@ -323,7 +354,11 @@ def render_config_editor():
                 if c_ws and target_table:
                     options = ["NO_LEADING_TRAILING","NO_INTERNAL_ONLY_WHITESPACE","NON_EMPTY_TRIMMED"]
                     mode = st.selectbox("Mode", options, index=options.index(ex.get("params", {}).get("mode", options[0])), key=f"{sk}_p_ws_mode")
-                    sev = st.selectbox("Severity (WHITESPACE)", ["ERROR", "WARN"], index=(0 if ex.get("severity","ERROR")=="ERROR" else 1), key=f"{sk}_sev_ws")
+                    sev = severity_select(
+                        "Severity (WHITESPACE)",
+                        key=f"{sk}_sev_ws",
+                        existing=ex.get("severity"),
+                    )
                     params = {"mode": mode}
                     rule, is_agg = build_rule_for_column_check(target_table, col, "WHITESPACE", params)
                     check_rows.append(DQCheck(
@@ -345,7 +380,11 @@ def render_config_editor():
                 if c_fmt and target_table:
                     regex = st.text_input("Regex (Snowflake RLIKE)", value=str(ex.get("params", {}).get("regex","")), key=f"{sk}_p_fmt_regex")
                     ratio = st.number_input("Min match ratio (0-1)", min_value=0.0, max_value=1.0, value=float(ex.get("params", {}).get("min_match_ratio",1.0)), step=0.01, key=f"{sk}_p_fmt_ratio")
-                    sev = st.selectbox("Severity (FORMAT_DISTRIBUTION)", ["ERROR", "WARN"], index=(0 if ex.get("severity","ERROR")=="ERROR" else 1), key=f"{sk}_sev_fmt")
+                    sev = severity_select(
+                        "Severity (FORMAT_DISTRIBUTION)",
+                        key=f"{sk}_sev_fmt",
+                        existing=ex.get("severity"),
+                    )
                     params = {"regex": regex, "min_match_ratio": float(ratio)}
                     rule, is_agg = build_rule_for_column_check(target_table, col, "FORMAT_DISTRIBUTION", params)
                     check_rows.append(DQCheck(
@@ -367,7 +406,11 @@ def render_config_editor():
                 if c_val and target_table:
                     allowed_csv = st.text_input("Allowed values (CSV)", value=str(ex.get("params", {}).get("allowed_values_csv","")), key=f"{sk}_p_val_csv")
                     ratio = st.number_input("Min in-set ratio (0-1)", min_value=0.0, max_value=1.0, value=float(ex.get("params", {}).get("min_match_ratio",1.0)), step=0.01, key=f"{sk}_p_val_ratio")
-                    sev = st.selectbox("Severity (VALUE_DISTRIBUTION)", ["ERROR", "WARN"], index=(0 if ex.get("severity","ERROR")=="ERROR" else 1), key=f"{sk}_sev_val")
+                    sev = severity_select(
+                        "Severity (VALUE_DISTRIBUTION)",
+                        key=f"{sk}_sev_val",
+                        existing=ex.get("severity"),
+                    )
                     params = {"allowed_values_csv": allowed_csv, "min_match_ratio": float(ratio)}
                     rule, is_agg = build_rule_for_column_check(target_table, col, "VALUE_DISTRIBUTION", params)
                     check_rows.append(DQCheck(
