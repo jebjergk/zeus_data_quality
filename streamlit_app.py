@@ -689,15 +689,21 @@ with st.sidebar:
         "🏠 Overview",
         use_container_width=True,
         type="primary" if current_page == "home" else "secondary",
+        key="nav_home",
     ):
-        st.session_state["page"] = "home"
-        st.session_state["cfg_mode"] = "list"
+        if st.session_state.get("page") != "home":
+            st.session_state["page"] = "home"
+            st.session_state["cfg_mode"] = "list"
+            st.rerun()
     if st.button(
         "⚙️ Configurations",
         use_container_width=True,
         type="primary" if current_page == "cfg" else "secondary",
+        key="nav_cfg",
     ):
-        st.session_state["page"] = "cfg"
+        if st.session_state.get("page") != "cfg":
+            st.session_state["page"] = "cfg"
+            st.rerun()
     st.divider()
     run_as_role = st.text_input("RUN_AS_ROLE", value=state.get("run_as_role") or "")
     dmf_role = st.text_input("DMF_ROLE", value=state.get("dmf_role") or "")
