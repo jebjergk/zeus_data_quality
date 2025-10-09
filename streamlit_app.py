@@ -174,10 +174,16 @@ def render_config_list():
     for i, cfg in enumerate(cfgs):
         active = (cfg.status or "").upper() == "ACTIVE"
         badge = f"<span class='badge {'badge-green' if active else ''}'>{cfg.status or '—'}</span>"
+        schedule_enabled = getattr(cfg, "schedule_enabled", True)
+        schedule_badge = (
+            f"<span class='badge {'badge-green' if schedule_enabled else ''}'>"
+            f"Schedule {'ON' if schedule_enabled else 'OFF'}"
+            "</span>"
+        )
         st.markdown("<div class='card'>", unsafe_allow_html=True)
         c1, c2, c3, c4 = st.columns([5, 3, 2, 2])
         with c1:
-            st.markdown(f"**{cfg.name}** {badge}", unsafe_allow_html=True)
+            st.markdown(f"**{cfg.name}** {badge} {schedule_badge}", unsafe_allow_html=True)
             st.markdown(f"<div class='small'>ID: <span class='kv'>{cfg.config_id}</span></div>", unsafe_allow_html=True)
         with c2:
             st.markdown(f"<div class='small'>Table:<br><span class='kv'>{cfg.target_table_fqn}</span></div>", unsafe_allow_html=True)
