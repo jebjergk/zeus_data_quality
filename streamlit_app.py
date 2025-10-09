@@ -437,6 +437,12 @@ def render_config_editor():
         )
         st.caption("Table will FAIL if no data in 30h or if today's volume is a statistical outlier.")
 
+        preview_counts = st.form_submit_button(
+            "Preview last 60 days row counts",
+            type="secondary",
+            help="Preview daily row counts using the selected timestamp column.",
+        )
+
         if target_table:
             fr_params = {"timestamp_column": ts_col, "max_age_minutes": 1800}
             fr_rule = build_rule_for_table_check(target_table, "FRESHNESS", fr_params)
@@ -490,6 +496,42 @@ def render_config_editor():
         with c2: save_draft = st.form_submit_button("Save as Draft")
         with c3: run_now_btn = st.form_submit_button("Run Now")
         with c4: delete_btn = st.form_submit_button("Delete", type="secondary")
+
+    safe_ts = None
+    if preview_counts:
+        if not session:
+            st.warning("No active Snowpark session — unable to preview row counts.")
+        elif not target_table:
+            st.warning("Select a target table to preview row counts.")
+        elif not (ts_col and ts_col.strip()):
+            st.warning("Enter a timestamp column to preview row counts.")
+        else:
+            safe_ts = "".join(ch for ch in ts_col.strip().replace('"', '') if ch.isalnum() or ch in ("_", "$"))
+            if not safe_ts:
+                st.warning("Timestamp column contains unsupported characters — unable to preview row counts.")
+    if preview_counts and safe_ts:
+        query = f"""
+            WITH days AS (
+                SELECT DATEADD(day, -seq4(), CURRENT_DATE()) AS day
+                FROM TABLE(GENERATOR(ROWCOUNT => 60))
+            ),
+            counts AS (
+                SELECT DATE_TRUNC('day', "{safe_ts}") AS day, COUNT(*) AS cnt
+                FROM {target_table}
+                WHERE "{safe_ts}" >= DATEADD(day, -59, CURRENT_DATE())
+                GROUP BY 1
+            )
+            SELECT d.day AS "day", COALESCE(c.cnt, 0) AS "cnt"
+            FROM days d
+            LEFT JOIN counts c ON c.day = d.day
+            ORDER BY d.day
+        """
+        try:
+            df = session.sql(query).to_pandas()
+        except Exception as exc:
+            st.error(f"Failed to preview row counts: {exc}")
+        else:
+            st.dataframe(df, use_container_width=True, hide_index=True, height=320)
 
     # After submit
     if apply_now or save_draft or run_now_btn or delete_btn:
