@@ -1,9 +1,11 @@
 SUPPORTED_COLUMN_CHECKS = ["UNIQUE","NULL_COUNT","MIN_MAX","WHITESPACE","FORMAT_DISTRIBUTION","VALUE_DISTRIBUTION"]
-SUPPORTED_TABLE_CHECKS  = ["FRESHNESS","ROW_COUNT"]
+SUPPORTED_TABLE_CHECKS  = ["FRESHNESS","ROW_COUNT","ROW_COUNT_ANOMALY"]
+
 
 def _q(ident: str) -> str:
     parts = [p.strip('"') for p in ident.split('.')]
     return '.'.join([f'"{p}"' for p in parts])
+
 
 def build_rule_for_column_check(fqn: str, col: str, ctype: str, params: dict):
     colq = f'"{col}"'
@@ -45,13 +47,56 @@ def build_rule_for_column_check(fqn: str, col: str, ctype: str, params: dict):
         return f"({colq} IN ({quoted}))", False
     return "(TRUE)", False
 
+
 def build_rule_for_table_check(fqn: str, ttype: str, params: dict) -> str:
     ttype = (ttype or "").upper()
     if ttype == "FRESHNESS":
         ts_col = params.get("timestamp_column", "LOAD_TIMESTAMP")
         max_age = int(params.get("max_age_minutes", 1920))
-        return f"SELECT TIMESTAMPDIFF('minute', MAX(\"{ts_col}\"), CURRENT_TIMESTAMP()) <= {max_age} AS OK FROM {_q(fqn)}"
+        return "\n".join([
+            f"SELECT (COUNT(*) > 0 AND COUNT(\"{ts_col}\") > 0 AND",
+            f"        TIMESTAMPDIFF('minute', MAX(\"{ts_col}\"), CURRENT_TIMESTAMP()) <= {max_age}) AS OK",
+            f"FROM {_q(fqn)}",
+        ])
     if ttype == "ROW_COUNT":
         min_rows = int(params.get("min_rows", 1))
         return f"SELECT COUNT(*) >= {min_rows} AS OK FROM {_q(fqn)}"
+    if ttype == "ROW_COUNT_ANOMALY":
+        ts_col = params.get("timestamp_column", "LOAD_TIMESTAMP")
+        lookback_days = int(params.get("lookback_days", 28))
+        sensitivity = float(params.get("sensitivity", 3.0))
+        min_history_days = int(params.get("min_history_days", 7))
+        table_name = _q(fqn)
+        return "\n".join([
+            "WITH history AS (",
+            f"    SELECT DATE_TRUNC('day', \"{ts_col}\") AS day, COUNT(*) AS c",
+            f"    FROM {table_name}",
+            f"    WHERE \"{ts_col}\" IS NOT NULL",
+            f"      AND \"{ts_col}\" >= DATEADD('day', -{lookback_days}, CURRENT_DATE)",
+            f"      AND DATE(\"{ts_col}\") < CURRENT_DATE",
+            "    GROUP BY 1",
+            "), aggregates AS (",
+            "    SELECT",
+            "        COUNT(*) AS history_days,",
+            "        APPROX_PERCENTILE(c, 0.5) AS median_c",
+            "    FROM history",
+            "), mad_calc AS (",
+            "    SELECT",
+            "        APPROX_PERCENTILE(ABS(h.c - agg.median_c), 0.5) AS mad",
+            "    FROM history h",
+            "    CROSS JOIN aggregates agg",
+            "), today AS (",
+            f"    SELECT COUNT(*) AS c_today",
+            f"    FROM {table_name}",
+            f"    WHERE \"{ts_col}\" IS NOT NULL",
+            f"      AND DATE(\"{ts_col}\") = CURRENT_DATE",
+            ")",
+            "SELECT (",
+            f"    aggregates.history_days >= {min_history_days}",
+            f"    AND COALESCE(ABS(today.c_today - aggregates.median_c) / NULLIF(1.4826 * mad_calc.mad, 0) <= {sensitivity}, FALSE)",
+            ") AS OK",
+            "FROM aggregates",
+            "CROSS JOIN mad_calc",
+            "CROSS JOIN today",
+        ])
     return "SELECT TRUE AS OK"
