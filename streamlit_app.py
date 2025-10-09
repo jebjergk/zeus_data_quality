@@ -589,8 +589,11 @@ def render_config_editor():
             summary_lines: List[str] = []
             for r in results["checks"]:
                 agg = " (aggregate)" if r.get("aggregate") else ""
-                st.write(f"**{r['check_id']}** — {r.get('type','')} — failures: {r['failures']}{agg}")
-                summary_lines.append(f"{r['check_id']} — {r.get('type','')} — failures: {r['failures']}{agg}")
+                r_type = r.get("type", "")
+                if r_type == "ROW_COUNT_ANOMALY":
+                    r_type = f"{r_type} (anomaly)"
+                st.write(f"**{r['check_id']}** — {r_type} — failures: {r['failures']}{agg}")
+                summary_lines.append(f"{r['check_id']} — {r_type} — failures: {r['failures']}{agg}")
                 if r.get("sample"):
                     st.dataframe(r["sample"])
             if summary_lines:
