@@ -48,7 +48,7 @@ def build_rule_for_column_check(fqn: str, col: str, ctype: str, params: dict):
     return "(TRUE)", False
 
 
-def build_rule_for_table_check(fqn: str, ttype: str, params: dict) -> str:
+def build_rule_for_table_check(fqn: str, ttype: str, params: dict):
     ttype = (ttype or "").upper()
     if ttype == "FRESHNESS":
         ts_col = params.get("timestamp_column", "LOAD_TIMESTAMP")
@@ -57,10 +57,10 @@ def build_rule_for_table_check(fqn: str, ttype: str, params: dict) -> str:
             f"SELECT (COUNT(*) > 0 AND COUNT(\"{ts_col}\") > 0 AND",
             f"        TIMESTAMPDIFF('minute', MAX(\"{ts_col}\"), CURRENT_TIMESTAMP()) <= {max_age}) AS OK",
             f"FROM {_q(fqn)}",
-        ])
+        ]), True
     if ttype == "ROW_COUNT":
         min_rows = int(params.get("min_rows", 1))
-        return f"SELECT COUNT(*) >= {min_rows} AS OK FROM {_q(fqn)}"
+        return f"SELECT COUNT(*) >= {min_rows} AS OK FROM {_q(fqn)}", True
     if ttype == "ROW_COUNT_ANOMALY":
         ts_col = params.get("timestamp_column", "LOAD_TIMESTAMP")
         lookback_days = int(params.get("lookback_days", 28))
@@ -98,5 +98,5 @@ def build_rule_for_table_check(fqn: str, ttype: str, params: dict) -> str:
             "FROM aggregates",
             "CROSS JOIN mad_calc",
             "CROSS JOIN today",
-        ])
-    return "SELECT TRUE AS OK"
+        ]), True
+    return "SELECT TRUE AS OK", True
