@@ -226,6 +226,26 @@ def render_config_editor():
     st.info("Table-level checks **FRESHNESS** and **ROW_COUNT_ANOMALY** are automatically included.")
 
     # -------- Form --------
+    # Pre-populate table-level defaults from existing checks / state
+    existing_table_params = {}
+    for ec in existing_checks:
+        if not ec.column_name and ec.params_json:
+            try:
+                existing_table_params[(ec.check_type or "").upper()] = json.loads(ec.params_json)
+            except Exception:
+                existing_table_params[(ec.check_type or "").upper()] = {}
+
+    freshness_defaults = existing_table_params.get("FRESHNESS", {})
+    ts_default = freshness_defaults.get("timestamp_column") or "LOAD_TIMESTAMP"
+
+    if target_table:
+        last_target = st.session_state.get("_dq_table_ts_target")
+        if last_target != target_table:
+            st.session_state["_dq_table_ts_col"] = ts_default
+            st.session_state["_dq_table_ts_target"] = target_table
+    if "_dq_table_ts_col" not in st.session_state:
+        st.session_state["_dq_table_ts_col"] = ts_default
+
     with st.form("cfg_form", clear_on_submit=False):
         st.subheader("Configuration")
         name = st.text_input("Name", value=(cfg.name if cfg else ""))
@@ -410,7 +430,11 @@ def render_config_editor():
 
         # Table-level (always)
         st.markdown("### Table-level checks (always included)")
-        ts_col = st.text_input("Timestamp column for table checks", value="LOAD_TIMESTAMP")
+        ts_col = st.text_input(
+            "Timestamp column for table checks",
+            key="_dq_table_ts_col",
+            value=st.session_state.get("_dq_table_ts_col", ts_default),
+        )
         st.caption("Table will FAIL if no data in 30h or if today's volume is a statistical outlier.")
 
         if target_table:
