@@ -228,15 +228,35 @@ def render_config_editor():
     # -------- Form --------
     # Pre-populate table-level defaults from existing checks / state
     existing_table_params = {}
+    legacy_row_count_params: Dict[str, object] = {}
     for ec in existing_checks:
         if not ec.column_name and ec.params_json:
+            key = (ec.check_type or "").upper()
             try:
-                existing_table_params[(ec.check_type or "").upper()] = json.loads(ec.params_json)
+                parsed_params = json.loads(ec.params_json)
             except Exception:
-                existing_table_params[(ec.check_type or "").upper()] = {}
+                parsed_params = {}
+
+            if key == "ROW_COUNT":
+                legacy_row_count_params = parsed_params or {}
+                continue
+
+            existing_table_params[key] = parsed_params
 
     freshness_defaults = existing_table_params.get("FRESHNESS", {})
-    ts_default = freshness_defaults.get("timestamp_column") or "LOAD_TIMESTAMP"
+    ts_default = (
+        freshness_defaults.get("timestamp_column")
+        or legacy_row_count_params.get("timestamp_column")
+        or "LOAD_TIMESTAMP"
+    )
+
+    if "ROW_COUNT_ANOMALY" not in existing_table_params:
+        existing_table_params["ROW_COUNT_ANOMALY"] = {
+            "timestamp_column": ts_default,
+            "lookback_days": 28,
+            "sensitivity": 3.0,
+            "min_history_days": 7,
+        }
 
     if target_table:
         last_target = st.session_state.get("_dq_table_ts_target")
