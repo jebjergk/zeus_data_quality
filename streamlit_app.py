@@ -266,6 +266,8 @@ def render_config_editor():
     if "_dq_table_ts_col" not in st.session_state:
         st.session_state["_dq_table_ts_col"] = ts_default
 
+    preview_counts = False
+
     with st.form("cfg_form", clear_on_submit=False):
         st.subheader("Configuration")
         name = st.text_input("Name", value=(cfg.name if cfg else ""))
