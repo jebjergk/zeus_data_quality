@@ -36,6 +36,13 @@ st.markdown("""
 .card { border:1px solid #e7ebf3; border-radius:12px; padding:.9rem 1rem; background:#fff; box-shadow:0 1px 2px rgba(12,18,28,.04); }
 .small { font-size:.85rem; color:#6b7280; }
 .kv { color:#111827; font-weight:600; }
+section[data-testid="stSidebar"] .stButton>button {
+ width:100%;
+ border-radius:10px;
+}
+section[data-testid="stSidebar"] .stButton {
+ margin-bottom:.4rem;
+}
 </style>
 """, unsafe_allow_html=True)
 
@@ -675,10 +682,22 @@ def render_config_editor():
 
 # ---------- Sidebar + routing ----------
 state = get_state()
+current_page = st.session_state.get("page", "home")
 with st.sidebar:
     st.header("Zeus DQ")
-    if st.button("🏠 Overview"): st.session_state["page"] = "home"; st.session_state["cfg_mode"] = "list"
-    if st.button("⚙️ Configurations"): st.session_state["page"] = "cfg"
+    if st.button(
+        "🏠 Overview",
+        use_container_width=True,
+        type="primary" if current_page == "home" else "secondary",
+    ):
+        st.session_state["page"] = "home"
+        st.session_state["cfg_mode"] = "list"
+    if st.button(
+        "⚙️ Configurations",
+        use_container_width=True,
+        type="primary" if current_page == "cfg" else "secondary",
+    ):
+        st.session_state["page"] = "cfg"
     st.divider()
     run_as_role = st.text_input("RUN_AS_ROLE", value=state.get("run_as_role") or "")
     dmf_role = st.text_input("DMF_ROLE", value=state.get("dmf_role") or "")
