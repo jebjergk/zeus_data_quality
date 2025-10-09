@@ -616,7 +616,7 @@ def render_config_editor():
                 st.info(info_msg)
                 remember("info", info_msg)
 
-        if run_now_btn or apply_now:
+        if run_now_btn:
             results = run_now(session, dq_cfg, checks_rebound)
             st.info("Run Now results:")
             summary_lines: List[str] = []
