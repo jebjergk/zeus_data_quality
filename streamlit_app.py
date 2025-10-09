@@ -50,6 +50,12 @@ section[data-testid="stSidebar"] .stButton {
 def _keyify(s: str) -> str:
     return "".join(ch if ch.isalnum() else "_" for ch in s).lower()
 
+def navigate_to(page: str) -> None:
+    """Update the current page selection in session state."""
+    st.session_state["page"] = page
+    if page == "home":
+        st.session_state["cfg_mode"] = "list"
+
 def stateless_table_picker(preselect_fqn: Optional[str]):
     """Simple, stateless DB → Schema → Table picker. Returns (db, schema, table, fqn)."""
     def split_fqn(fqn):
@@ -682,28 +688,29 @@ def render_config_editor():
 
 # ---------- Sidebar + routing ----------
 state = get_state()
+if "page" not in st.session_state:
+    st.session_state["page"] = "home"
+if "cfg_mode" not in st.session_state:
+    st.session_state["cfg_mode"] = "list"
 current_page = st.session_state.get("page", "home")
 with st.sidebar:
     st.header("Zeus DQ")
-    if st.button(
+    st.button(
         "🏠 Overview",
         use_container_width=True,
         type="primary" if current_page == "home" else "secondary",
         key="nav_home",
-    ):
-        if st.session_state.get("page") != "home":
-            st.session_state["page"] = "home"
-            st.session_state["cfg_mode"] = "list"
-            st.rerun()
-    if st.button(
+        on_click=navigate_to,
+        args=("home",),
+    )
+    st.button(
         "⚙️ Configurations",
         use_container_width=True,
         type="primary" if current_page == "cfg" else "secondary",
         key="nav_cfg",
-    ):
-        if st.session_state.get("page") != "cfg":
-            st.session_state["page"] = "cfg"
-            st.rerun()
+        on_click=navigate_to,
+        args=("cfg",),
+    )
     st.divider()
     run_as_role = st.text_input("RUN_AS_ROLE", value=state.get("run_as_role") or "")
     dmf_role = st.text_input("DMF_ROLE", value=state.get("dmf_role") or "")
