@@ -345,9 +345,22 @@ def render_config_editor():
                 checked = ("MIN_MAX" in [(ec.check_type or "").upper() for ec in existing_checks if ec.column_name == col])
                 c_minmax = st.checkbox("MIN_MAX", value=checked, key=f"{sk}_chk_minmax")
                 if c_minmax and target_table:
-                    min_v = st.text_input("Min (inclusive)", value=str(ex.get("params", {}).get("min","")), key=f"{sk}_p_mm_min")
-                    max_v = st.text_input("Max (inclusive)", value=str(ex.get("params", {}).get("max","")), key=f"{sk}_p_mm_max")
-                    sev = st.selectbox("Severity (MIN_MAX)", ["ERROR", "WARN"], index=(0 if ex.get("severity","ERROR")=="ERROR" else 1), key=f"{sk}_sev_mm")
+                    min_v = st.text_input(
+                        "Min (inclusive)",
+                        value=str(ex.get("params", {}).get("min", "")),
+                        key=f"{sk}_p_mm_min",
+                    )
+                    max_v = st.text_input(
+                        "Max (inclusive)",
+                        value=str(ex.get("params", {}).get("max", "")),
+                        key=f"{sk}_p_mm_max",
+                    )
+                    sev = st.selectbox(
+                        "Severity (MIN_MAX)",
+                        ["ERROR", "WARN"],
+                        index=(0 if ex.get("severity", "ERROR") == "ERROR" else 1),
+                        key=f"{sk}_sev_mm",
+                    )
                     params = {"min": min_v, "max": max_v}
                     rule, is_agg = build_rule_for_column_check(target_table, col, "MIN_MAX", params)
                     check_rows.append(DQCheck(
