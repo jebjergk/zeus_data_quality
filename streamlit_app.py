@@ -223,9 +223,29 @@ def render_config_editor():
     if not available_cols:
         safe_default = []
     st.multiselect("Columns to check", options=available_cols, default=safe_default, key="dq_cols_ms")
-    st.info("Table-level checks **FRESHNESS** and **ROW_COUNT** are automatically included.")
+    st.info("Table-level checks **FRESHNESS** and **ROW_COUNT_ANOMALY** are automatically included.")
 
     # -------- Form --------
+    # Pre-populate table-level defaults from existing checks / state
+    existing_table_params = {}
+    for ec in existing_checks:
+        if not ec.column_name and ec.params_json:
+            try:
+                existing_table_params[(ec.check_type or "").upper()] = json.loads(ec.params_json)
+            except Exception:
+                existing_table_params[(ec.check_type or "").upper()] = {}
+
+    freshness_defaults = existing_table_params.get("FRESHNESS", {})
+    ts_default = freshness_defaults.get("timestamp_column") or "LOAD_TIMESTAMP"
+
+    if target_table:
+        last_target = st.session_state.get("_dq_table_ts_target")
+        if last_target != target_table:
+            st.session_state["_dq_table_ts_col"] = ts_default
+            st.session_state["_dq_table_ts_target"] = target_table
+    if "_dq_table_ts_col" not in st.session_state:
+        st.session_state["_dq_table_ts_col"] = ts_default
+
     with st.form("cfg_form", clear_on_submit=False):
         st.subheader("Configuration")
         name = st.text_input("Name", value=(cfg.name if cfg else ""))
@@ -410,12 +430,15 @@ def render_config_editor():
 
         # Table-level (always)
         st.markdown("### Table-level checks (always included)")
-        ts_col = st.text_input("Freshness timestamp column", value="LOAD_TIMESTAMP")
-        max_age = st.number_input("Freshness max age (minutes)", min_value=1, value=1920)
-        min_rows = st.number_input("Minimum row count", min_value=0, value=1)
+        ts_col = st.text_input(
+            "Timestamp column for table checks",
+            key="_dq_table_ts_col",
+            value=st.session_state.get("_dq_table_ts_col", ts_default),
+        )
+        st.caption("Table will FAIL if no data in 30h or if today's volume is a statistical outlier.")
 
         if target_table:
-            fr_params = {"timestamp_column": ts_col, "max_age_minutes": int(max_age)}
+            fr_params = {"timestamp_column": ts_col, "max_age_minutes": 1800}
             fr_rule = build_rule_for_table_check(target_table, "FRESHNESS", fr_params)
             check_rows.append(DQCheck(
                 config_id=(cfg.config_id if cfg else "temp"),
@@ -425,15 +448,21 @@ def render_config_editor():
                 sample_rows=0, check_type="FRESHNESS",
                 params_json=json.dumps(fr_params)
             ))
-            rc_params = {"min_rows": int(min_rows)}
-            rc_rule = build_rule_for_table_check(target_table, "ROW_COUNT", rc_params)
+
+            anomaly_params = {
+                "timestamp_column": ts_col,
+                "lookback_days": 28,
+                "sensitivity": 3.0,
+                "min_history_days": 7,
+            }
+            anomaly_rule = build_rule_for_table_check(target_table, "ROW_COUNT_ANOMALY", anomaly_params)
             check_rows.append(DQCheck(
                 config_id=(cfg.config_id if cfg else "temp"),
-                check_id="TABLE_ROW_COUNT",
+                check_id="TABLE_ROW_COUNT_ANOMALY",
                 table_fqn=target_table, column_name=None,
-                rule_expr=f"AGG: {rc_rule}", severity="ERROR",
-                sample_rows=0, check_type="ROW_COUNT",
-                params_json=json.dumps(rc_params)
+                rule_expr=f"AGG: {anomaly_rule}", severity="ERROR",
+                sample_rows=0, check_type="ROW_COUNT_ANOMALY",
+                params_json=json.dumps(anomaly_params)
             ))
 
         st.markdown("### Schedule")
