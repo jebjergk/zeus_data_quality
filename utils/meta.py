@@ -26,6 +26,7 @@ __all__ = [
     "DQ_RUN_RESULTS_TBL",
     "DQConfig",
     "DQCheck",
+    "DQRun",
     "_q",
     "fq_table",
     "metadata_db_schema",
@@ -71,6 +72,17 @@ class DQCheck:
     sample_rows: int = 0
     check_type: Optional[str] = None
     params_json: Optional[str] = None
+
+@dataclass
+class DQRun:
+    run_id: Optional[str]
+    config_id: Optional[str]
+    check_id: Optional[str]
+    check_type: Optional[str]
+    run_ts: Optional[datetime]
+    failures: Optional[int]
+    ok: Optional[bool]
+    error_msg: Optional[str] = None
 
 # ---------- Helpers ----------
 def _q(ident: str) -> str:
