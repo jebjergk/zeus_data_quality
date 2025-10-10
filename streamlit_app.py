@@ -779,6 +779,9 @@ def render_monitor():
     search_text_value = filters_state.get("search", "")
     selected_configs: List[str] = []
 
+    config_widget_key = "mon_config_select"
+    check_types_widget_key = "mon_check_type_select"
+
     with st.form("mon_filters", clear_on_submit=False):
         simple_cols = st.columns([1, 1, 2])
 
@@ -802,17 +805,46 @@ def render_monitor():
             horizontal=True,
         )
 
+        config_col = simple_cols[2]
+        config_button_cols = config_col.columns([0.6, 0.6, 3])
+        select_all_configs_clicked = config_button_cols[0].form_submit_button(
+            "Select all", use_container_width=True
+        )
+        clear_configs_clicked = config_button_cols[1].form_submit_button(
+            "Clear", use_container_width=True
+        )
+
         stored_configs_state = filters_state.get("configs")
+        if select_all_configs_clicked:
+            stored_configs_state = None
+        elif clear_configs_clicked:
+            stored_configs_state = []
+
         if stored_configs_state is None:
             config_defaults = config_ids.copy()
         else:
             config_defaults = [cid for cid in stored_configs_state if cid in config_ids]
-        selected_configs = simple_cols[2].multiselect(
-            "Config(s)",
+
+        current_config_selection = st.session_state.get(config_widget_key)
+        if current_config_selection is None:
+            current_config_selection = config_defaults.copy()
+        else:
+            current_config_selection = [cid for cid in current_config_selection if cid in config_ids]
+        if select_all_configs_clicked:
+            current_config_selection = config_ids.copy()
+        elif clear_configs_clicked:
+            current_config_selection = []
+        st.session_state[config_widget_key] = current_config_selection
+
+        configs_label = f"Config(s) ({len(current_config_selection)} selected)"
+        selected_configs = config_col.multiselect(
+            configs_label,
             options=config_ids,
             default=config_defaults,
             format_func=lambda cid: (config_map.get(cid, {}).get("name") or cid),
+            key=config_widget_key,
         )
+        selected_configs = st.session_state.get(config_widget_key, selected_configs)
 
         time_from = datetime.utcnow() - timedelta(days=int(selected_days))
         base_results = fetch_run_results(
@@ -837,11 +869,39 @@ def render_monitor():
             default_check_types = available_types.copy()
         else:
             default_check_types = [t for t in stored_check_types_state if t in available_types]
+        select_all_types_clicked = False
+        clear_types_clicked = False
         with st.expander("Advanced filters", expanded=False):
+            type_button_cols = st.columns([0.6, 0.6, 3])
+            select_all_types_clicked = type_button_cols[0].form_submit_button(
+                "Select all", use_container_width=True
+            )
+            clear_types_clicked = type_button_cols[1].form_submit_button(
+                "Clear", use_container_width=True
+            )
+
+            current_type_selection = st.session_state.get(check_types_widget_key)
+            if current_type_selection is None:
+                current_type_selection = default_check_types.copy()
+            else:
+                current_type_selection = [
+                    t for t in current_type_selection if t in available_types
+                ]
+            if select_all_types_clicked:
+                current_type_selection = available_types.copy()
+            elif clear_types_clicked:
+                current_type_selection = []
+            st.session_state[check_types_widget_key] = current_type_selection
+
+            check_types_label = f"Check types ({len(current_type_selection)} selected)"
             selected_check_types = st.multiselect(
-                "Check types",
+                check_types_label,
                 options=available_types,
                 default=default_check_types,
+                key=check_types_widget_key,
+            )
+            selected_check_types = st.session_state.get(
+                check_types_widget_key, selected_check_types
             )
             search_text_value = st.text_input(
                 "Search",
@@ -851,20 +911,36 @@ def render_monitor():
 
         submitted = st.form_submit_button("Apply filters")
 
-    if submitted:
-        if config_ids and 0 < len(selected_configs) < len(config_ids):
-            configs_state_value = selected_configs.copy()
-        elif not config_ids and selected_configs:
-            configs_state_value = selected_configs.copy()
-        else:
-            configs_state_value = None
+    button_submitted = any(
+        [
+            select_all_configs_clicked,
+            clear_configs_clicked,
+            select_all_types_clicked,
+            clear_types_clicked,
+        ]
+    )
 
-        if available_types and selected_check_types and set(selected_check_types) != set(available_types):
-            check_types_state_value = selected_check_types.copy()
-        elif not available_types and selected_check_types:
-            check_types_state_value = selected_check_types.copy()
+    if submitted or button_submitted:
+        selected_configs = st.session_state.get(config_widget_key, selected_configs)
+        selected_check_types = st.session_state.get(
+            check_types_widget_key, selected_check_types
+        )
+
+        if config_ids:
+            if len(selected_configs) == len(config_ids):
+                configs_state_value = None
+            else:
+                configs_state_value = selected_configs.copy()
         else:
-            check_types_state_value = None
+            configs_state_value = selected_configs.copy()
+
+        if available_types:
+            if len(selected_check_types) == len(available_types):
+                check_types_state_value = None
+            else:
+                check_types_state_value = selected_check_types.copy()
+        else:
+            check_types_state_value = selected_check_types.copy()
 
         new_filters = {
             "days": int(selected_days),
