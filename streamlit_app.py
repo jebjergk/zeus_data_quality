@@ -724,15 +724,23 @@ def render_config_editor():
 
 
 def render_monitor():
-    st.header("Monitor")
+    header_container = st.container()
 
     if not session:
+        with header_container:
+            title_col, badge_col = st.columns([1, 0.3])
+            with title_col:
+                st.header("Monitor")
+            with badge_col:
+                badge_col.markdown(
+                    "<div style='text-align:right;padding-top:0.95rem;'><span class='badge'>0 filters active</span></div>",
+                    unsafe_allow_html=True,
+                )
         st.info("Monitoring requires an active Snowflake session.")
         return
 
     config_map = fetch_config_map(session)
     config_ids = sorted(config_map.keys())
-    default_configs = config_ids if config_ids else []
     known_check_types = [
         "FRESHNESS",
         "ROW_COUNT",
@@ -745,24 +753,68 @@ def render_monitor():
         "VALUE_DISTRIBUTION",
     ]
 
-    with st.container():
-        c1, c2, c3, c4 = st.columns([1, 1.8, 1.6, 1])
-        with c1:
-            lookback_days = st.selectbox(
-                "Lookback",
-                options=[7, 30, 60, 90],
-                index=1,
-                format_func=lambda d: f"Last {d} days",
-            )
-        with c2:
-            selected_configs = st.multiselect(
-                "Config(s)",
-                options=config_ids,
-                default=default_configs,
-                format_func=lambda cid: (config_map.get(cid, {}).get("name") or cid),
-            )
+    if "mon_filters" not in st.session_state:
+        st.session_state["mon_filters"] = {
+            "days": 30,
+            "status": "All",
+            "configs": None,
+            "check_types": None,
+            "search": "",
+        }
+    filters_state = st.session_state["mon_filters"]
+    filters_state.setdefault("days", 30)
+    filters_state.setdefault("status", "All")
+    if "configs" not in filters_state:
+        filters_state["configs"] = None
+    if "check_types" not in filters_state:
+        filters_state["check_types"] = None
+    filters_state.setdefault("search", "")
 
-        time_from = datetime.utcnow() - timedelta(days=int(lookback_days))
+    days_options = [7, 30, 60, 90]
+    status_options = ["All", "Failed only", "Passed only"]
+
+    base_results: List[Dict] = []
+    available_types: List[str] = known_check_types.copy()
+    selected_check_types: List[str] = []
+    search_text_value = filters_state.get("search", "")
+    selected_configs: List[str] = []
+
+    with st.form("mon_filters", clear_on_submit=False):
+        simple_cols = st.columns([1, 1, 2])
+
+        default_days = filters_state.get("days", 30)
+        if default_days not in days_options:
+            default_days = 30
+        selected_days = simple_cols[0].selectbox(
+            "Days",
+            options=days_options,
+            index=days_options.index(default_days),
+            format_func=lambda d: f"Last {d} days",
+        )
+
+        default_status = filters_state.get("status", "All")
+        if default_status not in status_options:
+            default_status = "All"
+        status_label = simple_cols[1].radio(
+            "Status",
+            options=status_options,
+            index=status_options.index(default_status),
+            horizontal=True,
+        )
+
+        stored_configs_state = filters_state.get("configs")
+        if stored_configs_state is None:
+            config_defaults = config_ids.copy()
+        else:
+            config_defaults = [cid for cid in stored_configs_state if cid in config_ids]
+        selected_configs = simple_cols[2].multiselect(
+            "Config(s)",
+            options=config_ids,
+            default=config_defaults,
+            format_func=lambda cid: (config_map.get(cid, {}).get("name") or cid),
+        )
+
+        time_from = datetime.utcnow() - timedelta(days=int(selected_days))
         base_results = fetch_run_results(
             session,
             time_from=time_from,
@@ -770,22 +822,96 @@ def render_monitor():
             limit=0,
         )
 
-        available_types = sorted({(r.get("check_type") or "").upper() for r in base_results if r.get("check_type")})
+        available_types = sorted(
+            {
+                (r.get("check_type") or "").upper()
+                for r in base_results
+                if r.get("check_type")
+            }
+        )
         if not available_types:
-            available_types = known_check_types
+            available_types = known_check_types.copy()
 
-        with c3:
-            selected_types = st.multiselect(
-                "Check type(s)",
+        stored_check_types_state = filters_state.get("check_types")
+        if stored_check_types_state is None:
+            default_check_types = available_types.copy()
+        else:
+            default_check_types = [t for t in stored_check_types_state if t in available_types]
+        with st.expander("Advanced filters", expanded=False):
+            selected_check_types = st.multiselect(
+                "Check types",
                 options=available_types,
-                default=available_types,
+                default=default_check_types,
             )
-        with c4:
-            status_label = st.selectbox(
-                "Status",
-                options=["All", "Failed only", "Passed only"],
-                index=0,
+            search_text_value = st.text_input(
+                "Search",
+                value=filters_state.get("search", ""),
+                placeholder="Search config name or check ID",
             )
+
+        submitted = st.form_submit_button("Apply filters")
+
+    if submitted:
+        if config_ids and 0 < len(selected_configs) < len(config_ids):
+            configs_state_value = selected_configs.copy()
+        elif not config_ids and selected_configs:
+            configs_state_value = selected_configs.copy()
+        else:
+            configs_state_value = None
+
+        if available_types and selected_check_types and set(selected_check_types) != set(available_types):
+            check_types_state_value = selected_check_types.copy()
+        elif not available_types and selected_check_types:
+            check_types_state_value = selected_check_types.copy()
+        else:
+            check_types_state_value = None
+
+        new_filters = {
+            "days": int(selected_days),
+            "status": status_label,
+            "configs": configs_state_value,
+            "check_types": check_types_state_value,
+            "search": search_text_value.strip(),
+        }
+        st.session_state["mon_filters"] = new_filters
+        filters = new_filters
+    else:
+        filters = st.session_state["mon_filters"]
+
+    status_label = filters.get("status", "All")
+    lookback_days = int(filters.get("days", 30))
+    search_query = (filters.get("search") or "").strip()
+    check_types_filter = filters.get("check_types")
+    configs_state = filters.get("configs")
+
+    if configs_state is None:
+        applied_configs = selected_configs if selected_configs else config_ids.copy()
+    else:
+        applied_configs = [cid for cid in configs_state if cid in config_ids]
+    active_filters = 0
+    if lookback_days != 30:
+        active_filters += 1
+    if status_label != "All":
+        active_filters += 1
+    if isinstance(configs_state, list) and configs_state:
+        if not config_ids or set(configs_state) != set(config_ids):
+            active_filters += 1
+    if isinstance(check_types_filter, list) and check_types_filter:
+        if set(check_types_filter) != set(available_types):
+            active_filters += 1
+    if search_query:
+        active_filters += 1
+
+    badge_label = "filter" if active_filters == 1 else "filters"
+    badge_html = (
+        f"<div style='text-align:right;padding-top:0.95rem;'><span class='badge'>{active_filters} {badge_label} active</span></div>"
+    )
+    with header_container:
+        title_col, badge_col = st.columns([1, 0.3])
+        with title_col:
+            st.header("Monitor")
+        with badge_col:
+            badge_col.markdown(badge_html, unsafe_allow_html=True)
 
     st.markdown("<div class='sf-hr'></div>", unsafe_allow_html=True)
 
@@ -798,13 +924,23 @@ def render_monitor():
         status_filter = None
 
     filtered_results = base_results
-    if selected_types:
-        selected_set = {t.upper() for t in selected_types}
-        filtered_results = [r for r in filtered_results if (r.get("check_type") or "").upper() in selected_set]
+    if check_types_filter:
+        selected_set = {t.upper() for t in check_types_filter}
+        filtered_results = [
+            r for r in filtered_results if (r.get("check_type") or "").upper() in selected_set
+        ]
     if status_filter == "fail":
         filtered_results = [r for r in filtered_results if r.get("ok") is not True]
     elif status_filter == "pass":
         filtered_results = [r for r in filtered_results if r.get("ok") is True]
+    if search_query:
+        sq = search_query.lower()
+        filtered_results = [
+            r
+            for r in filtered_results
+            if sq in ((config_map.get(r.get("config_id"), {}) or {}).get("name", "").lower())
+            or sq in ((r.get("check_id") or "").lower())
+        ]
 
     failed_rows = [r for r in filtered_results if r.get("ok") is not True]
     failed_checks_count = len(failed_rows)
@@ -818,8 +954,8 @@ def render_monitor():
 
     ts_data = fetch_timeseries_daily(
         session,
-        days=int(lookback_days),
-        config_ids=(selected_configs or None),
+        days=lookback_days,
+        config_ids=(applied_configs or None),
     )
     ts_df = pd.DataFrame(ts_data)
 
