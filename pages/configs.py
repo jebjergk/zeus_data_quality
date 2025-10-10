@@ -834,7 +834,9 @@ def _render_feedback() -> None:
     st.session_state["config_feedback"] = remaining
 
 
-def render_configs(session) -> None:
+def render_configs(session, app_version: str | None = None) -> None:
+    if app_version:
+        st.session_state.setdefault("app_version", app_version)
     _ensure_base_state()
     page_header(
         "Data Quality Configurations",

@@ -234,9 +234,11 @@ def _build_markdown(
     )
 
 
-def render_docs(session) -> None:
+def render_docs(session, app_version: str | None = None) -> None:
     """Render the documentation page."""
 
+    if app_version:
+        st.session_state.setdefault("app_version", app_version)
     page_header("Documentation", session=session, show_version=True)
     db, schema, fqns = _resolve_metadata_fqns(session)
     counts = _fetch_table_counts(session, [(label, data[1]) for label, data in fqns.items()])
