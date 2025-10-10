@@ -7,7 +7,7 @@ client is not installed.  Snowflake objects are loaded lazily via duck typing.
 
 from __future__ import annotations
 from dataclasses import dataclass
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
 try:
@@ -101,6 +101,27 @@ def _coerce_bool(value: Any) -> Optional[bool]:
         return bool(value)
     except Exception:
         return None
+
+
+def _coerce_date(value: Any) -> Optional[date]:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    if isinstance(value, str):
+        trimmed = value.strip()
+        if not trimmed:
+            return None
+        try:
+            return date.fromisoformat(trimmed)
+        except ValueError:
+            try:
+                return datetime.fromisoformat(trimmed).date()
+            except ValueError:
+                return None
+    return None
 
 def _parse_relation_name(name: str) -> Tuple[Optional[str], Optional[str], str]:
     parts = [p.strip('"') for p in name.split('.') if p]
@@ -386,12 +407,23 @@ def fetch_run_results(
 def fetch_timeseries_daily(
     session: Session,
     days: int = 60,
+    start_date: Optional[Any] = None,
+    end_date: Optional[Any] = None,
     config_ids: Optional[List[str]] = None,
 ) -> List[Dict[str, Any]]:
-    if not session or days <= 0:
+    if not session:
         return []
 
-    start_date = date.today() - timedelta(days=max(int(days) - 1, 0))
+    query_start = _coerce_date(start_date)
+    query_end = _coerce_date(end_date)
+
+    if query_start and query_end and query_start > query_end:
+        query_start, query_end = query_end, query_start
+
+    if not query_start:
+        if days <= 0:
+            return []
+        query_start = date.today() - timedelta(days=max(int(days) - 1, 0))
 
     sql = f"""
         SELECT
@@ -403,7 +435,11 @@ def fetch_timeseries_daily(
         FROM {_q(DQ_RUN_RESULTS_TBL)}
         WHERE RUN_TS >= ?
     """
-    params: List[Any] = [start_date]
+    params: List[Any] = [query_start]
+
+    if query_end:
+        sql += " AND RUN_TS < DATEADD(day, 1, ?)"
+        params.append(query_end)
 
     if config_ids:
         placeholders = ", ".join(["?"] * len(config_ids))
