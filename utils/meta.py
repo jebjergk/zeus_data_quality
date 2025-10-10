@@ -315,9 +315,21 @@ def fetch_run_results(
     check_types: Optional[List[str]] = None,
     ok: Optional[bool] = None,
     limit: int = 500,
+    *,
+    start_date: Optional[Any] = None,
+    end_date: Optional[Any] = None,
 ) -> List[Dict[str, Any]]:
     if not session:
         return []
+
+    # ``start_date`` and ``end_date`` were the original parameter names used by
+    # the Streamlit UI.  ``time_from``/``time_to`` were introduced later for
+    # clarity, so here we support both to remain backwards compatible with the
+    # existing calls from the app.
+    if start_date is not None and time_from is None:
+        time_from = start_date
+    if end_date is not None and time_to is None:
+        time_to = end_date
 
     sql = f"""
         SELECT RUN_ID, CONFIG_ID, CHECK_ID, CHECK_TYPE, RUN_TS, FAILURES, OK, ERROR_MSG
