@@ -6,7 +6,7 @@ from typing import Dict, Iterable, List, Tuple
 
 import streamlit as st
 
-from pages import ui_shared
+from .ui_shared import page_header
 from utils.checkdefs import SUPPORTED_COLUMN_CHECKS, SUPPORTED_TABLE_CHECKS
 from utils.meta import (
     DQ_CHECK_TBL,
@@ -237,7 +237,7 @@ def _build_markdown(
 def render_docs(session) -> None:
     """Render the documentation page."""
 
-    ui_shared.page_header("Documentation", session=session, show_version=True)
+    page_header("Documentation", session=session, show_version=True)
     db, schema, fqns = _resolve_metadata_fqns(session)
     counts = _fetch_table_counts(session, [(label, data[1]) for label, data in fqns.items()])
     verification_sql = _build_verification_sql(fqns)

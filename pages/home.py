@@ -3,13 +3,13 @@ from __future__ import annotations
 
 import streamlit as st
 
-from pages import ui_shared
+from .ui_shared import page_header
 
 
 def render_home(session) -> None:
     """Render the Zeus Data Quality overview page."""
 
-    ui_shared.page_header(
+    page_header(
         "Zeus Data Quality Overview",
         session=session,
         show_version=True,
