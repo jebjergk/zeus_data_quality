@@ -8,7 +8,7 @@ import altair as alt
 import pandas as pd
 import streamlit as st
 
-from .ui_shared import page_header
+from pages.ui_shared import page_header
 from utils.checkdefs import SUPPORTED_COLUMN_CHECKS, SUPPORTED_TABLE_CHECKS
 from utils.meta import fetch_config_map, fetch_run_results, fetch_timeseries_daily
 

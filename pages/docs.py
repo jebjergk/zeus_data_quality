@@ -6,7 +6,7 @@ from typing import Dict, Iterable, List, Tuple
 
 import streamlit as st
 
-from .ui_shared import page_header
+from pages.ui_shared import page_header
 from utils.checkdefs import SUPPORTED_COLUMN_CHECKS, SUPPORTED_TABLE_CHECKS
 from utils.meta import (
     DQ_CHECK_TBL,

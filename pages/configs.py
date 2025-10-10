@@ -5,7 +5,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import streamlit as st
 
-from .ui_shared import danger_note, divider, page_header, pill
+from pages.ui_shared import danger_note, divider, page_header, pill
 from services.configs import delete_config_full, save_config_and_checks
 from utils import dmfs
 from utils.checkdefs import (

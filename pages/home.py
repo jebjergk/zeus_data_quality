@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import streamlit as st
 
-from .ui_shared import page_header
+from pages.ui_shared import page_header
 
 
 def render_home(session, app_version: str | None = None) -> None:
