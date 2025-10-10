@@ -1,4 +1,5 @@
 import re
+from pathlib import Path
 
 import streamlit as st
 
@@ -17,39 +18,45 @@ st.set_page_config(page_title="Zeus Data Quality", layout="wide")
 GLOBAL_CSS = """
 <style>
 .sf-hr { height:1px; background:#e7ebf3; border:0; margin:.6rem 0 1rem 0; }
-.badge { display:inline-block; padding:.15rem .55rem; border-radius:999px; font-size:.75rem; font-weight:600;
- background:#e5f6fd; color:#055e86; border:1px solid #cbeefb; }
+.badge { display:inline-block; padding:.15rem .55rem; border-radius:999px; font-size:.75rem; font-weight:600; background:#e5f6fd; color:#055e86; border:1px solid #cbeefb; }
 .badge-green { background:#eafaf0; border-color:#d4f2df; color:#0a5c2b; }
 .card { border:1px solid #e7ebf3; border-radius:12px; padding:.9rem 1rem; background:#fff; box-shadow:0 1px 2px rgba(12,18,28,.04); }
 .small { font-size:.85rem; color:#6b7280; }
 .kv { color:#111827; font-weight:600; }
-section[data-testid="stSidebar"] .stButton>button {
- width:100%;
- border-radius:10px;
-}
-section[data-testid="stSidebar"] .stButton {
- margin-bottom:.4rem;
-}
-.top-nav {
- display:flex;
- gap:.5rem;
- margin-bottom:1.5rem;
-}
-.top-nav .stButton>button {
- border-radius:999px;
- padding:0.4rem 1.1rem;
-}
+.pill { display:inline-flex; align-items:center; padding:.2rem .65rem; border-radius:999px; font-size:.75rem; font-weight:600; background:#eef3ff; border:1px solid #d7e1ff; color:#1f3a8a; }
+.top-nav { display:flex; flex-wrap:wrap; gap:.5rem; margin-bottom:1.25rem; }
+.top-nav .stButton>button { border-radius:999px; padding:0.4rem 1.1rem; }
+section[data-testid="stSidebar"] .stButton>button { width:100%; border-radius:10px; }
+section[data-testid="stSidebar"] .stButton { margin-bottom:.4rem; }
+form[data-testid="stForm"][aria-label="mon_filters"] div[data-testid="stWidget"] { margin-bottom:0.4rem; }
+main .block-container { padding-top:1.25rem; }
 </style>
 """
 
-MONITOR_FILTER_CSS = """
-<style>
-form[data-testid="stForm"][aria-label="mon_filters"] div[data-testid="stWidget"] {
-    margin-bottom: 0.4rem;
-}
-.pill { display:inline-block; padding:2px 8px; border-radius:10px; font-size:12px; background:#eef3ff; }
-</style>
-"""
+
+def _read_version(path: str = "version.txt") -> str:
+    """Return the application version from file or a DEV fallback."""
+
+    version_path = Path(path)
+    try:
+        if version_path.is_file():
+            for line in version_path.read_text(encoding="utf-8").splitlines():
+                candidate = line.strip()
+                if candidate:
+                    return candidate
+    except OSError:
+        pass
+    return "DEV"
+
+
+APP_VERSION = _read_version()
+
+
+def get_app_version() -> str:
+    """Expose the resolved application version to downstream pages."""
+
+    return APP_VERSION
+
 
 st.markdown(GLOBAL_CSS, unsafe_allow_html=True)
 
@@ -106,11 +113,11 @@ for col, (label, page_key) in zip(nav_cols, nav_items):
 current_page = st.session_state.get("page", "home")
 
 if current_page == "configs":
-    configs.render_configs(session)
+    configs.render_configs(session, app_version=APP_VERSION)
 elif current_page == "monitor":
-    monitor.render_monitor(session)
+    monitor.render_monitor(session, app_version=APP_VERSION)
 elif current_page == "docs":
-    docs.render_docs(session)
+    docs.render_docs(session, app_version=APP_VERSION)
 else:
     st.session_state["page"] = "home"
-    home.render_home(session)
+    home.render_home(session, app_version=APP_VERSION)

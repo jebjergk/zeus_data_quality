@@ -268,9 +268,11 @@ def _render_results_table(results_df: pd.DataFrame, config_map: Dict[str, Dict[s
     )
 
 
-def render_monitor(session) -> None:
+def render_monitor(session, app_version: str | None = None) -> None:
     """Render the monitoring experience with filters, KPIs, charts, and run results."""
 
+    if app_version:
+        st.session_state.setdefault("app_version", app_version)
     page_header(
         "Monitor data quality runs",
         "Row checks have views; aggregates don’t.",

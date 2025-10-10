@@ -6,8 +6,11 @@ import streamlit as st
 from .ui_shared import page_header
 
 
-def render_home(session) -> None:
+def render_home(session, app_version: str | None = None) -> None:
     """Render the Zeus Data Quality overview page."""
+
+    if app_version:
+        st.session_state.setdefault("app_version", app_version)
 
     page_header(
         "Zeus Data Quality Overview",
