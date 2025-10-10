@@ -169,7 +169,11 @@ def render_config_list():
             else:
                 st.info(message)
     # Create button on right
-    _, _, create_col = st.columns([6, 2, 2])
+    _, monitor_col, create_col = st.columns([6, 2, 2])
+    with monitor_col:
+        if st.button("📊 Monitor", key="config_list_monitor_link"):
+            st.session_state["page"] = "monitor"
+            st.rerun()
     with create_col:
         if st.button("➕ Create"):
             st.session_state["cfg_mode"] = "edit"
