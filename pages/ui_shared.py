@@ -5,7 +5,25 @@ import html
 from datetime import datetime
 from typing import Optional
 
-import streamlit as st
+try:
+    import streamlit as st
+except ModuleNotFoundError:  # pragma: no cover - fallback for doc builds/tests
+    class _StreamlitStub:
+        """Minimal stub so helpers can be imported without Streamlit."""
+
+        secrets: dict[str, str] = {}
+        session_state: dict[str, object] = {}
+
+        def __getattr__(self, name):  # pragma: no cover - defensive guard
+            def _missing(*_args, **_kwargs):
+                raise RuntimeError(
+                    "Streamlit is required for UI rendering; install streamlit to use "
+                    f"`st.{name}()`"
+                )
+
+            return _missing
+
+    st = _StreamlitStub()
 
 try:  # pragma: no cover - optional metadata helper
     from utils.meta import metadata_db_schema
