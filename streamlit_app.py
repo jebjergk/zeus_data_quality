@@ -1,7 +1,11 @@
 import json
+import re
+from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 from uuid import uuid4
 
+import altair as alt
+import pandas as pd
 import streamlit as st
 
 # --- Snowpark session (works in Snowsight; safe locally) ---
@@ -16,7 +20,7 @@ from utils.meta import (
     DQConfig, DQCheck,
     list_configs, get_config, get_checks,
     list_databases, list_schemas, list_tables, list_columns,
-    fq_table,
+    fq_table, fetch_run_results, fetch_timeseries_daily, fetch_config_map,
 )
 from utils import schedules
 from services.configs import save_config_and_checks, delete_config_full
@@ -48,6 +52,11 @@ section[data-testid="stSidebar"] .stButton {
 # ---------- Helpers ----------
 def _keyify(s: str) -> str:
     return "".join(ch if ch.isalnum() else "_" for ch in s).lower()
+
+
+def _sanitize_id(s: str) -> str:
+    return re.sub(r"[^A-Z0-9_]", "_", (s or "").upper())
+
 
 def navigate_to(page: str) -> None:
     """Update the current page selection in session state."""
@@ -709,6 +718,223 @@ def render_config_editor():
         st.session_state["last_notices"] = post_submit_notices
         st.session_state["cfg_mode"] = "list"; st.rerun()
 
+
+def render_monitor():
+    st.header("Monitor")
+
+    if not session:
+        st.info("Monitoring requires an active Snowflake session.")
+        return
+
+    config_map = fetch_config_map(session)
+    config_ids = sorted(config_map.keys())
+    default_configs = config_ids if config_ids else []
+    known_check_types = [
+        "FRESHNESS",
+        "ROW_COUNT",
+        "ROW_COUNT_ANOMALY",
+        "UNIQUE",
+        "NULL_COUNT",
+        "MIN_MAX",
+        "WHITESPACE",
+        "FORMAT_DISTRIBUTION",
+        "VALUE_DISTRIBUTION",
+    ]
+
+    with st.container():
+        c1, c2, c3, c4 = st.columns([1, 1.8, 1.6, 1])
+        with c1:
+            lookback_days = st.selectbox(
+                "Lookback",
+                options=[7, 30, 60, 90],
+                index=1,
+                format_func=lambda d: f"Last {d} days",
+            )
+        with c2:
+            selected_configs = st.multiselect(
+                "Config(s)",
+                options=config_ids,
+                default=default_configs,
+                format_func=lambda cid: (config_map.get(cid, {}).get("name") or cid),
+            )
+
+        time_from = datetime.utcnow() - timedelta(days=int(lookback_days))
+        base_results = fetch_run_results(
+            session,
+            time_from=time_from,
+            config_ids=(selected_configs or None),
+            limit=0,
+        )
+
+        available_types = sorted({(r.get("check_type") or "").upper() for r in base_results if r.get("check_type")})
+        if not available_types:
+            available_types = known_check_types
+
+        with c3:
+            selected_types = st.multiselect(
+                "Check type(s)",
+                options=available_types,
+                default=available_types,
+            )
+        with c4:
+            status_label = st.selectbox(
+                "Status",
+                options=["All", "Failed only", "Passed only"],
+                index=0,
+            )
+
+    st.markdown("<div class='sf-hr'></div>", unsafe_allow_html=True)
+
+    status_filter: Optional[str]
+    if status_label == "Failed only":
+        status_filter = "fail"
+    elif status_label == "Passed only":
+        status_filter = "pass"
+    else:
+        status_filter = None
+
+    filtered_results = base_results
+    if selected_types:
+        selected_set = {t.upper() for t in selected_types}
+        filtered_results = [r for r in filtered_results if (r.get("check_type") or "").upper() in selected_set]
+    if status_filter == "fail":
+        filtered_results = [r for r in filtered_results if r.get("ok") is not True]
+    elif status_filter == "pass":
+        filtered_results = [r for r in filtered_results if r.get("ok") is True]
+
+    failed_rows = [r for r in filtered_results if r.get("ok") is not True]
+    failed_checks_count = len(failed_rows)
+    total_failure_rows = sum(int(r.get("failures") or 0) for r in filtered_results)
+    configs_affected = len({r.get("config_id") for r in failed_rows if r.get("config_id")})
+
+    k1, k2, k3 = st.columns(3)
+    k1.metric("Failed checks", failed_checks_count)
+    k2.metric("Total failures (rows)", total_failure_rows)
+    k3.metric("Configs affected", configs_affected)
+
+    ts_data = fetch_timeseries_daily(
+        session,
+        days=int(lookback_days),
+        config_ids=(selected_configs or None),
+    )
+    ts_df = pd.DataFrame(ts_data)
+
+    if filtered_results:
+        tmp_df = pd.DataFrame(filtered_results)
+        tmp_df["run_ts"] = pd.to_datetime(tmp_df["run_ts"])
+        tmp_df["run_date"] = tmp_df["run_ts"].dt.date
+        tmp_df["ok"] = tmp_df["ok"].fillna(False).astype(bool)
+        tmp_df["failures"] = tmp_df["failures"].fillna(0).astype(int)
+        agg = (
+            tmp_df.groupby("run_date")
+            .agg(
+                fails=("ok", lambda x: int((~x.astype(bool)).sum())),
+                failure_rows=("failures", "sum"),
+            )
+            .reset_index()
+        )
+        agg["run_date"] = pd.to_datetime(agg["run_date"])
+        ts_df = agg
+    elif not ts_df.empty:
+        ts_df["run_date"] = pd.to_datetime(ts_df["run_date"])
+
+    st.subheader("Daily trend")
+    if ts_df.empty:
+        st.info("No results available for the selected filters.")
+    else:
+        ts_df = ts_df.sort_values("run_date")
+        fails_chart = alt.Chart(ts_df).mark_line().encode(
+            x=alt.X("run_date:T", title="Run date"),
+            y=alt.Y("fails:Q", title="Failed checks"),
+        )
+        fails_points = (
+            alt.Chart(ts_df)
+            .transform_filter("datum.fails > 0")
+            .mark_point(size=60)
+            .encode(x="run_date:T", y="fails:Q")
+        )
+        st.altair_chart(fails_chart + fails_points, use_container_width=True)
+
+        failure_rows_chart = alt.Chart(ts_df).mark_line().encode(
+            x=alt.X("run_date:T", title="Run date"),
+            y=alt.Y("failure_rows:Q", title="Failure rows"),
+        )
+        failure_rows_points = (
+            alt.Chart(ts_df)
+            .transform_filter("datum.failure_rows > 0")
+            .mark_point(size=60)
+            .encode(x="run_date:T", y="failure_rows:Q")
+        )
+        st.altair_chart(failure_rows_chart + failure_rows_points, use_container_width=True)
+
+    st.subheader("Recent results")
+    if not filtered_results:
+        st.info("No run results match the selected filters.")
+        return
+
+    db_schema_cache: Dict[str, Optional[str]] = {}
+
+    def _relation_prefix(config_id: Optional[str]) -> Optional[str]:
+        if not config_id:
+            return None
+        if config_id in db_schema_cache:
+            return db_schema_cache[config_id]
+        relation = (config_map.get(config_id, {}) or {}).get("table") or ""
+        parts = [p.strip('"') for p in relation.split(".") if p]
+        prefix = None
+        if len(parts) >= 2:
+            prefix = f"{parts[0]}.{parts[1]}"
+        db_schema_cache[config_id] = prefix
+        return prefix
+
+    def _is_row_check(check_type: Optional[str]) -> bool:
+        ctype = (check_type or "").upper()
+        return ctype not in {"FRESHNESS", "ROW_COUNT", "ROW_COUNT_ANOMALY"}
+
+    table_rows: List[Dict[str, Optional[str]]] = []
+    for row in filtered_results[:200]:
+        cfg_id = row.get("config_id")
+        check_type = (row.get("check_type") or "").upper()
+        view_name = None
+        if row.get("ok") is False and _is_row_check(check_type):
+            prefix = _relation_prefix(cfg_id)
+            if prefix:
+                view_name = f"{prefix}.DQ_{_sanitize_id(cfg_id)}_{_sanitize_id(row.get('check_id'))}_FAILS"
+        ok_value = True if row.get("ok") is True else False
+        table_rows.append(
+            {
+                "timestamp": row.get("run_ts"),
+                "config": config_map.get(cfg_id, {}).get("name") or cfg_id,
+                "check_id": row.get("check_id"),
+                "check_type": check_type,
+                "failures": int(row.get("failures") or 0),
+                "ok": ok_value,
+                "error_msg": row.get("error_msg"),
+                "failure_view": view_name,
+            }
+        )
+
+    results_df = pd.DataFrame(table_rows)
+    results_df.sort_values("timestamp", ascending=False, inplace=True)
+
+    st.dataframe(
+        results_df,
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "timestamp": st.column_config.DatetimeColumn("Timestamp"),
+            "config": st.column_config.TextColumn("Config"),
+            "check_id": st.column_config.TextColumn("Check ID"),
+            "check_type": st.column_config.TextColumn("Check type"),
+            "failures": st.column_config.NumberColumn("Failures"),
+            "ok": st.column_config.CheckboxColumn("OK"),
+            "error_msg": st.column_config.TextColumn("Error message", width="medium"),
+            "failure_view": st.column_config.TextColumn("Failure view", width="large"),
+        },
+    )
+    st.caption("Row checks have views; aggregates do not.")
+
+
 # ---------- Sidebar + routing ----------
 state = get_state()
 if "page" not in st.session_state:
@@ -734,6 +960,14 @@ with st.sidebar:
         on_click=navigate_to,
         args=("cfg",),
     )
+    st.button(
+        "📊 Monitor",
+        use_container_width=True,
+        type="primary" if current_page == "monitor" else "secondary",
+        key="nav_monitor",
+        on_click=navigate_to,
+        args=("monitor",),
+    )
     st.divider()
     run_as_role = st.text_input("RUN_AS_ROLE", value=state.get("run_as_role") or "")
     dmf_role = st.text_input("DMF_ROLE", value=state.get("dmf_role") or "")
@@ -744,5 +978,7 @@ if st.session_state.get("page","home") == "cfg":
         render_config_list()
     else:
         render_config_editor()
+elif st.session_state.get("page") == "monitor":
+    render_monitor()
 else:
     render_home()
