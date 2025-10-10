@@ -8,6 +8,7 @@ import altair as alt
 import pandas as pd
 import streamlit as st
 
+from pages import ui_shared
 from utils import checkdefs
 from utils.meta import fetch_config_map, fetch_run_results, fetch_timeseries_daily
 
@@ -267,8 +268,12 @@ def _render_results_table(results_df: pd.DataFrame, config_map: Dict[str, Dict[s
 def render_monitor(session) -> None:
     """Render the monitoring experience with filters, KPIs, charts, and run results."""
 
-    st.title("Monitor data quality runs")
-    st.caption("Row checks have views; aggregates don’t.")
+    ui_shared.page_header(
+        "Monitor data quality runs",
+        "Row checks have views; aggregates don’t.",
+        session=session,
+        show_version=True,
+    )
 
     _init_state()
     filters = dict(st.session_state.get("monitor_filters", {}))

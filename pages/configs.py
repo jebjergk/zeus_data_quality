@@ -5,6 +5,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import streamlit as st
 
+from pages import ui_shared
 from utils import checkdefs, dmfs, meta, schedules
 from services import configs as configs_service
 
@@ -205,7 +206,8 @@ def _render_config_card(session, cfg: meta.DQConfig) -> None:
         )
         meta_row = []
         if cfg.status:
-            meta_row.append(f"<span class='badge{' badge-green' if (cfg.status or '').upper() == 'ACTIVE' else ''}'>{cfg.status}</span>")
+            tone = "success" if (cfg.status or "").upper() == "ACTIVE" else "info"
+            meta_row.append(ui_shared.pill(cfg.status, tone=tone))
         if cfg.owner:
             meta_row.append(f"<span class='small'>Owner: {cfg.owner}</span>")
         if cfg.run_as_role:
@@ -254,7 +256,7 @@ def _render_list_panel(session) -> None:
         st.caption("No configurations found with the current filters.")
     for cfg in filtered:
         _render_config_card(session, cfg)
-        st.markdown("<hr class='sf-hr' />", unsafe_allow_html=True)
+        ui_shared.divider()
 
 
 def _ensure_table_picker_defaults() -> None:
@@ -815,8 +817,12 @@ def _render_feedback() -> None:
 
 def render_configs(session) -> None:
     _ensure_base_state()
-    st.title("Data Quality Configurations")
-    st.caption("Manage data quality rules, schedules, and monitoring targets.")
+    ui_shared.page_header(
+        "Data Quality Configurations",
+        "Manage data quality rules, schedules, and monitoring targets.",
+        session=session,
+        show_version=True,
+    )
 
     list_col, editor_col = st.columns([1.2, 2.0])
     with list_col:
@@ -830,7 +836,7 @@ def render_configs(session) -> None:
             is_new = st.session_state.get("editor_is_new", False)
             _render_feedback()
             _render_general_details(is_new)
-            st.markdown("---")
+            ui_shared.divider()
             _render_target_picker(session)
             _render_column_selector(session)
             target_fqn = st.session_state.get("editor_target_fqn") or st.session_state.get("editor_target_fqn_display")
@@ -838,8 +844,8 @@ def render_configs(session) -> None:
                 _render_column_checks_section()
                 _render_table_checks_section()
             else:
-                st.warning("Select a target table to configure checks.")
-            st.markdown("---")
+                ui_shared.danger_note("Select a target table to configure checks.")
+            ui_shared.divider()
             _render_schedule_section()
             st.checkbox("Attach DMF views after saving", key="cfg_apply_dmfs", help="Applies check views immediately when saving.")
             _render_run_now(session)
