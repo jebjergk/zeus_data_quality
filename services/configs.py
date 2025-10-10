@@ -1,19 +1,25 @@
+# services/configs.py
 from contextlib import contextmanager
-from typing import Any, Dict, List
-from utils.meta import DQConfig, DQCheck
+from typing import Dict, Any, List
+
+try:
+    from snowflake.snowpark import Session
+except Exception:
+    Session = Any  # type: ignore
+
 from utils import dmfs, meta
 
 @contextmanager
-def transaction(session):
-    session.sql("BEGIN").collect()
+def transaction(session: Session):
     try:
+        session.sql("BEGIN").collect()
         yield
         session.sql("COMMIT").collect()
     except Exception:
         session.sql("ROLLBACK").collect()
         raise
 
-def save_config_and_checks(session, cfg: DQConfig, checks: List[DQCheck], apply_now: bool) -> Dict[str, Any]:
+def save_config_and_checks(session: Session, cfg: meta.DQConfig, checks: List[meta.DQCheck], apply_now: bool) -> Dict[str, Any]:
     with transaction(session):
         meta.upsert_config(session, cfg)
         meta.upsert_checks(session, checks)
@@ -23,7 +29,7 @@ def save_config_and_checks(session, cfg: DQConfig, checks: List[DQCheck], apply_
             result["dmfs_attached"] = created
     return result
 
-def delete_config_full(session, config_id: str) -> Dict[str, Any]:
+def delete_config_full(session: Session, config_id: str) -> Dict[str, Any]:
     checks = meta.get_checks(session, config_id)
     dropped = dmfs.detach_dmfs_safe(session, config_id, checks)
     meta.delete_config(session, config_id)
