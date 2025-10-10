@@ -123,7 +123,7 @@ Zeus DQ lets you define, apply, and schedule **data quality checks** directly in
 - Column checks: **UNIQUE**, **NULL_COUNT**, **MIN_MAX**, **WHITESPACE**, **FORMAT_DISTRIBUTION**, **VALUE_DISTRIBUTION**
 - Table checks (always included): **FRESHNESS**, **ROW_COUNT**
 
-**Attach** creates per-check *views of failing rows*; **Run Now** evaluates checks ad-hoc; a daily **Task** runs at 08:00 Europe/Berlin.
+**Attach** creates per-check *views of failing rows*; **Run Now** executes via the Snowflake task. Results are written to DQ_RUN_RESULTS. Open 📊 Monitor to review outcomes. A daily **Task** runs at 08:00 Europe/Berlin.
 """)
     st.markdown("<div class='sf-hr'></div>", unsafe_allow_html=True)
 
