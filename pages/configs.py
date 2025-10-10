@@ -5,13 +5,32 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import streamlit as st
 
-from pages import ui_shared
-from utils import checkdefs, dmfs, meta, schedules
-from services import configs as configs_service
+from .ui_shared import danger_note, divider, page_header, pill
+from services.configs import delete_config_full, save_config_and_checks
+from utils import dmfs
+from utils.checkdefs import (
+    SUPPORTED_COLUMN_CHECKS,
+    SUPPORTED_TABLE_CHECKS,
+    build_rule_for_column_check,
+    build_rule_for_table_check,
+)
+from utils.meta import (
+    DQCheck,
+    DQConfig,
+    fq_table,
+    get_checks,
+    get_config,
+    list_columns,
+    list_configs,
+    list_databases,
+    list_schemas,
+    list_tables,
+)
+from utils.schedules import ensure_task_for_config
 
 NEW_CONFIG_ID = "__new__"
-COLUMN_CHECK_TYPES = [c.upper() for c in checkdefs.SUPPORTED_COLUMN_CHECKS]
-TABLE_CHECK_TYPES = [c.upper() for c in checkdefs.SUPPORTED_TABLE_CHECKS]
+COLUMN_CHECK_TYPES = [c.upper() for c in SUPPORTED_COLUMN_CHECKS]
+TABLE_CHECK_TYPES = [c.upper() for c in SUPPORTED_TABLE_CHECKS]
 SEVERITY_OPTIONS = ["ERROR", "WARN"]
 
 
@@ -165,7 +184,7 @@ def _trigger_editor_load(config_id: Optional[str], is_new: bool) -> None:
     st.session_state["editor_needs_load"] = True
 
 
-def _filter_sort_configs(configs: List[meta.DQConfig]) -> List[meta.DQConfig]:
+def _filter_sort_configs(configs: List[DQConfig]) -> List[DQConfig]:
     search = (st.session_state.get("config_search") or "").strip().lower()
     sort_option = st.session_state.get("config_sort") or "Status & name"
 
@@ -197,7 +216,7 @@ def _filter_sort_configs(configs: List[meta.DQConfig]) -> List[meta.DQConfig]:
     return configs
 
 
-def _render_config_card(session, cfg: meta.DQConfig) -> None:
+def _render_config_card(session, cfg: DQConfig) -> None:
     with st.container():
         st.markdown(
             f"**{cfg.name}** \n"
@@ -207,7 +226,7 @@ def _render_config_card(session, cfg: meta.DQConfig) -> None:
         meta_row = []
         if cfg.status:
             tone = "success" if (cfg.status or "").upper() == "ACTIVE" else "info"
-            meta_row.append(ui_shared.pill(cfg.status, tone=tone))
+            meta_row.append(pill(cfg.status, tone=tone))
         if cfg.owner:
             meta_row.append(f"<span class='small'>Owner: {cfg.owner}</span>")
         if cfg.run_as_role:
@@ -223,7 +242,7 @@ def _render_config_card(session, cfg: meta.DQConfig) -> None:
         if button_cols[2].button("Delete", key=f"delete_{cfg.config_id}", use_container_width=True, type="secondary"):
             if session:
                 try:
-                    result = configs_service.delete_config_full(session, cfg.config_id)
+                    result = delete_config_full(session, cfg.config_id)
                     st.session_state["config_feedback"].append(
                         ("success", f"Deleted configuration {cfg.config_id} (dropped {len(result.get('dmfs_dropped', []))} views)")
                     )
@@ -240,7 +259,7 @@ def _render_list_panel(session) -> None:
     st.subheader("Configurations")
     if not session:
         st.info("Connect to Snowflake to load and manage configurations.")
-    configs = meta.list_configs(session) if session else []
+    configs = list_configs(session) if session else []
 
     st.text_input("Search", key="config_search", placeholder="Name, table, owner…")
     st.selectbox(
@@ -256,7 +275,7 @@ def _render_list_panel(session) -> None:
         st.caption("No configurations found with the current filters.")
     for cfg in filtered:
         _render_config_card(session, cfg)
-        ui_shared.divider()
+        divider()
 
 
 def _ensure_table_picker_defaults() -> None:
@@ -271,8 +290,8 @@ def _load_editor_state(session, config_id: Optional[str], is_new: bool) -> None:
     st.session_state["col_checks_state"] = {}
     st.session_state["table_checks_state"] = {}
 
-    cfg_obj: Optional[meta.DQConfig] = None
-    checks: List[meta.DQCheck] = []
+    cfg_obj: Optional[DQConfig] = None
+    checks: List[DQCheck] = []
 
     duplicate_source = st.session_state.pop("duplicate_source_id", None)
 
@@ -284,11 +303,11 @@ def _load_editor_state(session, config_id: Optional[str], is_new: bool) -> None:
         source_id = config_id
 
     if source_id and session:
-        cfg_obj = meta.get_config(session, source_id)
+        cfg_obj = get_config(session, source_id)
         if cfg_obj:
-            checks = meta.get_checks(session, source_id)
+            checks = get_checks(session, source_id)
     if cfg_obj is None:
-        cfg_obj = meta.DQConfig(
+        cfg_obj = DQConfig(
             config_id="" if is_new else (config_id or ""),
             name="",
             description=None,
@@ -557,7 +576,7 @@ def _render_target_picker(session) -> None:
     _ensure_table_picker_defaults()
     if session:
         current_db = st.session_state.get("editor_db") or ""
-        db_options = meta.list_databases(session)
+        db_options = list_databases(session)
         if current_db and current_db not in db_options:
             db_options.append(current_db)
         db_choices = [""] + sorted({db for db in db_options if db})
@@ -569,7 +588,7 @@ def _render_target_picker(session) -> None:
         )
 
         db_choice = st.session_state.get("editor_db") or ""
-        schema_options = meta.list_schemas(session, db_choice) if db_choice else []
+        schema_options = list_schemas(session, db_choice) if db_choice else []
         current_schema = st.session_state.get("editor_schema") or ""
         if current_schema and current_schema not in schema_options:
             schema_options.append(current_schema)
@@ -583,7 +602,7 @@ def _render_target_picker(session) -> None:
 
         db_choice = st.session_state.get("editor_db") or ""
         schema_choice = st.session_state.get("editor_schema") or ""
-        table_options = meta.list_tables(session, db_choice, schema_choice) if db_choice and schema_choice else []
+        table_options = list_tables(session, db_choice, schema_choice) if db_choice and schema_choice else []
         current_table = st.session_state.get("editor_table") or ""
         if current_table and current_table not in table_options:
             table_options.append(current_table)
@@ -599,7 +618,7 @@ def _render_target_picker(session) -> None:
         schema_choice = st.session_state.get("editor_schema")
         table_choice = st.session_state.get("editor_table")
         if db_choice and schema_choice and table_choice:
-            fqn = meta.fq_table(db_choice, schema_choice, table_choice)
+            fqn = fq_table(db_choice, schema_choice, table_choice)
             st.session_state["editor_target_fqn"] = fqn
             st.session_state["editor_target_fqn_display"] = fqn
         else:
@@ -623,7 +642,7 @@ def _render_column_selector(session) -> None:
     schema = st.session_state.get("editor_schema")
     table = st.session_state.get("editor_table")
     if session and db and schema and table:
-        options = meta.list_columns(session, db, schema, table)
+        options = list_columns(session, db, schema, table)
     if st.session_state.get("dq_cols_ms"):
         for col in st.session_state["dq_cols_ms"]:
             if col not in options:
@@ -649,22 +668,22 @@ def _generate_check_id(prefix: str, column: str, ctype: str) -> str:
     return sanitized
 
 
-def _gather_checks(config_id: str, target_fqn: str) -> List[meta.DQCheck]:
-    checks: List[meta.DQCheck] = []
+def _gather_checks(config_id: str, target_fqn: str) -> List[DQCheck]:
+    checks: List[DQCheck] = []
     col_states: Dict[str, Dict[str, Dict[str, Any]]] = st.session_state.get("col_checks_state", {})
     for column, check_map in col_states.items():
         for ctype, state in check_map.items():
             if not state.get("enabled"):
                 continue
             params = {k: _coerce_param_value(v) for k, v in state.get("params", {}).items() if v not in (None, "")}
-            rule, is_agg = checkdefs.build_rule_for_column_check(target_fqn, column, ctype, params)
+            rule, is_agg = build_rule_for_column_check(target_fqn, column, ctype, params)
             rule_expr = rule.strip()
             if is_agg:
                 rule_expr = f"{dmfs.AGG_PREFIX}{rule_expr}"
             check_id = state.get("check_id") or _generate_check_id("COL", column, ctype)
             state["check_id"] = check_id
             checks.append(
-                meta.DQCheck(
+                DQCheck(
                     config_id=config_id,
                     check_id=check_id,
                     table_fqn=target_fqn,
@@ -682,14 +701,14 @@ def _gather_checks(config_id: str, target_fqn: str) -> List[meta.DQCheck]:
         if not state.get("enabled"):
             continue
         params = {k: _coerce_param_value(v) for k, v in state.get("params", {}).items() if v not in (None, "")}
-        rule, is_agg = checkdefs.build_rule_for_table_check(target_fqn, ctype, params)
+        rule, is_agg = build_rule_for_table_check(target_fqn, ctype, params)
         rule_expr = rule.strip()
         if is_agg:
             rule_expr = f"{dmfs.AGG_PREFIX}{rule_expr}"
         check_id = state.get("check_id") or _generate_check_id("TBL", "", ctype)
         state["check_id"] = check_id
         checks.append(
-            meta.DQCheck(
+            DQCheck(
                 config_id=config_id,
                 check_id=check_id,
                 table_fqn=target_fqn,
@@ -739,7 +758,7 @@ def _save_configuration(session) -> None:
     if not name:
         st.session_state["config_feedback"].append(("error", "Name is required."))
         return
-    cfg_obj = meta.DQConfig(
+    cfg_obj = DQConfig(
         config_id=config_id,
         name=name,
         description=(st.session_state.get("cfg_description") or "").strip() or None,
@@ -758,7 +777,7 @@ def _save_configuration(session) -> None:
         st.session_state["config_feedback"].append(("warning", "No active session; cannot save configuration."))
         return
     try:
-        configs_service.save_config_and_checks(session, cfg_obj, checks, apply_now)
+        save_config_and_checks(session, cfg_obj, checks, apply_now)
         st.session_state["config_feedback"].append(("success", f"Configuration {cfg_obj.config_id} saved. Open 📊 Monitor to review results."))
         st.session_state["selected_config_id"] = cfg_obj.config_id
         st.session_state["editor_is_new"] = False
@@ -776,11 +795,11 @@ def _render_run_now(session) -> None:
         if not config_id:
             st.session_state["config_feedback"].append(("error", "Save the configuration before running."))
             return
-        cfg_obj = meta.get_config(session, config_id)
+        cfg_obj = get_config(session, config_id)
         if not cfg_obj:
             st.session_state["config_feedback"].append(("error", "Configuration not found in metadata. Save first."))
             return
-        task_info = schedules.ensure_task_for_config(session, cfg_obj)
+        task_info = ensure_task_for_config(session, cfg_obj)
         task_name = task_info.get("task")
         status = task_info.get("status")
         if status in {"INVALID_TARGET", "INVALID_SCHEDULE", "NO_WAREHOUSE"}:
@@ -817,7 +836,7 @@ def _render_feedback() -> None:
 
 def render_configs(session) -> None:
     _ensure_base_state()
-    ui_shared.page_header(
+    page_header(
         "Data Quality Configurations",
         "Manage data quality rules, schedules, and monitoring targets.",
         session=session,
@@ -836,7 +855,7 @@ def render_configs(session) -> None:
             is_new = st.session_state.get("editor_is_new", False)
             _render_feedback()
             _render_general_details(is_new)
-            ui_shared.divider()
+            divider()
             _render_target_picker(session)
             _render_column_selector(session)
             target_fqn = st.session_state.get("editor_target_fqn") or st.session_state.get("editor_target_fqn_display")
@@ -844,8 +863,8 @@ def render_configs(session) -> None:
                 _render_column_checks_section()
                 _render_table_checks_section()
             else:
-                ui_shared.danger_note("Select a target table to configure checks.")
-            ui_shared.divider()
+                danger_note("Select a target table to configure checks.")
+            divider()
             _render_schedule_section()
             st.checkbox("Attach DMF views after saving", key="cfg_apply_dmfs", help="Applies check views immediately when saving.")
             _render_run_now(session)

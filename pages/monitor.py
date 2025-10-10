@@ -8,8 +8,8 @@ import altair as alt
 import pandas as pd
 import streamlit as st
 
-from pages import ui_shared
-from utils import checkdefs
+from .ui_shared import page_header
+from utils.checkdefs import SUPPORTED_COLUMN_CHECKS, SUPPORTED_TABLE_CHECKS
 from utils.meta import fetch_config_map, fetch_run_results, fetch_timeseries_daily
 
 
@@ -17,7 +17,10 @@ _DEFAULT_DAYS = 30
 _DAY_OPTIONS = [7, 14, 30, 60, 90]
 _STATUS_OPTIONS = ["All statuses", "Failed only", "Passed only"]
 _CHECK_TYPE_OPTIONS = sorted(
-    {*(t.upper() for t in checkdefs.SUPPORTED_COLUMN_CHECKS), *(t.upper() for t in checkdefs.SUPPORTED_TABLE_CHECKS)}
+    {
+        *(t.upper() for t in SUPPORTED_COLUMN_CHECKS),
+        *(t.upper() for t in SUPPORTED_TABLE_CHECKS),
+    }
 )
 
 
@@ -268,7 +271,7 @@ def _render_results_table(results_df: pd.DataFrame, config_map: Dict[str, Dict[s
 def render_monitor(session) -> None:
     """Render the monitoring experience with filters, KPIs, charts, and run results."""
 
-    ui_shared.page_header(
+    page_header(
         "Monitor data quality runs",
         "Row checks have views; aggregates don’t.",
         session=session,
