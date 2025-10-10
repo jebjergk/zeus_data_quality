@@ -842,6 +842,36 @@ def render_monitor():
     elif not ts_df.empty:
         ts_df["run_date"] = pd.to_datetime(ts_df["run_date"])
 
+    anomaly_df = pd.DataFrame()
+    anomaly_rows = [
+        r
+        for r in filtered_results
+        if (r.get("check_type") or "").upper() == "ROW_COUNT_ANOMALY" and r.get("ok") is False
+    ]
+    if anomaly_rows:
+        anomaly_df = pd.DataFrame(anomaly_rows)
+        anomaly_df["run_ts"] = pd.to_datetime(anomaly_df["run_ts"])
+        anomaly_df["day"] = anomaly_df["run_ts"].dt.floor("D")
+        anomaly_df = (
+            anomaly_df.groupby("day")
+            .size()
+            .reset_index(name="anomaly_events")
+        )
+        if not ts_df.empty:
+            ts_merge = ts_df[["run_date", "fails", "failure_rows"]].copy()
+            anomaly_df = anomaly_df.merge(
+                ts_merge,
+                left_on="day",
+                right_on="run_date",
+                how="left",
+            )
+            anomaly_df = anomaly_df.drop(columns=["run_date"])
+            anomaly_df["fails"] = anomaly_df["fails"].fillna(0).astype(int)
+            anomaly_df["failure_rows"] = anomaly_df["failure_rows"].fillna(0).astype(int)
+        else:
+            anomaly_df["fails"] = 0
+            anomaly_df["failure_rows"] = 0
+
     st.subheader("Daily trend")
     if ts_df.empty:
         st.info("No results available for the selected filters.")
@@ -857,7 +887,23 @@ def render_monitor():
             .mark_point(size=60)
             .encode(x="run_date:T", y="fails:Q")
         )
-        st.altair_chart(fails_chart + fails_points, use_container_width=True)
+        fails_layers = [fails_chart, fails_points]
+        if not anomaly_df.empty:
+            anomaly_layer_fails = (
+                alt.Chart(anomaly_df)
+                .mark_point(size=80, filled=True, shape="triangle-up", color="#d62728")
+                .encode(
+                    x=alt.X("day:T", title="Run date"),
+                    y=alt.Y("fails:Q", title="Failed checks"),
+                    tooltip=[
+                        alt.Tooltip("day:T", title="Day"),
+                        alt.Tooltip("anomaly_events:Q", title="Anomaly events"),
+                    ],
+                )
+                .transform_filter("datum.anomaly_events > 0")
+            )
+            fails_layers.append(anomaly_layer_fails)
+        st.altair_chart(alt.layer(*fails_layers), use_container_width=True)
 
         failure_rows_chart = alt.Chart(ts_df).mark_line().encode(
             x=alt.X("run_date:T", title="Run date"),
@@ -869,7 +915,25 @@ def render_monitor():
             .mark_point(size=60)
             .encode(x="run_date:T", y="failure_rows:Q")
         )
-        st.altair_chart(failure_rows_chart + failure_rows_points, use_container_width=True)
+        failure_layers = [failure_rows_chart, failure_rows_points]
+        if not anomaly_df.empty:
+            anomaly_layer_failure_rows = (
+                alt.Chart(anomaly_df)
+                .mark_point(size=80, filled=True, shape="triangle-up", color="#d62728")
+                .encode(
+                    x=alt.X("day:T", title="Run date"),
+                    y=alt.Y("failure_rows:Q", title="Failure rows"),
+                    tooltip=[
+                        alt.Tooltip("day:T", title="Day"),
+                        alt.Tooltip("anomaly_events:Q", title="Anomaly events"),
+                    ],
+                )
+                .transform_filter("datum.anomaly_events > 0")
+            )
+            failure_layers.append(anomaly_layer_failure_rows)
+        st.altair_chart(alt.layer(*failure_layers), use_container_width=True)
+
+        st.caption("_Markers indicate days with ROW_COUNT_ANOMALY failures._")
 
     st.subheader("Recent results")
     if not filtered_results:
