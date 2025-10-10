@@ -1,55 +1,20 @@
 """Streamlit Overview page for Zeus Data Quality."""
 from __future__ import annotations
 
-from datetime import datetime
-from typing import Optional
-
 import streamlit as st
 
-try:
-    from utils.meta import metadata_db_schema
-except Exception:  # pragma: no cover - optional metadata helper
-    metadata_db_schema = None  # type: ignore
-
-
-def _build_caption(session) -> str:
-    """Return a descriptive caption with build metadata and session context."""
-    secrets = getattr(st, "secrets", {})
-
-    build_version = secrets.get("build_version") or secrets.get("version") or secrets.get("release")
-    build_timestamp = secrets.get("build_timestamp") or secrets.get("build_time")
-
-    parts = []
-    if build_version:
-        parts.append(f"Build {build_version}")
-    else:
-        parts.append("Local development build")
-
-    formatted_ts: Optional[str] = None
-    if isinstance(build_timestamp, (int, float)):
-        formatted_ts = datetime.fromtimestamp(build_timestamp).strftime("%Y-%m-%d %H:%M %Z")
-    elif isinstance(build_timestamp, str) and build_timestamp.strip():
-        formatted_ts = build_timestamp.strip()
-
-    if formatted_ts:
-        parts.append(f"generated {formatted_ts}")
-
-    if session and metadata_db_schema:
-        try:
-            db, schema = metadata_db_schema(session)
-            parts.append(f"metadata: {db}.{schema}")
-        except Exception:
-            parts.append("metadata: unknown")
-    elif session:
-        parts.append("connected to Snowflake session")
-
-    return " · ".join(parts)
+from pages import ui_shared
 
 
 def render_home(session) -> None:
     """Render the Zeus Data Quality overview page."""
-    st.title("Zeus Data Quality Overview")
-    st.caption(_build_caption(session))
+
+    ui_shared.page_header(
+        "Zeus Data Quality Overview",
+        session=session,
+        show_version=True,
+        include_metadata=True,
+    )
 
     st.markdown(
         """
