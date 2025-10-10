@@ -7,6 +7,7 @@ client is not installed.  Snowflake objects are loaded lazily via duck typing.
 
 from __future__ import annotations
 from dataclasses import dataclass
+from datetime import date, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
 try:
@@ -17,10 +18,12 @@ except Exception:
 # Override with fully-qualified names if desired (e.g., "DB.SCHEMA.DQ_CONFIG")
 DQ_CONFIG_TBL: str = "DQ_CONFIG"
 DQ_CHECK_TBL: str = "DQ_CHECK"
+DQ_RUN_RESULTS_TBL: str = "DQ_RUN_RESULTS"
 
 __all__ = [
     "DQ_CONFIG_TBL",
     "DQ_CHECK_TBL",
+    "DQ_RUN_RESULTS_TBL",
     "DQConfig",
     "DQCheck",
     "_q",
@@ -33,6 +36,9 @@ __all__ = [
     "delete_config",
     "upsert_checks",
     "get_checks",
+    "fetch_run_results",
+    "fetch_timeseries_daily",
+    "fetch_config_map",
     "list_databases",
     "list_schemas",
     "list_tables",
@@ -77,6 +83,24 @@ def fq_table(database: str, schema: str, table: str) -> str:
 def _normalize_row(row) -> Dict[str, Any]:
     d = row.asDict() if hasattr(row, "asDict") else dict(row)
     return {str(k).lower(): v for k, v in d.items()}
+
+def _coerce_bool(value: Any) -> Optional[bool]:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        normalized = value.strip().upper()
+        if normalized in {"TRUE", "T", "YES", "Y", "1"}:
+            return True
+        if normalized in {"FALSE", "F", "NO", "N", "0"}:
+            return False
+    try:
+        return bool(value)
+    except Exception:
+        return None
 
 def _parse_relation_name(name: str) -> Tuple[Optional[str], Optional[str], str]:
     parts = [p.strip('"') for p in name.split('.') if p]
@@ -281,6 +305,135 @@ def get_checks(session: Session, config_id: str) -> List[DQCheck]:
             column_name=d.get("column_name"), rule_expr=d["rule_expr"], severity=d.get("severity") or "ERROR",
             sample_rows=int(d.get("sample_rows") or 0), check_type=d.get("check_type"), params_json=d.get("params_json")
         ))
+    return out
+
+def fetch_run_results(
+    session: Session,
+    time_from: Optional[Any] = None,
+    time_to: Optional[Any] = None,
+    config_ids: Optional[List[str]] = None,
+    check_types: Optional[List[str]] = None,
+    ok: Optional[bool] = None,
+    limit: int = 500,
+) -> List[Dict[str, Any]]:
+    if not session:
+        return []
+
+    sql = f"""
+        SELECT RUN_ID, CONFIG_ID, CHECK_ID, CHECK_TYPE, RUN_TS, FAILURES, OK, ERROR_MSG
+        FROM {_q(DQ_RUN_RESULTS_TBL)}
+        WHERE 1=1
+    """
+    params: List[Any] = []
+
+    if time_from is not None:
+        sql += " AND RUN_TS >= ?"
+        params.append(time_from)
+    if time_to is not None:
+        sql += " AND RUN_TS <= ?"
+        params.append(time_to)
+    if config_ids:
+        placeholders = ", ".join(["?"] * len(config_ids))
+        sql += f" AND CONFIG_ID IN ({placeholders})"
+        params.extend(config_ids)
+    if check_types:
+        placeholders = ", ".join(["?"] * len(check_types))
+        sql += f" AND CHECK_TYPE IN ({placeholders})"
+        params.extend(check_types)
+    if ok is not None:
+        sql += " AND OK = ?"
+        coerced_ok = _coerce_bool(ok)
+        params.append(coerced_ok if coerced_ok is not None else bool(ok))
+
+    sql += " ORDER BY RUN_TS DESC"
+
+    if limit:
+        sql += " LIMIT ?"
+        params.append(int(limit))
+
+    df = session.sql(sql, params=params)
+    results: List[Dict[str, Any]] = []
+    for row in df.collect():
+        d = _normalize_row(row)
+        failures_val = d.get("failures")
+        failures = int(failures_val) if failures_val is not None else None
+        results.append(
+            {
+                "run_id": d.get("run_id"),
+                "config_id": d.get("config_id"),
+                "check_id": d.get("check_id"),
+                "check_type": d.get("check_type"),
+                "run_ts": d.get("run_ts"),
+                "failures": failures,
+                "ok": _coerce_bool(d.get("ok")),
+                "error_msg": d.get("error_msg"),
+            }
+        )
+    return results
+
+def fetch_timeseries_daily(
+    session: Session,
+    days: int = 60,
+    config_ids: Optional[List[str]] = None,
+) -> List[Dict[str, Any]]:
+    if not session or days <= 0:
+        return []
+
+    start_date = date.today() - timedelta(days=max(int(days) - 1, 0))
+
+    sql = f"""
+        SELECT
+            TO_DATE(RUN_TS) AS RUN_DATE,
+            COUNT(*) AS RUNS,
+            SUM(IFF(COALESCE(OK, FALSE), 1, 0)) AS PASSES,
+            SUM(IFF(COALESCE(OK, FALSE), 0, 1)) AS FAILS,
+            SUM(COALESCE(FAILURES, 0)) AS FAILURE_ROWS
+        FROM {_q(DQ_RUN_RESULTS_TBL)}
+        WHERE RUN_TS >= ?
+    """
+    params: List[Any] = [start_date]
+
+    if config_ids:
+        placeholders = ", ".join(["?"] * len(config_ids))
+        sql += f" AND CONFIG_ID IN ({placeholders})"
+        params.extend(config_ids)
+
+    sql += " GROUP BY 1 ORDER BY 1"
+
+    df = session.sql(sql, params=params)
+    timeseries: List[Dict[str, Any]] = []
+    for row in df.collect():
+        d = _normalize_row(row)
+        timeseries.append(
+            {
+                "run_date": d.get("run_date"),
+                "runs": int(d.get("runs") or 0),
+                "passes": int(d.get("passes") or 0),
+                "fails": int(d.get("fails") or 0),
+                "failure_rows": int(d.get("failure_rows") or 0),
+            }
+        )
+    return timeseries
+
+def fetch_config_map(session: Session) -> Dict[str, Dict[str, Optional[str]]]:
+    if not session:
+        return {}
+
+    ensure_meta_tables(session)
+    df = session.sql(
+        f"SELECT CONFIG_ID, NAME, TARGET_TABLE_FQN FROM {_q(DQ_CONFIG_TBL)} ORDER BY CONFIG_ID",
+        params=[],
+    )
+    out: Dict[str, Dict[str, Optional[str]]] = {}
+    for row in df.collect():
+        d = _normalize_row(row)
+        config_id = d.get("config_id")
+        if not config_id:
+            continue
+        out[config_id] = {
+            "name": d.get("name"),
+            "table": d.get("target_table_fqn"),
+        }
     return out
 
 # ---------- Discovery (INFO_SCHEMA with safe fallbacks) ----------
