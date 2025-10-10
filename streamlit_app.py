@@ -49,6 +49,15 @@ section[data-testid="stSidebar"] .stButton {
 </style>
 """, unsafe_allow_html=True)
 
+MONITOR_FILTER_CSS = """
+<style>
+form[data-testid="stForm"][aria-label="mon_filters"] div[data-testid="stWidget"] {
+    margin-bottom: 0.4rem;
+}
+.pill { display:inline-block; padding:2px 8px; border-radius:10px; font-size:12px; background:#eef3ff; }
+</style>
+"""
+
 # ---------- Helpers ----------
 def _keyify(s: str) -> str:
     return "".join(ch if ch.isalnum() else "_" for ch in s).lower()
@@ -725,6 +734,7 @@ def render_config_editor():
 
 def render_monitor():
     header_container = st.container()
+    st.markdown(MONITOR_FILTER_CSS, unsafe_allow_html=True)
 
     if not session:
         with header_container:
@@ -733,7 +743,7 @@ def render_monitor():
                 st.header("Monitor")
             with badge_col:
                 badge_col.markdown(
-                    "<div style='text-align:right;padding-top:0.95rem;'><span class='badge'>0 filters active</span></div>",
+                    "<div style='text-align:right;padding-top:0.95rem;'><span class='pill'>0 filters active</span></div>",
                     unsafe_allow_html=True,
                 )
         st.info("Monitoring requires an active Snowflake session.")
@@ -980,7 +990,7 @@ def render_monitor():
 
     badge_label = "filter" if active_filters == 1 else "filters"
     badge_html = (
-        f"<div style='text-align:right;padding-top:0.95rem;'><span class='badge'>{active_filters} {badge_label} active</span></div>"
+        f"<div style='text-align:right;padding-top:0.95rem;'><span class='pill'>{active_filters} {badge_label} active</span></div>"
     )
     with header_container:
         title_col, badge_col = st.columns([1, 0.3])
