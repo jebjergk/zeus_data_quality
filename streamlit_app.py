@@ -55,6 +55,32 @@ def navigate_to(page: str) -> None:
     if page == "home":
         st.session_state["cfg_mode"] = "list"
 
+
+def _quote_ident(value: str) -> str:
+    """Return a Snowflake-quoted identifier."""
+    safe = value.replace('"', '""')
+    return f'"{safe}"'
+
+
+def _task_fqn_for_config(cfg: DQConfig) -> str:
+    """Build the fully qualified task name for the given configuration."""
+    target_fqn = (cfg.target_table_fqn or "").strip()
+    if not target_fqn:
+        raise ValueError("Target table FQN missing database or schema")
+
+    parts = [p.strip().strip('"') for p in target_fqn.split(".") if p.strip()]
+    if len(parts) < 2:
+        raise ValueError("Target table FQN missing database or schema")
+
+    db_name, schema_name = parts[0], parts[1]
+    cfg_id = str(cfg.config_id).replace('"', '')
+    task_identifier = f"DQ_TASK_{cfg_id}"
+    return ".".join([
+        _quote_ident(db_name),
+        _quote_ident(schema_name),
+        _quote_ident(task_identifier),
+    ])
+
 def stateless_table_picker(preselect_fqn: Optional[str]):
     """Simple, stateless DB → Schema → Table picker. Returns (db, schema, table, fqn)."""
     def split_fqn(fqn):
@@ -633,13 +659,7 @@ def render_config_editor():
         if run_now_btn:
             task_fqn = None
             try:
-                target_fqn = dq_cfg.target_table_fqn or ""
-                parts = [p.strip().strip('"') for p in target_fqn.split(".")]
-                if len(parts) < 2:
-                    raise ValueError("Target table FQN missing database or schema")
-                db_name, schema_name = parts[0], parts[1]
-                task_identifier = f"DQ_TASK_{dq_cfg.config_id}"
-                task_fqn = f'"{db_name}"."{schema_name}"."{task_identifier}"'
+                task_fqn = _task_fqn_for_config(dq_cfg)
                 session.sql(f"EXECUTE TASK {task_fqn}").collect()
             except Exception as exc:
                 error_msg = f"Failed to execute task {task_fqn or ''}: {exc}"
