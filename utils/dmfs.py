@@ -1,8 +1,12 @@
+"""Convenience helpers for attaching and detaching Data Monitoring Framework views."""
+
 import re
 from typing import List, Set, Tuple
-from utils.meta import DQConfig, DQCheck, _q, DQ_CONFIG_TBL, DQ_CHECK_TBL
+from utils.meta import DQConfig, DQCheck, _q, DQ_CONFIG_TBL, DQ_CHECK_TBL, metadata_db_schema
 
 AGG_PREFIX = "AGG:"
+
+__all__ = ["AGG_PREFIX", "attach_dmfs", "detach_dmfs_safe"]
 
 def _split_fqn(fqn: str) -> Tuple[str,str,str]:
     parts = fqn.split(".")
@@ -15,6 +19,7 @@ def _view_name(config_id: str, check_id: str) -> str:
 
 def attach_dmfs(session, config: DQConfig, checks: List[DQCheck]) -> List[str]:
     created: List[str] = []
+    meta_db, meta_schema = metadata_db_schema(session)
     for chk in checks:
         rule = (chk.rule_expr or "").strip()
         if rule.upper().startswith(AGG_PREFIX):  # skip aggregates
@@ -23,10 +28,10 @@ def attach_dmfs(session, config: DQConfig, checks: List[DQCheck]) -> List[str]:
         vname = _view_name(chk.config_id, chk.check_id)
         predicate = rule[:-1] if rule.endswith(";") else rule
         session.sql(f"""
-            CREATE OR REPLACE VIEW {_q(db)}.{_q(sch)}.{_q(vname)} AS
+            CREATE OR REPLACE VIEW {_q(meta_db)}.{_q(meta_schema)}.{_q(vname)} AS
             SELECT * FROM {_q(db)}.{_q(sch)}.{_q(tbl)} WHERE NOT ({predicate})
         """).collect()
-        created.append(f"{db}.{sch}.{vname}")
+        created.append(f"{meta_db}.{meta_schema}.{vname}")
     return created
 
 def _active_configs_using_table(session, table_fqn: str) -> Set[str]:
@@ -42,14 +47,14 @@ def _active_configs_using_table(session, table_fqn: str) -> Set[str]:
 
 def detach_dmfs_safe(session, config_id: str, checks: List[DQCheck]) -> List[str]:
     dropped: List[str] = []
+    meta_db, meta_schema = metadata_db_schema(session)
     row_checks = [c for c in checks if not (c.rule_expr or "").upper().startswith(AGG_PREFIX)]
     tables = {c.table_fqn for c in row_checks}
     shared = {t for t in tables if len(_active_configs_using_table(session, t) - {config_id}) > 0}
     for chk in row_checks:
         if chk.table_fqn in shared: continue
-        db, sch, _ = _split_fqn(chk.table_fqn)
         vname = _view_name(chk.config_id, chk.check_id)
-        fqn = f"{_q(db)}.{_q(sch)}.{_q(vname)}"
+        fqn = f"{_q(meta_db)}.{_q(meta_schema)}.{_q(vname)}"
         session.sql(f"DROP VIEW IF EXISTS {fqn}").collect()
         dropped.append(fqn)
     return dropped

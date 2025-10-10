@@ -1,5 +1,5 @@
 import json
-from typing import List, Optional
+from typing import Dict, List, Optional
 from uuid import uuid4
 
 import streamlit as st
@@ -29,13 +29,20 @@ st.set_page_config(page_title="Zeus Data Quality", layout="wide")
 # ---------- Styling (simple Snowflake-ish) ----------
 st.markdown("""
 <style>
-.sf-hr { height:1px; background:#e7ebf3; border:0; margin:.6rem 0 1rem 0; }
-.badge { display:inline-block; padding:.15rem .55rem; border-radius:999px; font-size:.75rem; font-weight:600;
+.sf-hr { height:1px; background:#e7ebf3; border:0; margin=.6rem 0 1rem 0; }
+.badge { display:inline-block; padding=.15rem .55rem; border-radius:999px; font-size=.75rem; font-weight:600;
  background:#e5f6fd; color:#055e86; border:1px solid #cbeefb; }
 .badge-green { background:#eafaf0; border-color:#d4f2df; color:#0a5c2b; }
-.card { border:1px solid #e7ebf3; border-radius:12px; padding:.9rem 1rem; background:#fff; box-shadow:0 1px 2px rgba(12,18,28,.04); }
+.card { border:1px solid #e7ebf3; border-radius:12px; padding=.9rem 1rem; background:#fff; box-shadow:0 1px 2px rgba(12,18,28,.04); }
 .small { font-size:.85rem; color:#6b7280; }
 .kv { color:#111827; font-weight:600; }
+section[data-testid="stSidebar"] .stButton>button {
+ width:100%;
+ border-radius:10px;
+}
+section[data-testid="stSidebar"] .stButton {
+ margin-bottom:.4rem;
+}
 </style>
 """, unsafe_allow_html=True)
 
@@ -43,73 +50,36 @@ st.markdown("""
 def _keyify(s: str) -> str:
     return "".join(ch if ch.isalnum() else "_" for ch in s).lower()
 
-# Planned steps:
-# 1) (streamlit_app.py, table_picker_ui, Introduce stateless three-select picker integrated with config editor.)
-# 2) (streamlit_app.py, render_config_editor, Add validation messaging for incomplete selections.)
-# 3) (streamlit_app.py, render_config_editor, Persist column defaults per target selection.)
+def navigate_to(page: str) -> None:
+    """Update the current page selection in session state."""
+    st.session_state["page"] = page
+    if page == "home":
+        st.session_state["cfg_mode"] = "list"
 
-def table_picker_ui(session, preselect_fqn: Optional[str] = None):
-    """Render a stateless Database → Schema → Table picker."""
+def stateless_table_picker(preselect_fqn: Optional[str]):
+    """Simple, stateless DB → Schema → Table picker. Returns (db, schema, table, fqn)."""
+    def split_fqn(fqn):
+        if not fqn or fqn.count(".") != 2: return None, None, None
+        a,b,c = [p.strip('"') for p in fqn.split(".")]
+        return a,b,c
+    pre_db, pre_sch, pre_tbl = split_fqn(preselect_fqn or "")
 
-    def _split_fqn(fqn: Optional[str]):
-        if not fqn:
-            return None, None, None
-        parts = [segment.strip('"') for segment in fqn.split(".")]
-        if len(parts) != 3:
-            return None, None, None
-        return parts[0], parts[1], parts[2]
+    dbs = list_databases(session)
+    db_index = next((i for i,v in enumerate(dbs) if pre_db and v.upper()==pre_db.upper()), 0) if dbs else 0
+    db_sel = st.selectbox("Database", dbs or ["— none —"], index=db_index if dbs else 0)
+    if not dbs or db_sel == "— none —": return None, None, None, ""
 
-    def _default_index(options: List[str], target: Optional[str]) -> int:
-        if not options or not target:
-            return 0
-        target_upper = target.upper()
-        for idx, option in enumerate(options):
-            if option.upper() == target_upper:
-                return idx
-        return 0
+    schemas = list_schemas(session, db_sel)
+    sch_index = next((i for i,v in enumerate(schemas) if pre_sch and v.upper()==pre_sch.upper()), 0) if schemas else 0
+    sch_sel = st.selectbox("Schema", schemas or ["— none —"], index=sch_index if schemas else 0)
+    if not schemas or sch_sel == "— none —": return db_sel, None, None, ""
 
-    pre_db, pre_schema, pre_table = _split_fqn(preselect_fqn)
+    tables = list_tables(session, db_sel, sch_sel)
+    tbl_index = next((i for i,v in enumerate(tables) if pre_tbl and v.upper()==pre_tbl.upper()), 0) if tables else 0
+    tbl_sel = st.selectbox("Table", tables or ["— none —"], index=tbl_index if tables else 0)
+    if not tables or tbl_sel == "— none —": return db_sel, sch_sel, None, ""
 
-    col_db, col_schema, col_table = st.columns(3)
-
-    db_options = list_databases(session) or []
-    with col_db:
-        db_choice = st.selectbox(
-            "Database",
-            db_options if db_options else ["—"],
-            index=_default_index(db_options, pre_db) if db_options else 0,
-        )
-    selected_db = db_choice if db_options else None
-
-    schema_options = list_schemas(session, selected_db) if selected_db else []
-    with col_schema:
-        schema_choice = st.selectbox(
-            "Schema",
-            schema_options if schema_options else ["—"],
-            index=_default_index(schema_options, pre_schema) if schema_options else 0,
-        )
-    selected_schema = schema_choice if schema_options else None
-
-    table_options = (
-        list_tables(session, selected_db, selected_schema)
-        if selected_db and selected_schema
-        else []
-    )
-    with col_table:
-        table_choice = st.selectbox(
-            "Table",
-            table_options if table_options else ["—"],
-            index=_default_index(table_options, pre_table) if table_options else 0,
-        )
-    selected_table = table_choice if table_options else None
-
-    fqn = (
-        fq_table(selected_db, selected_schema, selected_table)
-        if selected_db and selected_schema and selected_table
-        else None
-    )
-
-    return selected_db, selected_schema, selected_table, fqn
+    return db_sel, sch_sel, tbl_sel, fq_table(db_sel, sch_sel, tbl_sel)
 
 def render_home():
     st.title("Zeus Data Quality")
@@ -123,8 +93,47 @@ Zeus DQ lets you define, apply, and schedule **data quality checks** directly in
 """)
     st.markdown("<div class='sf-hr'></div>", unsafe_allow_html=True)
 
+    st.subheader("How Zeus DQ helps")
+    st.markdown(
+        """
+✅ **Monitor critical tables** – pick Snowflake objects with the sidebar picker and keep an eye on freshness and row counts.
+
+✅ **Protect key columns** – add column checks that ensure values stay unique, fall within ranges, and follow expected patterns.
+
+✅ **Investigate failures fast** – attach views for failing rows, run checks on demand, and review samples without leaving Snowsight.
+"""
+    )
+
+    st.subheader("Getting started")
+    st.markdown(
+        """
+1. Use the **Configurations** section to create or edit a data quality config.
+2. Select the target table, choose the columns you care about, and enable the checks you need.
+3. Save as a draft or **Save & Apply** to create monitoring views and schedule the daily task.
+"""
+    )
+
+    st.info(
+        "Need a refresher? Switch to the Configurations page with the sidebar, or edit an existing setup to reuse its defaults."
+    )
+
 def render_config_list():
     st.header("Configurations")
+    notices = st.session_state.pop("last_notices", None)
+    if notices:
+        for note in notices:
+            kind = note.get("type", "info")
+            message = note.get("message", "")
+            if not message:
+                continue
+            if kind == "success":
+                st.success(message)
+            elif kind == "warning":
+                st.warning(message)
+            elif kind == "error":
+                st.error(message)
+            else:
+                st.info(message)
     # Create button on right
     _, _, create_col = st.columns([6, 2, 2])
     with create_col:
@@ -134,10 +143,33 @@ def render_config_list():
             st.session_state["editor_target_fqn"] = None
             st.rerun()
 
+    search_query = st.text_input(
+        "Search configurations",
+        key="config_list_search",
+        placeholder="Search by name, table, status, role, or ID",
+        label_visibility="collapsed",
+    )
+
     cfgs = list_configs(session)
     if not cfgs:
         st.info("No configurations yet. Click **Create** to add one.")
         return
+
+    if search_query:
+        q = search_query.lower()
+        cfgs = [
+            cfg
+            for cfg in cfgs
+            if q in (cfg.name or "").lower()
+            or q in (cfg.target_table_fqn or "").lower()
+            or q in (cfg.status or "").lower()
+            or q in (cfg.run_as_role or "").lower()
+            or q in (cfg.config_id or "").lower()
+        ]
+
+        if not cfgs:
+            st.info("No configurations match your search.")
+            return
 
     for i, cfg in enumerate(cfgs):
         active = (cfg.status or "").upper() == "ACTIVE"
@@ -162,7 +194,9 @@ def render_config_list():
             with a2:
                 if st.button("🗑️ Delete", key=f"del_{cfg.config_id}"):
                     out = delete_config_full(session, cfg.config_id)
-                    st.success(f"Deleted `{cfg.name}` — dropped {len(out.get('dmfs_dropped', []))} view(s).")
+                    msg = f"Deleted `{cfg.name}` — dropped {len(out.get('dmfs_dropped', []))} view(s)."
+                    st.success(msg)
+                    st.session_state["last_notices"] = [{"type": "success", "message": msg}]
                     st.rerun()
         st.markdown("</div>", unsafe_allow_html=True)
         if i < len(cfgs)-1:
@@ -186,7 +220,7 @@ def render_config_editor():
     # Target (picker is stateless, we persist a single FQN)
     st.subheader("Target")
     base_fqn = st.session_state.get("editor_target_fqn") or (cfg.target_table_fqn if cfg else None)
-    db_sel, sch_sel, tbl_sel, target_table = table_picker_ui(session, preselect_fqn=base_fqn)
+    db_sel, sch_sel, tbl_sel, target_table = stateless_table_picker(base_fqn)
     if target_table:
         st.session_state["editor_target_fqn"] = target_table
     st.caption(f"Target Table: {target_table or '— not selected —'}")
@@ -202,9 +236,51 @@ def render_config_editor():
     if not available_cols:
         safe_default = []
     st.multiselect("Columns to check", options=available_cols, default=safe_default, key="dq_cols_ms")
-    st.info("Table-level checks **FRESHNESS** and **ROW_COUNT** are automatically included.")
+    st.info("Table-level checks **FRESHNESS** and **ROW_COUNT_ANOMALY** are automatically included.")
 
     # -------- Form --------
+    # Pre-populate table-level defaults from existing checks / state
+    existing_table_params = {}
+    legacy_row_count_params: Dict[str, object] = {}
+    for ec in existing_checks:
+        if not ec.column_name and ec.params_json:
+            key = (ec.check_type or "").upper()
+            try:
+                parsed_params = json.loads(ec.params_json)
+            except Exception:
+                parsed_params = {}
+
+            if key == "ROW_COUNT":
+                legacy_row_count_params = parsed_params or {}
+                continue
+
+            existing_table_params[key] = parsed_params
+
+    freshness_defaults = existing_table_params.get("FRESHNESS", {})
+    ts_default = (
+        freshness_defaults.get("timestamp_column")
+        or legacy_row_count_params.get("timestamp_column")
+        or "LOAD_TIMESTAMP"
+    )
+
+    if "ROW_COUNT_ANOMALY" not in existing_table_params:
+        existing_table_params["ROW_COUNT_ANOMALY"] = {
+            "timestamp_column": ts_default,
+            "lookback_days": 28,
+            "sensitivity": 3.0,
+            "min_history_days": 7,
+        }
+
+    if target_table:
+        last_target = st.session_state.get("_dq_table_ts_target")
+        if last_target != target_table:
+            st.session_state["_dq_table_ts_col"] = ts_default
+            st.session_state["_dq_table_ts_target"] = target_table
+    if "_dq_table_ts_col" not in st.session_state:
+        st.session_state["_dq_table_ts_col"] = ts_default
+
+    preview_counts = False
+
     with st.form("cfg_form", clear_on_submit=False):
         st.subheader("Configuration")
         name = st.text_input("Name", value=(cfg.name if cfg else ""))
@@ -236,8 +312,24 @@ def render_config_editor():
                 checked = ("UNIQUE" in [(ec.check_type or "").upper() for ec in existing_checks if ec.column_name == col])
                 c_unique = st.checkbox("UNIQUE", value=checked, key=f"{sk}_chk_unique")
                 if c_unique and target_table:
-                    p_ignore_nulls = st.checkbox("Ignore NULLs", value=ex.get("params", {}).get("ignore_nulls", True), key=f"{sk}_p_un_ignore")
-                    sev = st.selectbox("Severity (UNIQUE)", ["ERROR", "WARN"], index=(0 if ex.get("severity","ERROR")=="ERROR" else 1), key=f"{sk}_sev_unique")
+                    p_ignore_nulls = st.checkbox(
+                        "Ignore NULLs",
+                        value=ex.get("params", {}).get("ignore_nulls", True),
+                        key=f"{sk}_p_un_ignore"
+                    )
+                    severity_options = ["ERROR", "WARN"]
+                    existing_severity = ex.get("severity", "ERROR")
+                    severity_index = (
+                        severity_options.index(existing_severity)
+                        if existing_severity in severity_options
+                        else 0
+                    )
+                    sev = st.selectbox(
+                        "Severity (UNIQUE)",
+                        severity_options,
+                        index=severity_index,
+                        key=f"{sk}_sev_unique"
+                    )
                     params = {"ignore_nulls": p_ignore_nulls}
                     rule, is_agg = build_rule_for_column_check(target_table, col, "UNIQUE", params)
                     check_rows.append(DQCheck(
@@ -257,8 +349,18 @@ def render_config_editor():
                 checked = ("NULL_COUNT" in [(ec.check_type or "").upper() for ec in existing_checks if ec.column_name == col])
                 c_null = st.checkbox("NULL_COUNT", value=checked, key=f"{sk}_chk_nullcount")
                 if c_null and target_table:
-                    max_nulls = st.number_input("Max NULL rows", min_value=0, value=int(ex.get("params", {}).get("max_nulls", 0)), key=f"{sk}_p_nc_max")
-                    sev = st.selectbox("Severity (NULL_COUNT)", ["ERROR", "WARN"], index=(0 if ex.get("severity","ERROR")=="ERROR" else 1), key=f"{sk}_sev_null")
+                    max_nulls = st.number_input(
+                        "Max NULL rows",
+                        min_value=0,
+                        value=int(ex.get("params", {}).get("max_nulls", 0)),
+                        key=f"{sk}_p_nc_max",
+                    )
+                    sev = st.selectbox(
+                        "Severity (NULL_COUNT)",
+                        ["ERROR", "WARN"],
+                        index=(0 if ex.get("severity", "ERROR") == "ERROR" else 1),
+                        key=f"{sk}_sev_null",
+                    )
                     params = {"max_nulls": int(max_nulls)}
                     rule, is_agg = build_rule_for_column_check(target_table, col, "NULL_COUNT", params)
                     check_rows.append(DQCheck(
@@ -278,9 +380,22 @@ def render_config_editor():
                 checked = ("MIN_MAX" in [(ec.check_type or "").upper() for ec in existing_checks if ec.column_name == col])
                 c_minmax = st.checkbox("MIN_MAX", value=checked, key=f"{sk}_chk_minmax")
                 if c_minmax and target_table:
-                    min_v = st.text_input("Min (inclusive)", value=str(ex.get("params", {}).get("min","")), key=f"{sk}_p_mm_min")
-                    max_v = st.text_input("Max (inclusive)", value=str(ex.get("params", {}).get("max","")), key=f"{sk}_p_mm_max")
-                    sev = st.selectbox("Severity (MIN_MAX)", ["ERROR", "WARN"], index=(0 if ex.get("severity","ERROR")=="ERROR" else 1), key=f"{sk}_sev_mm")
+                    min_v = st.text_input(
+                        "Min (inclusive)",
+                        value=str(ex.get("params", {}).get("min", "")),
+                        key=f"{sk}_p_mm_min",
+                    )
+                    max_v = st.text_input(
+                        "Max (inclusive)",
+                        value=str(ex.get("params", {}).get("max", "")),
+                        key=f"{sk}_p_mm_max",
+                    )
+                    sev = st.selectbox(
+                        "Severity (MIN_MAX)",
+                        ["ERROR", "WARN"],
+                        index=(0 if ex.get("severity", "ERROR") == "ERROR" else 1),
+                        key=f"{sk}_sev_mm",
+                    )
                     params = {"min": min_v, "max": max_v}
                     rule, is_agg = build_rule_for_column_check(target_table, col, "MIN_MAX", params)
                     check_rows.append(DQCheck(
@@ -363,12 +478,21 @@ def render_config_editor():
 
         # Table-level (always)
         st.markdown("### Table-level checks (always included)")
-        ts_col = st.text_input("Freshness timestamp column", value="LOAD_TIMESTAMP")
-        max_age = st.number_input("Freshness max age (minutes)", min_value=1, value=1440)
-        min_rows = st.number_input("Minimum row count", min_value=0, value=1)
+        ts_col = st.text_input(
+            "Timestamp column for table checks",
+            key="_dq_table_ts_col",
+            value=st.session_state.get("_dq_table_ts_col", ts_default),
+        )
+        st.caption("Table will FAIL if no data in 30h or if today's volume is a statistical outlier.")
+
+        preview_counts = st.form_submit_button(
+            "Preview last 60 days row counts",
+            type="secondary",
+            help="Preview daily row counts using the selected timestamp column.",
+        )
 
         if target_table:
-            fr_params = {"timestamp_column": ts_col, "max_age_minutes": int(max_age)}
+            fr_params = {"timestamp_column": ts_col, "max_age_minutes": 1800}
             fr_rule = build_rule_for_table_check(target_table, "FRESHNESS", fr_params)
             check_rows.append(DQCheck(
                 config_id=(cfg.config_id if cfg else "temp"),
@@ -378,22 +502,84 @@ def render_config_editor():
                 sample_rows=0, check_type="FRESHNESS",
                 params_json=json.dumps(fr_params)
             ))
-            rc_params = {"min_rows": int(min_rows)}
-            rc_rule = build_rule_for_table_check(target_table, "ROW_COUNT", rc_params)
+
+            anomaly_params = {
+                "timestamp_column": ts_col,
+                "lookback_days": 28,
+                "sensitivity": 3.0,
+                "min_history_days": 7,
+            }
+            anomaly_rule = build_rule_for_table_check(target_table, "ROW_COUNT_ANOMALY", anomaly_params)
             check_rows.append(DQCheck(
                 config_id=(cfg.config_id if cfg else "temp"),
-                check_id="TABLE_ROW_COUNT",
+                check_id="TABLE_ROW_COUNT_ANOMALY",
                 table_fqn=target_table, column_name=None,
-                rule_expr=f"AGG: {rc_rule}", severity="ERROR",
-                sample_rows=0, check_type="ROW_COUNT",
-                params_json=json.dumps(rc_params)
+                rule_expr=f"AGG: {anomaly_rule}", severity="ERROR",
+                sample_rows=0, check_type="ROW_COUNT_ANOMALY",
+                params_json=json.dumps(anomaly_params)
             ))
+
+        st.markdown("### Schedule")
+        existing_cron = getattr(cfg, "schedule_cron", None) if cfg else None
+        existing_timezone = getattr(cfg, "schedule_timezone", None) if cfg else None
+        existing_enabled = getattr(cfg, "schedule_enabled", True) if cfg else True
+        default_cron = existing_cron or "0 8 * * *"
+        default_timezone = existing_timezone or "Europe/Berlin"
+        schedule_enabled = st.checkbox("Enable daily task", value=bool(existing_enabled))
+        cron_expr = st.text_input(
+            "Cron expression",
+            value=default_cron,
+            help="Snowflake `USING CRON` expression (e.g. `0 8 * * *`).",
+            disabled=not schedule_enabled
+        )
+        timezone_expr = st.text_input(
+            "Timezone",
+            value=default_timezone,
+            help="IANA timezone name (e.g. `Europe/Berlin`).",
+            disabled=not schedule_enabled
+        )
 
         c1, c2, c3, c4 = st.columns(4)
         with c1: apply_now = st.form_submit_button("Save & Apply")
         with c2: save_draft = st.form_submit_button("Save as Draft")
         with c3: run_now_btn = st.form_submit_button("Run Now")
         with c4: delete_btn = st.form_submit_button("Delete", type="secondary")
+
+    safe_ts = None
+    if preview_counts:
+        if not session:
+            st.warning("No active Snowpark session — unable to preview row counts.")
+        elif not target_table:
+            st.warning("Select a target table to preview row counts.")
+        elif not (ts_col and ts_col.strip()):
+            st.warning("Enter a timestamp column to preview row counts.")
+        else:
+            safe_ts = "".join(ch for ch in ts_col.strip().replace('"', '') if ch.isalnum() or ch in ("_", "$"))
+            if not safe_ts:
+                st.warning("Timestamp column contains unsupported characters — unable to preview row counts.")
+    if preview_counts and safe_ts:
+        query = f"""
+            WITH days AS (
+                SELECT DATEADD(day, -seq4(), CURRENT_DATE()) AS day
+                FROM TABLE(GENERATOR(ROWCOUNT => 60))
+            ),
+            counts AS (
+                SELECT DATE_TRUNC('day', "{safe_ts}") AS day, COUNT(*) AS cnt
+                FROM {target_table}
+                WHERE "{safe_ts}" >= DATEADD(day, -59, CURRENT_DATE())
+                GROUP BY 1
+            )
+            SELECT d.day AS "day", COALESCE(c.cnt, 0) AS "cnt"
+            FROM days d
+            LEFT JOIN counts c ON c.day = d.day
+            ORDER BY d.day
+        """
+        try:
+            df = session.sql(query).to_pandas()
+        except Exception as exc:
+            st.error(f"Failed to preview row counts: {exc}")
+        else:
+            st.dataframe(df, use_container_width=True, hide_index=True, height=320)
 
     # After submit
     if apply_now or save_draft or run_now_btn or delete_btn:
@@ -402,8 +588,16 @@ def render_config_editor():
             return
         if delete_btn and cfg:
             out = delete_config_full(session, cfg.config_id)
-            st.success(f"Deleted config {cfg.config_id}. Dropped: {len(out.get('dmfs_dropped', []))} view(s).")
+            msg = f"Deleted config {cfg.config_id}. Dropped: {len(out.get('dmfs_dropped', []))} view(s)."
+            st.success(msg)
+            st.session_state["last_notices"] = [{"type": "success", "message": msg}]
             st.session_state["cfg_mode"] = "list"; st.rerun(); return
+
+        post_submit_notices: List[Dict[str, str]] = []
+
+        def remember(kind: str, message: str) -> None:
+            if message:
+                post_submit_notices.append({"type": kind, "message": message})
 
         new_id = cfg.config_id if cfg else str(uuid4())
         status = 'ACTIVE' if apply_now else 'DRAFT'
@@ -411,7 +605,10 @@ def render_config_editor():
         dq_cfg = DQConfig(
             config_id=new_id, name=name, description=(desc or None),
             target_table_fqn=target_table, run_as_role=(state.get('run_as_role') or None),
-            dmf_role=(state.get('dmf_role') or None), status=status, owner=None
+            dmf_role=(state.get('dmf_role') or None), status=status, owner=None,
+            schedule_cron=(cron_expr.strip() if cron_expr else "0 8 * * *"),
+            schedule_timezone=(timezone_expr.strip() if timezone_expr else "Europe/Berlin"),
+            schedule_enabled=bool(schedule_enabled)
         )
         # rebind ids
         checks_rebound: List[DQCheck] = []
@@ -420,35 +617,100 @@ def render_config_editor():
             checks_rebound.append(cr)
 
         out = save_config_and_checks(session, dq_cfg, checks_rebound, apply_now=apply_now)
-        if apply_now and out.get("dmfs_attached"):
-            st.success("Attached views:\n- " + "\n- ".join(out["dmfs_attached"]))
-        else:
-            st.success(f"Saved config {new_id} ({status}).")
+        base_msg = f"Saved config {new_id} ({status})."
+        st.success(base_msg)
+        remember("success", base_msg)
+        if apply_now:
+            dmfs_attached = out.get("dmfs_attached") or []
+            if dmfs_attached:
+                dmf_msg = "Attached views:\n- " + "\n- ".join(dmfs_attached)
+                st.success(dmf_msg)
+                remember("success", dmf_msg)
+            else:
+                info_msg = "No row-level failing-row views were required for this configuration."
+                st.info(info_msg)
+                remember("info", info_msg)
 
-        if run_now_btn or apply_now:
+        if run_now_btn:
             results = run_now(session, dq_cfg, checks_rebound)
             st.info("Run Now results:")
+            summary_lines: List[str] = []
             for r in results["checks"]:
                 agg = " (aggregate)" if r.get("aggregate") else ""
-                st.write(f"**{r['check_id']}** — {r.get('type','')} — failures: {r['failures']}{agg}")
+                r_type = r.get("type", "")
+                if r_type == "ROW_COUNT_ANOMALY":
+                    r_type = f"{r_type} (anomaly)"
+                st.write(f"**{r['check_id']}** — {r_type} — failures: {r['failures']}{agg}")
+                summary_lines.append(f"{r['check_id']} — {r_type} — failures: {r['failures']}{agg}")
                 if r.get("sample"):
                     st.dataframe(r["sample"])
+            if summary_lines:
+                remember("info", "Run Now results:\n" + "\n".join(summary_lines))
 
         if apply_now and status == 'ACTIVE':
             sched = schedules.ensure_task_for_config(session, dq_cfg)
-            if sched.get("status") == "TASK_CREATED":
-                st.success(f"Scheduled daily 08:00 Europe/Berlin via **{sched['task']}**.")
+            sched_status = sched.get("status")
+            if sched_status == "TASK_CREATED":
+                cron_disp = dq_cfg.schedule_cron or "0 8 * * *"
+                tz_disp = dq_cfg.schedule_timezone or "Europe/Berlin"
+                sched_msg = f"Scheduled **{sched['task']}** (`{cron_disp}` {tz_disp})."
+                st.success(sched_msg)
+                remember("success", sched_msg)
+            elif sched_status == "SCHEDULE_DISABLED":
+                info_msg = "Schedule disabled — skipped automatic task creation."
+                st.info(info_msg)
+                remember("info", info_msg)
+            elif sched_status == "INVALID_SCHEDULE":
+                warn_msg = sched.get("reason") or "Schedule settings were invalid; task not created."
+                st.warning(warn_msg)
+                remember("warning", warn_msg)
+            elif sched_status == "NO_WAREHOUSE":
+                warn_msg = (
+                    "No active warehouse is set for this session. "
+                    "Run `USE WAREHOUSE <name>` in Snowflake or set a default warehouse, then save & apply again."
+                )
+                st.warning(warn_msg)
+                remember("warning", warn_msg)
             else:
-                st.warning("Could not create task; stored fallback intent.")
+                reason = sched.get("reason")
+                if reason:
+                    warn_msg = (
+                        f"Could not create task {sched.get('task') or ''}: {reason}. "
+                        "Task intent was stored for manual follow-up."
+                    )
+                else:
+                    warn_msg = "Could not create task automatically; stored fallback intent."
+                st.warning(warn_msg)
+                remember("warning", warn_msg)
 
+        st.session_state["last_notices"] = post_submit_notices
         st.session_state["cfg_mode"] = "list"; st.rerun()
 
 # ---------- Sidebar + routing ----------
 state = get_state()
+if "page" not in st.session_state:
+    st.session_state["page"] = "home"
+if "cfg_mode" not in st.session_state:
+    st.session_state["cfg_mode"] = "list"
+current_page = st.session_state.get("page", "home")
 with st.sidebar:
     st.header("Zeus DQ")
-    if st.button("🏠 Overview"): st.session_state["page"] = "home"; st.session_state["cfg_mode"] = "list"
-    if st.button("⚙️ Configurations"): st.session_state["page"] = "cfg"
+    st.button(
+        "🏠 Overview",
+        use_container_width=True,
+        type="primary" if current_page == "home" else "secondary",
+        key="nav_home",
+        on_click=navigate_to,
+        args=("home",),
+    )
+    st.button(
+        "⚙️ Configurations",
+        use_container_width=True,
+        type="primary" if current_page == "cfg" else "secondary",
+        key="nav_cfg",
+        on_click=navigate_to,
+        args=("cfg",),
+    )
     st.divider()
     run_as_role = st.text_input("RUN_AS_ROLE", value=state.get("run_as_role") or "")
     dmf_role = st.text_input("DMF_ROLE", value=state.get("dmf_role") or "")
