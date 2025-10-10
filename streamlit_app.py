@@ -20,7 +20,6 @@ from utils.meta import (
 )
 from utils import schedules
 from services.configs import save_config_and_checks, delete_config_full
-from services.runner import run_now
 from services.state import get_state, set_state
 from utils.checkdefs import build_rule_for_column_check, build_rule_for_table_check
 
@@ -632,20 +631,24 @@ def render_config_editor():
                 remember("info", info_msg)
 
         if run_now_btn:
-            results = run_now(session, dq_cfg, checks_rebound)
-            st.info("Run Now results:")
-            summary_lines: List[str] = []
-            for r in results["checks"]:
-                agg = " (aggregate)" if r.get("aggregate") else ""
-                r_type = r.get("type", "")
-                if r_type == "ROW_COUNT_ANOMALY":
-                    r_type = f"{r_type} (anomaly)"
-                st.write(f"**{r['check_id']}** — {r_type} — failures: {r['failures']}{agg}")
-                summary_lines.append(f"{r['check_id']} — {r_type} — failures: {r['failures']}{agg}")
-                if r.get("sample"):
-                    st.dataframe(r["sample"])
-            if summary_lines:
-                remember("info", "Run Now results:\n" + "\n".join(summary_lines))
+            task_fqn = None
+            try:
+                target_fqn = dq_cfg.target_table_fqn or ""
+                parts = [p.strip().strip('"') for p in target_fqn.split(".")]
+                if len(parts) < 2:
+                    raise ValueError("Target table FQN missing database or schema")
+                db_name, schema_name = parts[0], parts[1]
+                task_identifier = f"DQ_TASK_{dq_cfg.config_id}"
+                task_fqn = f'"{db_name}"."{schema_name}"."{task_identifier}"'
+                session.sql(f"EXECUTE TASK {task_fqn}").collect()
+            except Exception as exc:
+                error_msg = f"Failed to execute task {task_fqn or ''}: {exc}"
+                st.error(error_msg)
+                remember("error", error_msg)
+            else:
+                success_msg = "Run submitted. Open 📊 Monitor to see results when the task completes."
+                st.success(success_msg)
+                remember("success", success_msg)
 
         if apply_now and status == 'ACTIVE':
             sched = schedules.ensure_task_for_config(session, dq_cfg)
