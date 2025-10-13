@@ -74,6 +74,16 @@ def _ensure_base_state() -> None:
     st.session_state.setdefault("config_feedback", [])
 
 
+def _request_rerun() -> None:
+    """Trigger a Streamlit rerun using the supported API."""
+
+    rerun_fn = getattr(st, "rerun", None)
+    if callable(rerun_fn):
+        rerun_fn()
+        return
+    st.experimental_rerun()
+
+
 def _clear_editor_selection() -> None:
     """Reset editor-related state so the configuration list can be shown."""
 
@@ -877,7 +887,7 @@ def render_configs(session, app_version: str | None = None) -> None:
         st.info("Select a configuration or create a new one to begin editing.")
         _render_list_panel(session)
         if st.session_state.get("selected_config_id"):
-            st.experimental_rerun()
+            _request_rerun()
     else:
         if st.button(
             "← Back to configuration list",
@@ -885,7 +895,7 @@ def render_configs(session, app_version: str | None = None) -> None:
             type="secondary",
         ):
             _clear_editor_selection()
-            st.experimental_rerun()
+            _request_rerun()
 
         with st.expander("Browse other configurations", expanded=False):
             _render_list_panel(session)
@@ -914,3 +924,9 @@ def render_configs(session, app_version: str | None = None) -> None:
         if submitted:
             _save_configuration(session)
     _render_feedback()
+
+
+def reset_config_editor_state() -> None:
+    """Public helper to reset the configuration editor navigation state."""
+
+    _clear_editor_selection()

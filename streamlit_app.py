@@ -108,6 +108,8 @@ for col, (label, page_key) in zip(nav_cols, nav_items):
     is_active = st.session_state["page"] == page_key
     button_type = "primary" if is_active else "secondary"
     if col.button(label, key=f"nav_{page_key}", type=button_type):
+        if page_key == "configs":
+            configs.reset_config_editor_state()
         st.session_state["page"] = page_key
 
 current_page = st.session_state.get("page", "home")
