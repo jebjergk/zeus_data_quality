@@ -2,7 +2,11 @@ import json
 from typing import Dict, List, Optional
 from uuid import uuid4
 
-import altair as alt
+try:
+    import altair as alt
+except ModuleNotFoundError:
+    alt = None  # type: ignore
+
 import pandas as pd
 import streamlit as st
 
@@ -857,61 +861,66 @@ def render_monitor():
 
     st.markdown("<div class='sf-hr'></div>", unsafe_allow_html=True)
 
-    st.subheader("Daily failed checks")
-    fail_chart = (
-        alt.Chart(fail_counts)
-        .mark_line()
-        .encode(
-            x=alt.X("run_date:T", title="Run date"),
-            y=alt.Y("failed_checks:Q", title="Failed checks"),
-            tooltip=[
-                alt.Tooltip("run_date:T", title="Date"),
-                alt.Tooltip("failed_checks:Q", title="Failed checks"),
-            ],
+    if not alt:
+        st.warning(
+            "Altair is not installed in this environment, so timeline charts are unavailable."
         )
-    )
-    fail_points = (
-        alt.Chart(fail_counts)
-        .transform_filter(alt.datum.failed_checks > 0)
-        .mark_point(size=70, filled=True)
-        .encode(
-            x="run_date:T",
-            y="failed_checks:Q",
-            tooltip=[
-                alt.Tooltip("run_date:T", title="Date"),
-                alt.Tooltip("failed_checks:Q", title="Failed checks"),
-            ],
+    else:
+        st.subheader("Daily failed checks")
+        fail_chart = (
+            alt.Chart(fail_counts)
+            .mark_line()
+            .encode(
+                x=alt.X("run_date:T", title="Run date"),
+                y=alt.Y("failed_checks:Q", title="Failed checks"),
+                tooltip=[
+                    alt.Tooltip("run_date:T", title="Date"),
+                    alt.Tooltip("failed_checks:Q", title="Failed checks"),
+                ],
+            )
         )
-    )
-    st.altair_chart((fail_chart + fail_points).properties(height=240), use_container_width=True)
+        fail_points = (
+            alt.Chart(fail_counts)
+            .transform_filter(alt.datum.failed_checks > 0)
+            .mark_point(size=70, filled=True)
+            .encode(
+                x="run_date:T",
+                y="failed_checks:Q",
+                tooltip=[
+                    alt.Tooltip("run_date:T", title="Date"),
+                    alt.Tooltip("failed_checks:Q", title="Failed checks"),
+                ],
+            )
+        )
+        st.altair_chart((fail_chart + fail_points).properties(height=240), use_container_width=True)
 
-    st.subheader("Daily total failures")
-    failure_chart = (
-        alt.Chart(failure_totals)
-        .mark_line()
-        .encode(
-            x=alt.X("run_date:T", title="Run date"),
-            y=alt.Y("total_failures:Q", title="Total failures"),
-            tooltip=[
-                alt.Tooltip("run_date:T", title="Date"),
-                alt.Tooltip("total_failures:Q", title="Total failures"),
-            ],
+        st.subheader("Daily total failures")
+        failure_chart = (
+            alt.Chart(failure_totals)
+            .mark_line()
+            .encode(
+                x=alt.X("run_date:T", title="Run date"),
+                y=alt.Y("total_failures:Q", title="Total failures"),
+                tooltip=[
+                    alt.Tooltip("run_date:T", title="Date"),
+                    alt.Tooltip("total_failures:Q", title="Total failures"),
+                ],
+            )
         )
-    )
-    failure_points = (
-        alt.Chart(failure_totals)
-        .transform_filter(alt.datum.total_failures > 0)
-        .mark_point(size=70, filled=True)
-        .encode(
-            x="run_date:T",
-            y="total_failures:Q",
-            tooltip=[
-                alt.Tooltip("run_date:T", title="Date"),
-                alt.Tooltip("total_failures:Q", title="Total failures"),
-            ],
+        failure_points = (
+            alt.Chart(failure_totals)
+            .transform_filter(alt.datum.total_failures > 0)
+            .mark_point(size=70, filled=True)
+            .encode(
+                x="run_date:T",
+                y="total_failures:Q",
+                tooltip=[
+                    alt.Tooltip("run_date:T", title="Date"),
+                    alt.Tooltip("total_failures:Q", title="Total failures"),
+                ],
+            )
         )
-    )
-    st.altair_chart((failure_chart + failure_points).properties(height=240), use_container_width=True)
+        st.altair_chart((failure_chart + failure_points).properties(height=240), use_container_width=True)
 
     st.subheader("Recent results")
     recent_df = df.sort_values("run_ts", ascending=False).head(200).copy()
