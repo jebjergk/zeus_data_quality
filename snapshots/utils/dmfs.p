@@ -122,8 +122,6 @@ def _safe_ident(value: Any) -> str:
     text = text.strip("_")
     if not text:
         text = "X"
-    if text[0].isdigit():
-        text = f"X_{text}"
     return text
 
 
