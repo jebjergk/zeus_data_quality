@@ -20,7 +20,6 @@ from utils.meta import (
 )
 from utils import schedules
 from services.configs import save_config_and_checks, delete_config_full
-from services.runner import run_now
 from services.state import get_state, set_state
 from utils.checkdefs import build_rule_for_column_check, build_rule_for_table_check
 
@@ -80,6 +79,18 @@ def stateless_table_picker(preselect_fqn: Optional[str]):
     if not tables or tbl_sel == "— none —": return db_sel, sch_sel, None, ""
 
     return db_sel, sch_sel, tbl_sel, fq_table(db_sel, sch_sel, tbl_sel)
+
+
+def build_task_fqn(target_table_fqn: Optional[str], config_id: Optional[str]) -> Optional[str]:
+    """Build the Snowflake task FQN for the given configuration."""
+    if not target_table_fqn or not config_id:
+        return None
+    parts = [part.strip() for part in target_table_fqn.split(".") if part.strip()]
+    if len(parts) != 3:
+        return None
+    db, schema, _ = parts
+    task_name = f'"DQ_TASK_{config_id.upper()}"'
+    return f"{db}.{schema}.{task_name}"
 
 def render_home():
     st.title("Zeus Data Quality")
@@ -632,20 +643,27 @@ def render_config_editor():
                 remember("info", info_msg)
 
         if run_now_btn:
-            results = run_now(session, dq_cfg, checks_rebound)
-            st.info("Run Now results:")
-            summary_lines: List[str] = []
-            for r in results["checks"]:
-                agg = " (aggregate)" if r.get("aggregate") else ""
-                r_type = r.get("type", "")
-                if r_type == "ROW_COUNT_ANOMALY":
-                    r_type = f"{r_type} (anomaly)"
-                st.write(f"**{r['check_id']}** — {r_type} — failures: {r['failures']}{agg}")
-                summary_lines.append(f"{r['check_id']} — {r_type} — failures: {r['failures']}{agg}")
-                if r.get("sample"):
-                    st.dataframe(r["sample"])
-            if summary_lines:
-                remember("info", "Run Now results:\n" + "\n".join(summary_lines))
+            task_fqn = build_task_fqn(target_table, new_id)
+            if not task_fqn:
+                err_msg = (
+                    "Unable to determine the task for this configuration. "
+                    "Ensure a target table is selected and try again."
+                )
+                st.error(err_msg)
+                remember("error", err_msg)
+            else:
+                try:
+                    session.sql(f"EXECUTE TASK {task_fqn}").collect()
+                except Exception as exc:
+                    err_msg = f"Failed to execute task {task_fqn}: {exc}"
+                    st.error(err_msg)
+                    remember("error", err_msg)
+                else:
+                    success_msg = (
+                        "Run submitted. Open 📊 Monitor to see results when the task completes."
+                    )
+                    st.success(success_msg)
+                    remember("success", success_msg)
 
         if apply_now and status == 'ACTIVE':
             sched = schedules.ensure_task_for_config(session, dq_cfg)
