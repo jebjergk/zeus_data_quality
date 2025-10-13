@@ -24,10 +24,34 @@ __all__ = [
     "run_task_now",
 ]
 
-def _split_fqn(fqn: str) -> Tuple[str,str,str]:
-    parts = fqn.split(".")
-    if len(parts) != 3: raise ValueError("Need DB.SCHEMA.TABLE")
-    return tuple(p.strip('"') for p in parts)  # type: ignore
+def _split_fqn(fqn: str) -> Tuple[str, str, str]:
+    parts: List[str] = []
+    current: List[str] = []
+    in_quotes = False
+    i = 0
+
+    while i < len(fqn):
+        ch = fqn[i]
+        if ch == '"':
+            next_char = fqn[i + 1] if i + 1 < len(fqn) else None
+            if in_quotes and next_char == '"':
+                current.append('"')
+                i += 1  # skip escaped quote
+            else:
+                in_quotes = not in_quotes
+        elif ch == '.' and not in_quotes:
+            parts.append(''.join(current).strip())
+            current = []
+        else:
+            current.append(ch)
+        i += 1
+
+    parts.append(''.join(current).strip())
+
+    if in_quotes or len(parts) != 3 or any(part == '' for part in parts):
+        raise ValueError("Need DB.SCHEMA.TABLE")
+
+    return tuple(part.strip('"') for part in parts)  # type: ignore
 
 def _view_name(config_id: str, check_id: str) -> str:
     raw = f"DQ_{config_id}_{check_id}_FAILS".upper()
