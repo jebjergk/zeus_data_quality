@@ -27,6 +27,7 @@ from utils.meta import (
 )
 from utils import schedules
 from services.configs import save_config_and_checks, delete_config_full
+from services.runner import run_now as run_checks_now
 from services.state import get_state, set_state
 from utils.checkdefs import build_rule_for_column_check, build_rule_for_table_check
 
@@ -665,27 +666,58 @@ def render_config_editor():
                 remember("info", info_msg)
 
         if run_now_btn:
-            task_fqn = build_task_fqn(target_table, new_id)
-            if not task_fqn:
-                err_msg = (
-                    "Unable to determine the task for this configuration. "
-                    "Ensure a target table is selected and try again."
-                )
+            try:
+                run_output = run_checks_now(session, dq_cfg, checks_rebound)
+            except Exception as exc:
+                err_msg = f"Failed to run checks immediately: {exc}"
                 st.error(err_msg)
                 remember("error", err_msg)
             else:
-                try:
-                    session.sql(f"EXECUTE TASK {task_fqn}").collect()
-                except Exception as exc:
-                    err_msg = f"Failed to execute task {task_fqn}: {exc}"
-                    st.error(err_msg)
-                    remember("error", err_msg)
+                check_results = run_output.get("checks", []) if isinstance(run_output, dict) else []
+                if not check_results:
+                    info_msg = "Run completed but no check results were returned."
+                    st.info(info_msg)
+                    remember("info", info_msg)
                 else:
-                    success_msg = (
-                        "Run submitted. Open 📊 Monitor to see results when the task completes."
-                    )
-                    st.success(success_msg)
-                    remember("success", success_msg)
+                    summary_rows = []
+                    total_failures = 0
+                    for chk_res in check_results:
+                        failures = int(chk_res.get("failures") or 0)
+                        total_failures += failures
+                        summary_rows.append(
+                            {
+                                "Check ID": chk_res.get("check_id"),
+                                "Type": chk_res.get("type"),
+                                "Aggregate": "Yes" if chk_res.get("aggregate") else "No",
+                                "Failures": failures,
+                            }
+                        )
+
+                    st.markdown("#### Run Now summary")
+                    summary_df = pd.DataFrame(summary_rows)
+                    st.dataframe(summary_df, use_container_width=True, hide_index=True)
+
+                    if total_failures:
+                        warn_msg = (
+                            f"Run completed with {total_failures} failure"
+                            f"{'s' if total_failures != 1 else ''}."
+                        )
+                        st.warning(warn_msg)
+                        remember("warning", warn_msg)
+                    else:
+                        success_msg = "Run completed with no failures."
+                        st.success(success_msg)
+                        remember("success", success_msg)
+
+                    for chk_res in check_results:
+                        sample = chk_res.get("sample") or []
+                        if not sample:
+                            continue
+                        st.markdown(
+                            f"**Sample failing rows – {chk_res.get('check_id')}**"
+                        )
+                        sample_df = pd.DataFrame(sample)
+                        st.dataframe(sample_df, use_container_width=True, hide_index=True)
 
         if apply_now and status == 'ACTIVE':
             sched = schedules.ensure_task_for_config(session, dq_cfg)
