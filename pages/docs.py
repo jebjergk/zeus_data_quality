@@ -113,7 +113,10 @@ def _build_verification_sql(fqns: Dict[str, Tuple[str, str, str]]) -> str:
         [
             f"SELECT COUNT(*) AS config_rows FROM {config_fqn};",
             f"SELECT config_id, COUNT(*) AS checks_per_config FROM {check_fqn} GROUP BY 1 ORDER BY 2 DESC;",
-            f"SELECT status, COUNT(*) AS runs FROM {results_fqn} GROUP BY 1 ORDER BY 2 DESC;",
+            (
+                "SELECT IFF(COALESCE(ok, FALSE), 'PASSED', 'FAILED') AS status, COUNT(*) AS runs "
+                f"FROM {results_fqn} GROUP BY 1 ORDER BY 2 DESC;"
+            ),
         ]
     )
 
