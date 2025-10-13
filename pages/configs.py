@@ -834,7 +834,12 @@ def _render_general_details(is_new: bool) -> None:
     st.text_input("Owner", key="cfg_owner")
 
 
-def _save_configuration(session) -> None:
+def _save_configuration(
+    session,
+    *,
+    force_status: Optional[str] = None,
+    apply_dmfs: Optional[bool] = None,
+) -> None:
     config_id = (st.session_state.get("cfg_config_id") or "").strip()
     if not config_id:
         st.session_state["config_feedback"].append(("error", "Configuration ID is required."))
@@ -847,6 +852,11 @@ def _save_configuration(session) -> None:
     if not name:
         st.session_state["config_feedback"].append(("error", "Name is required."))
         return
+    status_value = (st.session_state.get("cfg_status") or "DRAFT").strip() or "DRAFT"
+    if force_status:
+        status_value = force_status
+        st.session_state["cfg_status"] = force_status
+
     cfg_obj = DQConfig(
         config_id=config_id,
         name=name,
@@ -854,7 +864,7 @@ def _save_configuration(session) -> None:
         target_table_fqn=target_fqn,
         run_as_role=(st.session_state.get("cfg_run_as_role") or "").strip() or None,
         dmf_role=(st.session_state.get("cfg_dmf_role") or "").strip() or None,
-        status=(st.session_state.get("cfg_status") or "DRAFT").strip() or "DRAFT",
+        status=status_value,
         owner=(st.session_state.get("cfg_owner") or "").strip() or None,
         schedule_cron=(st.session_state.get("cfg_schedule_cron") or "").strip() or None,
         schedule_timezone=(st.session_state.get("cfg_schedule_timezone") or "").strip() or None,
@@ -862,6 +872,8 @@ def _save_configuration(session) -> None:
     )
     checks = _gather_checks(cfg_obj.config_id, cfg_obj.target_table_fqn)
     apply_now = bool(st.session_state.get("cfg_apply_dmfs"))
+    if apply_dmfs is not None:
+        apply_now = apply_dmfs
     if not session:
         st.session_state["config_feedback"].append(("warning", "No active session; cannot save configuration."))
         return
@@ -875,34 +887,33 @@ def _save_configuration(session) -> None:
         st.session_state["config_feedback"].append(("error", f"Save failed: {exc}"))
 
 
-def _render_run_now(session) -> None:
-    if st.button("Run Now (EXECUTE TASK)", key="cfg_run_now", type="secondary"):
-        config_id = st.session_state.get("cfg_config_id")
-        if not session:
-            st.session_state["config_feedback"].append(("warning", "No active session; cannot execute task."))
-            return
-        if not config_id:
-            st.session_state["config_feedback"].append(("error", "Save the configuration before running."))
-            return
-        cfg_obj = get_config(session, config_id)
-        if not cfg_obj:
-            st.session_state["config_feedback"].append(("error", "Configuration not found in metadata. Save first."))
-            return
-        task_info = ensure_task_for_config(session, cfg_obj)
-        task_name = task_info.get("task")
-        status = task_info.get("status")
-        if status in {"INVALID_TARGET", "INVALID_SCHEDULE", "NO_WAREHOUSE"}:
-            reason = task_info.get("reason") or ""
-            st.session_state["config_feedback"].append(("error", f"Task setup failed: {status} {reason}"))
-            return
-        if not task_name:
-            st.session_state["config_feedback"].append(("error", "Unable to determine task name for execution."))
-            return
-        try:
-            session.sql(f"EXECUTE TASK {task_name}").collect()
-            st.session_state["config_feedback"].append(("success", f"Triggered task {task_name} for immediate execution."))
-        except Exception as exc:
-            st.session_state["config_feedback"].append(("error", f"Task execution failed: {exc}"))
+def _execute_run_now(session) -> None:
+    config_id = st.session_state.get("cfg_config_id")
+    if not session:
+        st.session_state["config_feedback"].append(("warning", "No active session; cannot execute task."))
+        return
+    if not config_id:
+        st.session_state["config_feedback"].append(("error", "Save the configuration before running."))
+        return
+    cfg_obj = get_config(session, config_id)
+    if not cfg_obj:
+        st.session_state["config_feedback"].append(("error", "Configuration not found in metadata. Save first."))
+        return
+    task_info = ensure_task_for_config(session, cfg_obj)
+    task_name = task_info.get("task")
+    status = task_info.get("status")
+    if status in {"INVALID_TARGET", "INVALID_SCHEDULE", "NO_WAREHOUSE"}:
+        reason = task_info.get("reason") or ""
+        st.session_state["config_feedback"].append(("error", f"Task setup failed: {status} {reason}"))
+        return
+    if not task_name:
+        st.session_state["config_feedback"].append(("error", "Unable to determine task name for execution."))
+        return
+    try:
+        session.sql(f"EXECUTE TASK {task_name}").collect()
+        st.session_state["config_feedback"].append(("success", f"Triggered task {task_name} for immediate execution."))
+    except Exception as exc:
+        st.session_state["config_feedback"].append(("error", f"Task execution failed: {exc}"))
 
 
 def _render_feedback() -> None:
@@ -972,11 +983,23 @@ def render_configs(session, app_version: str | None = None) -> None:
             key="cfg_apply_dmfs",
             help="Applies check views immediately when saving.",
         )
-        _render_run_now(session)
         with st.form("config_save_form"):
-            submitted = st.form_submit_button("Save & Apply", use_container_width=True)
-        if submitted:
+            action_cols = st.columns(3)
+            save_apply = action_cols[0].form_submit_button(
+                "Save & Apply", use_container_width=True
+            )
+            save_draft = action_cols[1].form_submit_button(
+                "Save Draft", use_container_width=True, type="secondary"
+            )
+            run_now = action_cols[2].form_submit_button(
+                "Run Now", use_container_width=True, type="secondary"
+            )
+        if save_apply:
             _save_configuration(session)
+        elif save_draft:
+            _save_configuration(session, force_status="DRAFT", apply_dmfs=False)
+        elif run_now:
+            _execute_run_now(session)
     _render_feedback()
 
 
