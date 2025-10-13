@@ -163,7 +163,15 @@ def create_or_update_task(
             )
         return exc
 
+    if warehouse is None or str(warehouse).strip() == "":
+        raise ValueError(
+            "A warehouse is required to schedule tasks. "
+            "Select a warehouse in the app or configure a default in Snowflake before enabling schedules."
+        )
+
     try:
+        session.sql(f"USE WAREHOUSE {_quote(warehouse)}").collect()
+
         session.sql(
             f"""
              CREATE TASK IF NOT EXISTS {fqn}
