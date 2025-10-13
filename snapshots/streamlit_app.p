@@ -2,13 +2,20 @@ import json
 from typing import Dict, List, Optional
 from uuid import uuid4
 
+import streamlit as st
+
 try:
     import altair as alt
 except ModuleNotFoundError:
     alt = None  # type: ignore
 
-import pandas as pd
-import streamlit as st
+try:
+    import pandas as pd
+except ModuleNotFoundError as exc:  # pragma: no cover - env-specific guard
+    st.set_page_config(page_title="Zeus Data Quality", layout="wide")
+    st.error("Pandas is required to run this app. Please install the `pandas` package and restart.")
+    st.exception(exc)
+    st.stop()
 
 # --- Snowpark session (works in Snowsight; safe locally) ---
 try:
