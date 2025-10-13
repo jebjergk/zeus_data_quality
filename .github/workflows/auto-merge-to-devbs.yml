@@ -37,11 +37,22 @@ jobs:
             );
             let pr = prs[0];
             if (!pr) {
-              pr = (await github.rest.pulls.create({
-                owner, repo, head, base,
-                title: `Merge ${head} into ${base}`,
-                body: 'Automated PR created by workflow.'
-              })).data;
+              try {
+                pr = (await github.rest.pulls.create({
+                  owner, repo, head, base,
+                  title: `Merge ${head} into ${base}`,
+                  body: 'Automated PR created by workflow.'
+                })).data;
+              } catch (error) {
+                const message = error?.message || '';
+                const status = error?.status || error?.response?.status;
+                const blocked = typeof message === 'string' && message.includes('GitHub Actions is not permitted to create or approve pull requests');
+                if (status === 403 && blocked) {
+                  core.setFailed('Organization policy prevents GitHub Actions from creating pull requests. Please open a PR from this branch into dev_bs manually, then re-run this workflow.');
+                  return;
+                }
+                throw error;
+              }
             }
             core.setOutput('skip', 'false');
             core.setOutput('number', pr.number.toString());
