@@ -1,4 +1,5 @@
 # tools/mirror_snapshots.py
+# Mirror Python source files into /snapshots with a .p extension.
 import shutil, pathlib
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
