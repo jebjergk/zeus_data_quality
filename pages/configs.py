@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import streamlit as st
 
@@ -58,6 +58,43 @@ def _register_dynamic_key(key: str, default: Any) -> None:
         keys.append(key)
     if key not in st.session_state:
         st.session_state[key] = default
+
+
+def _sanitize_column_selection(values: Iterable[Any]) -> List[str]:
+    """Return a stable list of valid column names from ``values``."""
+
+    cleaned: List[str] = []
+    seen: set[str] = set()
+    for value in values:
+        if value is None:
+            continue
+        if isinstance(value, str):
+            if not value.strip():
+                continue
+            normalized = value
+        else:
+            normalized = str(value)
+        if normalized not in seen:
+            cleaned.append(normalized)
+            seen.add(normalized)
+    return cleaned
+
+
+def _prune_invalid_column_states(valid_columns: List[str]) -> None:
+    """Drop column check state entries that are no longer valid selections."""
+
+    if not valid_columns:
+        valid_set: set[str] = set()
+    else:
+        valid_set = set(valid_columns)
+    col_states: Dict[Any, Dict[str, Any]] = st.session_state.get("col_checks_state", {})
+    if not col_states:
+        return
+    for column in list(col_states.keys()):
+        normalized = column if isinstance(column, str) else str(column)
+        if normalized not in valid_set:
+            _clear_column_dynamic_keys(normalized)
+            del col_states[column]
 
 
 def _ensure_base_state() -> None:
@@ -425,7 +462,7 @@ def _load_editor_state(session, config_id: Optional[str], is_new: bool) -> None:
         else:
             table_state[ctype] = state_entry
 
-    st.session_state["dq_cols_ms"] = sorted(set(selected_columns))
+    st.session_state["dq_cols_ms"] = _sanitize_column_selection(selected_columns)
     st.session_state["col_checks_state"] = col_state
     st.session_state["table_checks_state"] = table_state
 
@@ -466,7 +503,10 @@ def _clear_table_dynamic_keys(ctype: str) -> None:
 
 def _render_column_checks_section() -> None:
     st.markdown("### Column checks")
-    columns = st.session_state.get("dq_cols_ms", [])
+    columns = _sanitize_column_selection(st.session_state.get("dq_cols_ms", []))
+    if columns != st.session_state.get("dq_cols_ms", []):
+        st.session_state["dq_cols_ms"] = columns
+    _prune_invalid_column_states(columns)
     if not columns:
         st.info("Select columns above to configure checks.")
         return
@@ -688,11 +728,11 @@ def _render_column_selector(session) -> None:
     table = st.session_state.get("editor_table")
     if session and db and schema and table:
         options = list_columns(session, db, schema, table)
-    if st.session_state.get("dq_cols_ms"):
-        for col in st.session_state["dq_cols_ms"]:
-            if col not in options:
-                options.append(col)
-    options = sorted(set(options))
+    current_selection = _sanitize_column_selection(st.session_state.get("dq_cols_ms", []))
+    if current_selection != st.session_state.get("dq_cols_ms", []):
+        st.session_state["dq_cols_ms"] = current_selection
+    sanitized_options = _sanitize_column_selection(list(options) + current_selection)
+    options = sorted(sanitized_options, key=lambda col: col.lower())
     st.multiselect(
         "Columns",
         options=options,
@@ -716,23 +756,27 @@ def _generate_check_id(prefix: str, column: str, ctype: str) -> str:
 def _gather_checks(config_id: str, target_fqn: str) -> List[DQCheck]:
     checks: List[DQCheck] = []
     col_states: Dict[str, Dict[str, Dict[str, Any]]] = st.session_state.get("col_checks_state", {})
+    valid_columns = set(_sanitize_column_selection(st.session_state.get("dq_cols_ms", [])))
     for column, check_map in col_states.items():
+        normalized_column = column if isinstance(column, str) else str(column)
+        if normalized_column not in valid_columns:
+            continue
         for ctype, state in check_map.items():
             if not state.get("enabled"):
                 continue
             params = {k: _coerce_param_value(v) for k, v in state.get("params", {}).items() if v not in (None, "")}
-            rule, is_agg = build_rule_for_column_check(target_fqn, column, ctype, params)
+            rule, is_agg = build_rule_for_column_check(target_fqn, normalized_column, ctype, params)
             rule_expr = rule.strip()
             if is_agg:
                 rule_expr = f"{dmfs.AGG_PREFIX}{rule_expr}"
-            check_id = state.get("check_id") or _generate_check_id("COL", column, ctype)
+            check_id = state.get("check_id") or _generate_check_id("COL", normalized_column, ctype)
             state["check_id"] = check_id
             checks.append(
                 DQCheck(
                     config_id=config_id,
                     check_id=check_id,
                     table_fqn=target_fqn,
-                    column_name=column,
+                    column_name=normalized_column,
                     rule_expr=rule_expr,
                     severity=(state.get("severity") or "ERROR").upper(),
                     sample_rows=int(state.get("sample_rows") or 0),
