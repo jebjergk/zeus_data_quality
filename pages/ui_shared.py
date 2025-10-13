@@ -35,12 +35,34 @@ def build_caption(session=None, *, include_metadata: bool = True) -> str:
     """Return a build/version caption with optional metadata context."""
     secrets = getattr(st, "secrets", {})
 
+    def _safe_secret_get(key: str) -> Optional[str]:
+        """Return a secret value if available, otherwise ``None``.
+
+        Streamlit raises ``StreamlitSecretNotFoundError`` when the secrets file
+        is missing.  In local development we want to gracefully fall back to an
+        empty configuration instead of surfacing an exception to the user.
+        """
+
+        if not secrets:
+            return None
+
+        getter = getattr(secrets, "get", None)
+        if getter is None:
+            return None
+
+        try:
+            return getter(key)
+        except Exception:
+            return None
+
     build_version = (
-        secrets.get("build_version")
-        or secrets.get("version")
-        or secrets.get("release")
+        _safe_secret_get("build_version")
+        or _safe_secret_get("version")
+        or _safe_secret_get("release")
     )
-    build_timestamp = secrets.get("build_timestamp") or secrets.get("build_time")
+    build_timestamp = _safe_secret_get("build_timestamp") or _safe_secret_get(
+        "build_time"
+    )
 
     parts: list[str] = []
     if build_version:
