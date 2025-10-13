@@ -150,6 +150,8 @@ def create_or_update_task(
     schedule_expr = f"USING CRON {schedule_cron} {tz}"
     comment = f"Auto task for DQ config {config_id}"
 
+    procedure_fqn = _q(database, schema, "SP_RUN_DQ_CONFIG")
+
     session.sql(
         f"""
          CREATE TASK IF NOT EXISTS {fqn}
@@ -157,7 +159,7 @@ def create_or_update_task(
            SCHEDULE = ?
            COMMENT = ?
          AS
-           CALL "{database}"."{schema}".SP_RUN_DQ_CONFIG(?);
+           CALL {procedure_fqn}(?);
         """,
         params=[warehouse, schedule_expr, comment, config_id],
     ).collect()
