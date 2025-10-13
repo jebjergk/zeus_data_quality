@@ -150,7 +150,7 @@ def create_or_update_task(
 
     name = task_name_for_config(config_id)
     fqn = _q(db_name, schema_name, name)
-    proc = _q(db_name, schema_name, "SP_RUN_DQ_CONFIG")
+    proc = _q(db_name, schema_name, "DQ_RUN_CONFIG")
     sched = f"USING CRON {schedule_cron} {tz}"
     comment = f"Auto task for DQ config {config_id}"
 
@@ -173,7 +173,7 @@ def create_or_update_task(
             if meta_location:
                 hint += f" `{meta_location}`"
             hint += (
-                " exists, that the `SP_RUN_DQ_CONFIG(VARCHAR)` stored procedure is deployed "
+                " exists, that the `DQ_RUN_CONFIG(VARCHAR)` stored procedure is deployed "
                 "there, and that your role has privileges to use it."
             )
             return ValueError(message + "." + hint)
@@ -199,14 +199,14 @@ def create_or_update_task(
             SELECT 1
             FROM {_qi(db_name)}.INFORMATION_SCHEMA.PROCEDURES
             WHERE PROCEDURE_SCHEMA = ?
-              AND PROCEDURE_NAME = 'SP_RUN_DQ_CONFIG'
+              AND PROCEDURE_NAME = 'DQ_RUN_CONFIG'
               AND ARGUMENT_SIGNATURE = '(VARCHAR)'
             LIMIT 1
             """,
             params=[schema_name.upper()],
         ).collect()
         if not proc_rows:
-            raise ValueError("Stored procedure SP_RUN_DQ_CONFIG(VARCHAR) not found")
+            raise ValueError("Stored procedure DQ_RUN_CONFIG(VARCHAR) not found")
 
         session.sql(
             f"""
