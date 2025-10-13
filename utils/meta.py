@@ -115,6 +115,15 @@ def _coerce_bool(value: Any) -> Optional[bool]:
         return None
 
 
+def _coerce_bool_with_default(value: Any, default: bool = True) -> bool:
+    """Return a boolean from ``value`` falling back to ``default`` when unknown."""
+
+    coerced = _coerce_bool(value)
+    if coerced is None:
+        return default
+    return coerced
+
+
 def _coerce_date(value: Any) -> Optional[date]:
     if value is None:
         return None
@@ -264,13 +273,7 @@ def list_configs(session: Session) -> List[DQConfig]:
     out: List[DQConfig] = []
     for r in df.collect():
         d = _normalize_row(r)
-        schedule_enabled_raw = d.get("schedule_enabled")
-        if schedule_enabled_raw is None:
-            schedule_enabled = True
-        elif isinstance(schedule_enabled_raw, str):
-            schedule_enabled = schedule_enabled_raw.strip().upper() in {"TRUE", "T", "YES", "Y", "1"}
-        else:
-            schedule_enabled = bool(schedule_enabled_raw)
+        schedule_enabled = _coerce_bool_with_default(d.get("schedule_enabled"), True)
         out.append(DQConfig(
             config_id=d["config_id"], name=d["name"], description=d.get("description"),
             target_table_fqn=d["target_table_fqn"], run_as_role=d.get("run_as_role"),
@@ -295,13 +298,7 @@ def get_config(session: Session, config_id: str) -> Optional[DQConfig]:
     rows = df.collect()
     if not rows: return None
     d = _normalize_row(rows[0])
-    schedule_enabled_raw = d.get("schedule_enabled")
-    if schedule_enabled_raw is None:
-        schedule_enabled = True
-    elif isinstance(schedule_enabled_raw, str):
-        schedule_enabled = schedule_enabled_raw.strip().upper() in {"TRUE", "T", "YES", "Y", "1"}
-    else:
-        schedule_enabled = bool(schedule_enabled_raw)
+    schedule_enabled = _coerce_bool_with_default(d.get("schedule_enabled"), True)
     return DQConfig(
         config_id=d["config_id"], name=d["name"], description=d.get("description"),
         target_table_fqn=d["target_table_fqn"], run_as_role=d.get("run_as_role"),
