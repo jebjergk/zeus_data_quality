@@ -218,41 +218,55 @@ def _filter_sort_configs(configs: List[DQConfig]) -> List[DQConfig]:
 
 def _render_config_card(session, cfg: DQConfig) -> None:
     with st.container():
-        st.markdown(
-            f"**{cfg.name}** \n"
-            f"<span class='small'>Target: {cfg.target_table_fqn or '—'}</span>",
-            unsafe_allow_html=True,
-        )
-        meta_row = []
-        if cfg.status:
-            tone = "success" if (cfg.status or "").upper() == "ACTIVE" else "info"
-            meta_row.append(pill(cfg.status, tone=tone))
-        if cfg.owner:
-            meta_row.append(f"<span class='small'>Owner: {cfg.owner}</span>")
-        if cfg.run_as_role:
-            meta_row.append(f"<span class='small'>Role: {cfg.run_as_role}</span>")
-        if meta_row:
-            st.markdown(" ".join(meta_row), unsafe_allow_html=True)
-        button_cols = st.columns([1, 1, 1])
-        if button_cols[0].button("Edit", key=f"edit_{cfg.config_id}", use_container_width=True):
-            _trigger_editor_load(cfg.config_id, False)
-        if button_cols[1].button("Duplicate", key=f"duplicate_{cfg.config_id}", use_container_width=True):
-            st.session_state["duplicate_source_id"] = cfg.config_id
-            _trigger_editor_load(cfg.config_id, True)
-        if button_cols[2].button("Delete", key=f"delete_{cfg.config_id}", use_container_width=True, type="secondary"):
-            if session:
-                try:
-                    result = delete_config_full(session, cfg.config_id)
-                    st.session_state["config_feedback"].append(
-                        ("success", f"Deleted configuration {cfg.config_id} (dropped {len(result.get('dmfs_dropped', []))} views)")
-                    )
-                    if st.session_state.get("selected_config_id") == cfg.config_id:
-                        st.session_state["selected_config_id"] = None
-                        st.session_state["editor_active_id"] = None
-                except Exception as exc:
-                    st.session_state["config_feedback"].append(("error", f"Delete failed: {exc}"))
-            else:
-                st.session_state["config_feedback"].append(("warning", "No active session; cannot delete."))
+        info_col, edit_col, delete_col = st.columns([1.0, 0.12, 0.12])
+        with info_col:
+            st.markdown(
+                f"**{cfg.name}** \n"
+                f"<span class='small'>Target: {cfg.target_table_fqn or '—'}</span>",
+                unsafe_allow_html=True,
+            )
+            meta_row = []
+            if cfg.status:
+                tone = "success" if (cfg.status or "").upper() == "ACTIVE" else "info"
+                meta_row.append(pill(cfg.status, tone=tone))
+            if cfg.owner:
+                meta_row.append(f"<span class='small'>Owner: {cfg.owner}</span>")
+            if cfg.run_as_role:
+                meta_row.append(f"<span class='small'>Role: {cfg.run_as_role}</span>")
+            if meta_row:
+                st.markdown(" ".join(meta_row), unsafe_allow_html=True)
+        with edit_col:
+            if st.button(
+                "✏️",
+                key=f"edit_{cfg.config_id}",
+                help="Edit configuration",
+                use_container_width=True,
+            ):
+                _trigger_editor_load(cfg.config_id, False)
+        with delete_col:
+            if st.button(
+                "🗑️",
+                key=f"delete_{cfg.config_id}",
+                help="Delete configuration",
+                use_container_width=True,
+                type="secondary",
+            ):
+                if session:
+                    try:
+                        result = delete_config_full(session, cfg.config_id)
+                        st.session_state["config_feedback"].append(
+                            (
+                                "success",
+                                f"Deleted configuration {cfg.config_id} (dropped {len(result.get('dmfs_dropped', []))} views)",
+                            )
+                        )
+                        if st.session_state.get("selected_config_id") == cfg.config_id:
+                            st.session_state["selected_config_id"] = None
+                            st.session_state["editor_active_id"] = None
+                    except Exception as exc:
+                        st.session_state["config_feedback"].append(("error", f"Delete failed: {exc}"))
+                else:
+                    st.session_state["config_feedback"].append(("warning", "No active session; cannot delete."))
 
 
 def _render_list_panel(session) -> None:
@@ -849,8 +863,10 @@ def render_configs(session, app_version: str | None = None) -> None:
     selected = st.session_state.get("selected_config_id")
 
     if not selected:
-        _render_list_panel(session)
         st.info("Select a configuration or create a new one to begin editing.")
+        _render_list_panel(session)
+        if st.session_state.get("selected_config_id"):
+            st.experimental_rerun()
     else:
         list_col, editor_col = st.columns([1.2, 2.0])
         with list_col:
