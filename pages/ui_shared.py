@@ -43,7 +43,10 @@ def build_caption(session=None, *, include_metadata: bool = True) -> str:
         empty configuration instead of surfacing an exception to the user.
         """
 
-        if not secrets:
+        if secrets is None:
+            return None
+
+        if isinstance(secrets, dict) and not secrets:
             return None
 
         getter = getattr(secrets, "get", None)
