@@ -152,24 +152,38 @@ def create_or_update_task(
 
     procedure_fqn = _q(database, schema, "SP_RUN_DQ_CONFIG")
 
-    session.sql(
-        f"""
-         CREATE TASK IF NOT EXISTS {fqn}
-           WAREHOUSE = ?
-           SCHEDULE = ?
-           COMMENT = ?
-         AS
-           CALL {procedure_fqn}(?);
-        """,
-        params=[warehouse, schedule_expr, comment, config_id],
-    ).collect()
+    def _handle_task_error(exc: Exception) -> Exception:
+        message = str(exc)
+        lowered = message.lower()
+        if "nonexistent warehouse" in lowered or "091083" in lowered:
+            return ValueError(
+                "The current session warehouse is missing or inaccessible. "
+                "Pick an existing warehouse (e.g. by running `USE WAREHOUSE <name>` in Snowflake) "
+                "before enabling schedules."
+            )
+        return exc
 
-    session.sql(
-        f"ALTER TASK {fqn} SET WAREHOUSE = ?, SCHEDULE = ?, COMMENT = ?",
-        params=[warehouse, schedule_expr, comment],
-    ).collect()
+    try:
+        session.sql(
+            f"""
+             CREATE TASK IF NOT EXISTS {fqn}
+               WAREHOUSE = ?
+               SCHEDULE = ?
+               COMMENT = ?
+             AS
+               CALL {procedure_fqn}(?);
+            """,
+            params=[warehouse, schedule_expr, comment, config_id],
+        ).collect()
 
-    session.sql(f"ALTER TASK {fqn} RESUME").collect()
+        session.sql(
+            f"ALTER TASK {fqn} SET WAREHOUSE = ?, SCHEDULE = ?, COMMENT = ?",
+            params=[warehouse, schedule_expr, comment],
+        ).collect()
+
+        session.sql(f"ALTER TASK {fqn} RESUME").collect()
+    except Exception as exc:  # pragma: no cover - Snowflake specific
+        raise _handle_task_error(exc)
 
 
 def run_task_now(session, database: Any, schema: Any, config_id: Any):
