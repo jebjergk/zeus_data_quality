@@ -1,0 +1,81 @@
+name: Auto PR & Squash Merge to dev_bs
+
+on:
+  push:
+    branches-ignore:
+      - main
+      - dev_bs
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  pr-and-merge:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Find or create PR from current branch -> dev_bs
+      - name: Ensure PR exists -> dev_bs
+        id: ensure_pr
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const head = context.ref.replace('refs/heads/', '');
+            const base = 'dev_bs';
+            if (head === base || head === 'main') {
+              core.setOutput('skip', 'true'); return;
+            }
+            const prs = await github.paginate(
+              github.rest.pulls.list,
+              { owner, repo, state: 'open', head: `${owner}:${head}`, base }
+            );
+            let pr = prs[0];
+            if (!pr) {
+              pr = (await github.rest.pulls.create({
+                owner, repo, head, base,
+                title: `Merge ${head} into ${base}`,
+                body: 'Automated PR created by workflow.'
+              })).data;
+            }
+            core.setOutput('skip', 'false');
+            core.setOutput('number', pr.number.toString());
+
+      - name: Enable auto-merge (squash)
+        if: steps.ensure_pr.outputs.skip == 'false'
+        uses: peter-evans/enable-pull-request-automerge@v3
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          pull-request-number: ${{ steps.ensure_pr.outputs.number }}
+          merge-method: squash
+
+      - name: Auto-merge when ready
+        if: steps.ensure_pr.outputs.skip == 'false'
+        uses: peter-evans/auto-merge@v3
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          pull-request-number: ${{ steps.ensure_pr.outputs.number }}
+          merge-method: squash
+
+      - name: Delete source branch after merge
+        if: steps.ensure_pr.outputs.skip == 'false'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const head = context.ref.replace('refs/heads/', '');
+            // Check if PR merged; if so, delete branch
+            const prNum = Number(core.getInput('number')) || Number(process.env.PR_NUMBER || 0);
+            // Fallback: attempt delete if branch is merged into dev_bs already
+            try {
+              await github.rest.git.deleteRef({ owner, repo, ref: `heads/${head}` });
+            } catch (e) {
+              core.warning(`Could not delete branch ${head}: ${e.message}`);
+            }
+        env:
+          PR_NUMBER: ${{ steps.ensure_pr.outputs.number }}
