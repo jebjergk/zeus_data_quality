@@ -74,6 +74,17 @@ def _ensure_base_state() -> None:
     st.session_state.setdefault("config_feedback", [])
 
 
+def _clear_editor_selection() -> None:
+    """Reset editor-related state so the configuration list can be shown."""
+
+    _reset_dynamic_keys()
+    st.session_state["selected_config_id"] = None
+    st.session_state["editor_active_id"] = None
+    st.session_state["editor_is_new"] = False
+    st.session_state["editor_needs_load"] = False
+    st.session_state["duplicate_source_id"] = None
+
+
 def _column_param_specs(ctype: str) -> List[Dict[str, Any]]:
     ctype = (ctype or "").upper()
     if ctype == "UNIQUE":
@@ -868,10 +879,16 @@ def render_configs(session, app_version: str | None = None) -> None:
         if st.session_state.get("selected_config_id"):
             st.experimental_rerun()
     else:
-        with st.sidebar:
-            _render_list_panel(session)
-        if st.session_state.get("selected_config_id") != selected:
+        if st.button(
+            "← Back to configuration list",
+            key="cfg_back_to_list",
+            type="secondary",
+        ):
+            _clear_editor_selection()
             st.experimental_rerun()
+
+        with st.expander("Browse other configurations", expanded=False):
+            _render_list_panel(session)
         is_new = st.session_state.get("editor_is_new", False)
         _render_feedback()
         _render_general_details(is_new)
