@@ -845,15 +845,17 @@ def render_configs(session, app_version: str | None = None) -> None:
         show_version=True,
     )
 
-    list_col, editor_col = st.columns([1.2, 2.0])
-    with list_col:
+    _ensure_editor_loaded(session)
+    selected = st.session_state.get("selected_config_id")
+
+    if not selected:
         _render_list_panel(session)
-    with editor_col:
-        _ensure_editor_loaded(session)
-        selected = st.session_state.get("selected_config_id")
-        if not selected:
-            st.info("Select a configuration or create a new one to begin editing.")
-        else:
+        st.info("Select a configuration or create a new one to begin editing.")
+    else:
+        list_col, editor_col = st.columns([1.2, 2.0])
+        with list_col:
+            _render_list_panel(session)
+        with editor_col:
             is_new = st.session_state.get("editor_is_new", False)
             _render_feedback()
             _render_general_details(is_new)
@@ -868,7 +870,11 @@ def render_configs(session, app_version: str | None = None) -> None:
                 danger_note("Select a target table to configure checks.")
             divider()
             _render_schedule_section()
-            st.checkbox("Attach DMF views after saving", key="cfg_apply_dmfs", help="Applies check views immediately when saving.")
+            st.checkbox(
+                "Attach DMF views after saving",
+                key="cfg_apply_dmfs",
+                help="Applies check views immediately when saving.",
+            )
             _render_run_now(session)
             with st.form("config_save_form"):
                 submitted = st.form_submit_button("Save & Apply", use_container_width=True)
