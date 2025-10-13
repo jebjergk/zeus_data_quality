@@ -89,8 +89,13 @@ def build_task_fqn(target_table_fqn: Optional[str], config_id: Optional[str]) ->
     if len(parts) != 3:
         return None
     db, schema, _ = parts
+
+    def quote_ident(identifier: str) -> str:
+        identifier = identifier.strip('"')
+        return f'"{identifier}"'
+
     task_name = f'"DQ_TASK_{config_id.upper()}"'
-    return f"{db}.{schema}.{task_name}"
+    return f"{quote_ident(db)}.{quote_ident(schema)}.{task_name}"
 
 def render_home():
     st.title("Zeus Data Quality")
