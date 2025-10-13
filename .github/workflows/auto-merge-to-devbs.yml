@@ -10,6 +10,7 @@ on:
 permissions:
   contents: write
   pull-requests: write
+  checks: read
 
 jobs:
   pr-and-merge:
@@ -45,37 +46,156 @@ jobs:
             core.setOutput('skip', 'false');
             core.setOutput('number', pr.number.toString());
 
-      - name: Enable auto-merge (squash)
-        if: steps.ensure_pr.outputs.skip == 'false'
-        uses: peter-evans/enable-pull-request-automerge@v3
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          pull-request-number: ${{ steps.ensure_pr.outputs.number }}
-          merge-method: squash
-
-      - name: Auto-merge when ready
-        if: steps.ensure_pr.outputs.skip == 'false'
-        uses: peter-evans/auto-merge@v3
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          pull-request-number: ${{ steps.ensure_pr.outputs.number }}
-          merge-method: squash
-
-      - name: Delete source branch after merge
+      - name: Wait for required checks
         if: steps.ensure_pr.outputs.skip == 'false'
         uses: actions/github-script@v7
         with:
           script: |
             const owner = context.repo.owner;
             const repo = context.repo.repo;
-            const head = context.ref.replace('refs/heads/', '');
-            // Check if PR merged; if so, delete branch
-            const prNum = Number(core.getInput('number')) || Number(process.env.PR_NUMBER || 0);
-            // Fallback: attempt delete if branch is merged into dev_bs already
+            const prNumber = Number(process.env.PR_NUMBER || '');
+            if (!prNumber) {
+              core.setFailed('Missing pull request number output.');
+              return;
+            }
+
+            const timeoutMs = 60 * 60 * 1000; // 60 minutes
+            const intervalMs = 15 * 1000; // 15 seconds
+            const minWaitMs = 30 * 1000; // ensure other workflows register
+            const start = Date.now();
+
+            const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
+
+            async function evaluateChecks(sha) {
+              const { data: status } = await github.rest.repos.getCombinedStatusForRef({ owner, repo, ref: sha });
+              const { data: suitesData } = await github.rest.checks.listSuitesForRef({ owner, repo, ref: sha });
+              const suites = suitesData.check_suites || [];
+              const hasStatuses = (status.statuses || []).length > 0;
+              const hasSuites = suites.length > 0;
+
+              if (!hasStatuses && !hasSuites) {
+                if (Date.now() - start < minWaitMs) {
+                  return { state: 'pending', reason: 'Waiting for checks to register.' };
+                }
+                return { state: 'success', reason: 'No status checks detected.' };
+              }
+
+              if (status.state === 'failure') {
+                const failingStatuses = status.statuses
+                  .filter(s => s.state === 'failure' || s.state === 'error')
+                  .map(s => `${s.context}: ${s.description || s.state}`);
+                return { state: 'failure', reason: `Status checks failed: ${failingStatuses.join('; ')}` };
+              }
+              if (status.state === 'pending') {
+                return { state: 'pending', reason: 'Status checks pending.' };
+              }
+
+              const incompleteSuite = suites.find(suite => suite.status !== 'completed');
+              if (incompleteSuite) {
+                return { state: 'pending', reason: `Check suite pending: ${incompleteSuite.app?.name || 'unknown app'}.` };
+              }
+
+              const failedSuite = suites.find(suite => {
+                const conclusion = suite.conclusion || '';
+                return !['success', 'neutral', 'skipped'].includes(conclusion);
+              });
+              if (failedSuite) {
+                return { state: 'failure', reason: `Check suite ${failedSuite.app?.name || failedSuite.id} concluded ${failedSuite.conclusion}.` };
+              }
+
+              return { state: 'success', reason: 'All checks passed.' };
+            }
+
+            while (Date.now() - start < timeoutMs) {
+              const { data: pr } = await github.rest.pulls.get({ owner, repo, pull_number: prNumber });
+              if (pr.state !== 'open') {
+                core.setFailed(`Pull request #${prNumber} is not open.`);
+                return;
+              }
+
+              if (!pr.mergeable_state || pr.mergeable_state === 'unknown') {
+                core.info('Mergeability unknown, retrying...');
+                await wait(intervalMs);
+                continue;
+              }
+
+              const result = await evaluateChecks(pr.head.sha);
+              core.info(result.reason);
+
+              if (result.state === 'failure') {
+                core.setFailed(result.reason);
+                return;
+              }
+
+              if (result.state === 'success') {
+                const blockedStates = ['blocked', 'dirty', 'behind', 'draft'];
+                if (blockedStates.includes(pr.mergeable_state)) {
+                  core.setFailed(`PR cannot be merged automatically. mergeable_state=${pr.mergeable_state}.`);
+                  return;
+                }
+                core.info('Checks complete and PR mergeable. Proceeding.');
+                return;
+              }
+
+              await wait(intervalMs);
+            }
+
+            core.setFailed('Timed out waiting for checks to succeed.');
+        env:
+          PR_NUMBER: ${{ steps.ensure_pr.outputs.number }}
+
+      - name: Merge PR when ready (squash)
+        if: steps.ensure_pr.outputs.skip == 'false'
+        id: merge_pr
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const prNumber = Number(process.env.PR_NUMBER || '');
+            if (!prNumber) {
+              core.setFailed('Missing pull request number output.');
+              return;
+            }
+
+            const { data: pr } = await github.rest.pulls.get({ owner, repo, pull_number: prNumber });
+            if (pr.state !== 'open') {
+              core.setFailed(`Pull request #${prNumber} is not open.`);
+              return;
+            }
+
+            if (pr.mergeable_state && ['blocked', 'dirty', 'behind', 'draft'].includes(pr.mergeable_state)) {
+              core.setFailed(`PR cannot be merged automatically. mergeable_state=${pr.mergeable_state}.`);
+              return;
+            }
+
             try {
-              await github.rest.git.deleteRef({ owner, repo, ref: `heads/${head}` });
-            } catch (e) {
-              core.warning(`Could not delete branch ${head}: ${e.message}`);
+              const mergeResult = await github.rest.pulls.merge({
+                owner,
+                repo,
+                pull_number: prNumber,
+                merge_method: 'squash',
+                commit_title: `Merge ${pr.head.ref} into ${pr.base.ref}`,
+              });
+              core.setOutput('merged', mergeResult.data.merged ? 'true' : 'false');
+              core.info(`Merge result: ${mergeResult.data.message}`);
+            } catch (error) {
+              core.setFailed(`Failed to merge PR #${prNumber}: ${error.message}`);
             }
         env:
           PR_NUMBER: ${{ steps.ensure_pr.outputs.number }}
+
+      - name: Delete source branch after merge
+        if: steps.ensure_pr.outputs.skip == 'false' && steps.merge_pr.outputs.merged == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const head = context.ref.replace('refs/heads/', '');
+            try {
+              await github.rest.git.deleteRef({ owner, repo, ref: `heads/${head}` });
+              core.info(`Deleted branch ${head}.`);
+            } catch (e) {
+              core.warning(`Could not delete branch ${head}: ${e.message}`);
+            }
