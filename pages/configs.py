@@ -868,32 +868,32 @@ def render_configs(session, app_version: str | None = None) -> None:
         if st.session_state.get("selected_config_id"):
             st.experimental_rerun()
     else:
-        list_col, editor_col = st.columns([1.2, 2.0])
-        with list_col:
+        with st.sidebar:
             _render_list_panel(session)
-        with editor_col:
-            is_new = st.session_state.get("editor_is_new", False)
-            _render_feedback()
-            _render_general_details(is_new)
-            divider()
-            _render_target_picker(session)
-            _render_column_selector(session)
-            target_fqn = st.session_state.get("editor_target_fqn") or st.session_state.get("editor_target_fqn_display")
-            if target_fqn:
-                _render_column_checks_section()
-                _render_table_checks_section()
-            else:
-                danger_note("Select a target table to configure checks.")
-            divider()
-            _render_schedule_section()
-            st.checkbox(
-                "Attach DMF views after saving",
-                key="cfg_apply_dmfs",
-                help="Applies check views immediately when saving.",
-            )
-            _render_run_now(session)
-            with st.form("config_save_form"):
-                submitted = st.form_submit_button("Save & Apply", use_container_width=True)
-            if submitted:
-                _save_configuration(session)
+        if st.session_state.get("selected_config_id") != selected:
+            st.experimental_rerun()
+        is_new = st.session_state.get("editor_is_new", False)
+        _render_feedback()
+        _render_general_details(is_new)
+        divider()
+        _render_target_picker(session)
+        _render_column_selector(session)
+        target_fqn = st.session_state.get("editor_target_fqn") or st.session_state.get("editor_target_fqn_display")
+        if target_fqn:
+            _render_column_checks_section()
+            _render_table_checks_section()
+        else:
+            danger_note("Select a target table to configure checks.")
+        divider()
+        _render_schedule_section()
+        st.checkbox(
+            "Attach DMF views after saving",
+            key="cfg_apply_dmfs",
+            help="Applies check views immediately when saving.",
+        )
+        _render_run_now(session)
+        with st.form("config_save_form"):
+            submitted = st.form_submit_button("Save & Apply", use_container_width=True)
+        if submitted:
+            _save_configuration(session)
     _render_feedback()
