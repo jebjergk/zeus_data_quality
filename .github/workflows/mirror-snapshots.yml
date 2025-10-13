@@ -1,3 +1,4 @@
+# Mirror workflow keeps /snapshots in sync with Python sources.
 name: Mirror .py to /snapshots as .p
 
 on:
