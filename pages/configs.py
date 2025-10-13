@@ -296,14 +296,24 @@ def _render_list_panel(session) -> None:
         st.info("Connect to Snowflake to load and manage configurations.")
     configs = list_configs(session) if session else []
 
-    st.text_input("Search", key="config_search", placeholder="Name, table, owner…")
-    st.selectbox(
-        "Sort by",
-        ["Status & name", "Name A→Z", "Name Z→A", "Owner", "Target table"],
-        key="config_sort",
-    )
-    if st.button("➕ Create configuration", use_container_width=True):
-        _trigger_editor_load(NEW_CONFIG_ID, True)
+    search_col, sort_col, create_col = st.columns([3, 2, 2], gap="small")
+    with search_col:
+        st.text_input(
+            "Search",
+            key="config_search",
+            placeholder="Name, table, owner…",
+            label_visibility="collapsed",
+        )
+    with sort_col:
+        st.selectbox(
+            "Sort by",
+            ["Status & name", "Name A→Z", "Name Z→A", "Owner", "Target table"],
+            key="config_sort",
+            label_visibility="collapsed",
+        )
+    with create_col:
+        if st.button("➕ Create configuration", use_container_width=True):
+            _trigger_editor_load(NEW_CONFIG_ID, True)
 
     filtered = _filter_sort_configs(configs)
     if not filtered:
