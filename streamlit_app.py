@@ -2,6 +2,8 @@ import json
 from typing import Dict, List, Optional
 from uuid import uuid4
 
+import altair as alt
+import pandas as pd
 import streamlit as st
 
 # --- Snowpark session (works in Snowsight; safe locally) ---
@@ -14,6 +16,7 @@ except Exception:
 # --- App imports (our modules) ---
 from utils.meta import (
     DQConfig, DQCheck,
+    DQ_CONFIG_TBL, _q,
     list_configs, get_config, get_checks,
     list_databases, list_schemas, list_tables, list_columns,
     fq_table,
@@ -22,6 +25,8 @@ from utils import schedules
 from services.configs import save_config_and_checks, delete_config_full
 from services.state import get_state, set_state
 from utils.checkdefs import build_rule_for_column_check, build_rule_for_table_check
+
+RUN_RESULTS_TBL = "DQ_RUN_RESULTS"
 
 st.set_page_config(page_title="Zeus Data Quality", layout="wide")
 
@@ -48,6 +53,16 @@ section[data-testid="stSidebar"] .stButton {
 # ---------- Helpers ----------
 def _keyify(s: str) -> str:
     return "".join(ch if ch.isalnum() else "_" for ch in s).lower()
+
+def _normalize_bool(value) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return False
+    if isinstance(value, (int, float)):
+        return value != 0
+    text = str(value).strip().upper()
+    return text in {"TRUE", "T", "YES", "Y", "1"}
 
 def navigate_to(page: str) -> None:
     """Update the current page selection in session state."""
@@ -709,6 +724,224 @@ def render_config_editor():
         st.session_state["last_notices"] = post_submit_notices
         st.session_state["cfg_mode"] = "list"; st.rerun()
 
+def render_monitor():
+    st.header("📊 Monitor")
+    if not session:
+        st.info("Connect to Snowflake to view recent data quality runs.")
+        return
+
+    configs = list_configs(session)
+    config_labels: List[str] = []
+    config_map: Dict[str, str] = {}
+    for cfg in configs:
+        label_base = (cfg.name or "").strip()
+        if label_base and label_base.upper() != (cfg.config_id or "").upper():
+            label = f"{label_base} ({cfg.config_id})"
+        else:
+            label = cfg.config_id or label_base or "Unnamed"
+        config_labels.append(label)
+        config_map[label] = cfg.config_id
+
+    if "_mon_config_options" not in st.session_state or st.session_state.get("_mon_config_options") != config_labels:
+        st.session_state["mon_configs"] = config_labels.copy()
+        st.session_state["_mon_config_options"] = config_labels.copy()
+
+    filters = st.columns([1, 1, 3])
+    with filters[0]:
+        days = st.selectbox("Days", options=[7, 30, 60, 90], index=1, key="mon_days")
+    with filters[1]:
+        status_filter = st.selectbox(
+            "Status",
+            options=["All", "Failed only", "Passed only"],
+            index=0,
+            key="mon_status",
+        )
+    with filters[2]:
+        selected_labels = st.multiselect(
+            "Configurations",
+            options=config_labels,
+            default=st.session_state.get("mon_configs", config_labels),
+            key="mon_configs",
+        )
+
+    selected_config_ids = [config_map[label] for label in selected_labels if label in config_map]
+
+    results_table = _q(RUN_RESULTS_TBL)
+    config_table = _q(DQ_CONFIG_TBL)
+    where_clauses = [f"r.RUN_TS >= DATEADD('day', -{int(days)}, CURRENT_TIMESTAMP())"]
+    params: List[object] = []
+
+    if selected_config_ids:
+        placeholders = ", ".join(["?"] * len(selected_config_ids))
+        where_clauses.append(f"r.CONFIG_ID IN ({placeholders})")
+        params.extend(selected_config_ids)
+
+    if status_filter == "Failed only":
+        where_clauses.append("COALESCE(r.OK, FALSE) = FALSE")
+    elif status_filter == "Passed only":
+        where_clauses.append("COALESCE(r.OK, FALSE) = TRUE")
+
+    where_sql = " AND ".join(where_clauses) if where_clauses else "1=1"
+    query = f"""
+        SELECT
+            r.RUN_TS,
+            r.CONFIG_ID,
+            c.NAME AS CONFIG_NAME,
+            r.CHECK_ID,
+            r.CHECK_TYPE,
+            r.FAILURES,
+            r.OK,
+            r.ERROR_MSG
+        FROM {results_table} r
+        LEFT JOIN {config_table} c ON c.CONFIG_ID = r.CONFIG_ID
+        WHERE {where_sql}
+        ORDER BY r.RUN_TS DESC
+        LIMIT 5000
+    """
+
+    try:
+        df = session.sql(query, params=params).to_pandas()
+    except Exception as exc:
+        st.warning(f"Unable to load run results: {exc}")
+        return
+
+    df.columns = [str(col).lower() for col in df.columns]
+    if "run_ts" not in df.columns:
+        st.info("No run results available in the selected window.")
+        return
+
+    df["run_ts"] = pd.to_datetime(df["run_ts"], utc=True, errors="coerce")
+    df["run_ts"] = df["run_ts"].dt.tz_convert(None)
+    df = df.dropna(subset=["run_ts"])
+
+    has_results = not df.empty
+    if not has_results:
+        st.info("No run results available in the selected window.")
+
+    df["ok_flag"] = df["ok"].apply(_normalize_bool)
+    df["failures_num"] = pd.to_numeric(df["failures"], errors="coerce").fillna(0)
+    df["run_date"] = df["run_ts"].dt.floor("D")
+    df["config_display"] = df["config_name"].fillna("").str.strip()
+    missing_config_mask = df["config_display"] == ""
+    df.loc[missing_config_mask, "config_display"] = df.loc[missing_config_mask, "config_id"]
+
+    failed_df = df[~df["ok_flag"]]
+    failed_checks = int(failed_df.shape[0])
+    total_failures = int(failed_df["failures_num"].sum())
+    configs_affected = int(failed_df["config_id"].nunique())
+
+    today = pd.Timestamp.utcnow().normalize()
+    start_date = today - pd.Timedelta(days=int(days) - 1)
+    all_dates = pd.date_range(start=start_date, end=today, freq="D")
+
+    if not all_dates.empty:
+        fail_counts = (
+            failed_df.groupby("run_date").size().reindex(all_dates, fill_value=0).reset_index()
+        )
+        fail_counts.columns = ["run_date", "failed_checks"]
+        fail_counts["failed_checks"] = fail_counts["failed_checks"].astype(int)
+
+        failure_totals = (
+            failed_df.groupby("run_date")["failures_num"].sum().reindex(all_dates, fill_value=0).reset_index()
+        )
+        failure_totals.columns = ["run_date", "total_failures"]
+        failure_totals["total_failures"] = failure_totals["total_failures"].astype(int)
+    else:
+        fail_counts = pd.DataFrame({"run_date": [], "failed_checks": []})
+        failure_totals = pd.DataFrame({"run_date": [], "total_failures": []})
+
+    k1, k2, k3 = st.columns(3)
+    k1.metric("Failed checks", f"{failed_checks:,}")
+    k2.metric("Total failures (rows)", f"{total_failures:,}")
+    k3.metric("Configs affected", f"{configs_affected:,}")
+
+    st.markdown("<div class='sf-hr'></div>", unsafe_allow_html=True)
+
+    st.subheader("Daily failed checks")
+    fail_chart = (
+        alt.Chart(fail_counts)
+        .mark_line()
+        .encode(
+            x=alt.X("run_date:T", title="Run date"),
+            y=alt.Y("failed_checks:Q", title="Failed checks"),
+            tooltip=[
+                alt.Tooltip("run_date:T", title="Date"),
+                alt.Tooltip("failed_checks:Q", title="Failed checks"),
+            ],
+        )
+    )
+    fail_points = (
+        alt.Chart(fail_counts)
+        .transform_filter(alt.datum.failed_checks > 0)
+        .mark_point(size=70, filled=True)
+        .encode(
+            x="run_date:T",
+            y="failed_checks:Q",
+            tooltip=[
+                alt.Tooltip("run_date:T", title="Date"),
+                alt.Tooltip("failed_checks:Q", title="Failed checks"),
+            ],
+        )
+    )
+    st.altair_chart((fail_chart + fail_points).properties(height=240), use_container_width=True)
+
+    st.subheader("Daily total failures")
+    failure_chart = (
+        alt.Chart(failure_totals)
+        .mark_line()
+        .encode(
+            x=alt.X("run_date:T", title="Run date"),
+            y=alt.Y("total_failures:Q", title="Total failures"),
+            tooltip=[
+                alt.Tooltip("run_date:T", title="Date"),
+                alt.Tooltip("total_failures:Q", title="Total failures"),
+            ],
+        )
+    )
+    failure_points = (
+        alt.Chart(failure_totals)
+        .transform_filter(alt.datum.total_failures > 0)
+        .mark_point(size=70, filled=True)
+        .encode(
+            x="run_date:T",
+            y="total_failures:Q",
+            tooltip=[
+                alt.Tooltip("run_date:T", title="Date"),
+                alt.Tooltip("total_failures:Q", title="Total failures"),
+            ],
+        )
+    )
+    st.altair_chart((failure_chart + failure_points).properties(height=240), use_container_width=True)
+
+    st.subheader("Recent results")
+    recent_df = df.sort_values("run_ts", ascending=False).head(200).copy()
+    recent_df["time"] = recent_df["run_ts"].dt.strftime("%Y-%m-%d %H:%M:%S")
+    recent_df["failures_display"] = recent_df["failures_num"].round().astype(int)
+    recent_df["error_msg"] = recent_df["error_msg"].fillna("")
+
+    table = recent_df[[
+        "time",
+        "config_display",
+        "check_id",
+        "check_type",
+        "failures_display",
+        "ok_flag",
+        "error_msg",
+    ]].rename(
+        columns={
+            "time": "Time",
+            "config_display": "Config",
+            "check_id": "Check ID",
+            "check_type": "Check type",
+            "failures_display": "Failures",
+            "ok_flag": "OK",
+            "error_msg": "Error message",
+        }
+    )
+
+    st.dataframe(table, use_container_width=True, hide_index=True)
+    st.caption("Row checks have views; aggregates do not.")
+
 # ---------- Sidebar + routing ----------
 state = get_state()
 if "page" not in st.session_state:
@@ -734,15 +967,57 @@ with st.sidebar:
         on_click=navigate_to,
         args=("cfg",),
     )
+    st.button(
+        "📊 Monitor",
+        use_container_width=True,
+        type="primary" if current_page == "monitor" else "secondary",
+        key="nav_monitor",
+        on_click=navigate_to,
+        args=("monitor",),
+    )
     st.divider()
     run_as_role = st.text_input("RUN_AS_ROLE", value=state.get("run_as_role") or "")
     dmf_role = st.text_input("DMF_ROLE", value=state.get("dmf_role") or "")
     set_state(run_as_role or None, dmf_role or None)
 
-if st.session_state.get("page","home") == "cfg":
+nav_cols = st.columns(3)
+with nav_cols[0]:
+    st.button(
+        "🏠 Overview",
+        use_container_width=True,
+        type="primary" if current_page == "home" else "secondary",
+        key="top_nav_home",
+        on_click=navigate_to,
+        args=("home",),
+    )
+with nav_cols[1]:
+    st.button(
+        "⚙️ Configurations",
+        use_container_width=True,
+        type="primary" if current_page == "cfg" else "secondary",
+        key="top_nav_cfg",
+        on_click=navigate_to,
+        args=("cfg",),
+    )
+with nav_cols[2]:
+    st.button(
+        "📊 Monitor",
+        use_container_width=True,
+        type="primary" if current_page == "monitor" else "secondary",
+        key="top_nav_monitor",
+        on_click=navigate_to,
+        args=("monitor",),
+    )
+
+st.markdown("<div class='sf-hr'></div>", unsafe_allow_html=True)
+
+page = st.session_state.get("page", "home")
+if page == "cfg":
     if st.session_state.get("cfg_mode","list") == "list":
         render_config_list()
     else:
         render_config_editor()
+elif page == "monitor":
+    render_monitor()
 else:
     render_home()
