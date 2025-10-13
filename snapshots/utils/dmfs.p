@@ -24,6 +24,18 @@ __all__ = [
     "run_task_now",
 ]
 
+
+def _qi(name: str) -> str:
+    """Quote an identifier for Snowflake."""
+
+    return '"' + str(name).replace('"', '""') + '"'
+
+
+def _q(db: str, sch: str, obj: str) -> str:
+    """Return a fully qualified, quoted Snowflake identifier."""
+
+    return f"{_qi(db)}.{_qi(sch)}.{_qi(obj)}"
+
 def _split_fqn(fqn: str) -> Tuple[str, str, str]:
     parts: List[str] = []
     current: List[str] = []
@@ -121,19 +133,6 @@ def task_name_for_config(config_id: Any) -> str:
     return f"DQ_TASK_{_safe_ident(config_id)}"
 
 
-def _quote(part: Any) -> str:
-    text = "" if part is None else str(part)
-    text = text.strip('"')
-    text = text.replace('"', '""')
-    return f'"{text}"'
-
-
-def _q(database: Any, schema: Any, object_name: Any) -> str:
-    """Return a fully qualified, quoted Snowflake identifier."""
-
-    return f"{_quote(database)}.{_quote(schema)}.{_quote(object_name)}"
-
-
 def create_or_update_task(
     session,
     database: Any,
@@ -145,12 +144,17 @@ def create_or_update_task(
 ) -> None:
     """Create or update the Snowflake task for the given configuration."""
 
-    name = task_name_for_config(config_id)
-    fqn = _q(database, schema, name)
-    schedule_expr = f"USING CRON {schedule_cron} {tz}"
-    comment = f"Auto task for DQ config {config_id}"
+    db_name = "" if database is None else str(database)
+    schema_name = "" if schema is None else str(schema)
 
-    procedure_fqn = _q(database, schema, "SP_RUN_DQ_CONFIG")
+    if not db_name or not schema_name:
+        raise ValueError("Database and schema are required to manage tasks")
+
+    name = task_name_for_config(config_id)
+    fqn = _q(db_name, schema_name, name)
+    proc = _q(db_name, schema_name, "SP_RUN_DQ_CONFIG")
+    sched = f"USING CRON {schedule_cron} {tz}"
+    comment = f"Auto task for DQ config {config_id}"
 
     def _handle_task_error(exc: Exception) -> Exception:
         message = str(exc)
@@ -169,24 +173,49 @@ def create_or_update_task(
             "Select a warehouse in the app or configure a default in Snowflake before enabling schedules."
         )
 
+    warehouse_name = str(warehouse).strip()
+
     try:
-        session.sql(f"USE WAREHOUSE {_quote(warehouse)}").collect()
+        session.sql(f"USE WAREHOUSE {_qi(warehouse_name)}").collect()
+
+        warehouses = session.sql(f"SHOW WAREHOUSES LIKE {_qi(warehouse_name)}").collect()
+        if not warehouses:
+            raise ValueError("Warehouse not found or no USAGE privilege")
+
+        proc_rows = session.sql(
+            f"""
+            SELECT 1
+            FROM {_qi(db_name)}.INFORMATION_SCHEMA.PROCEDURES
+            WHERE PROCEDURE_SCHEMA = ?
+              AND PROCEDURE_NAME = 'SP_RUN_DQ_CONFIG'
+              AND ARGUMENT_SIGNATURE = '(VARCHAR)'
+            LIMIT 1
+            """,
+            params=[schema_name.upper()],
+        ).collect()
+        if not proc_rows:
+            raise ValueError("Stored procedure SP_RUN_DQ_CONFIG(VARCHAR) not found")
 
         session.sql(
             f"""
-             CREATE TASK IF NOT EXISTS {fqn}
-               WAREHOUSE = ?
-               SCHEDULE = ?
-               COMMENT = ?
-             AS
-               CALL {procedure_fqn}(?);
-            """,
-            params=[warehouse, schedule_expr, comment, config_id],
+         CREATE TASK IF NOT EXISTS {fqn}
+           WAREHOUSE = {_qi(warehouse_name)}
+           SCHEDULE  = ?
+           COMMENT   = ?
+         AS
+           CALL {proc}(?);
+        """,
+            params=[sched, comment, config_id],
         ).collect()
 
         session.sql(
-            f"ALTER TASK {fqn} SET WAREHOUSE = ?, SCHEDULE = ?, COMMENT = ?",
-            params=[warehouse, schedule_expr, comment],
+            f"""
+         ALTER TASK {fqn} SET
+           WAREHOUSE = {_qi(warehouse_name)},
+           SCHEDULE  = ?,
+           COMMENT   = ?
+        """,
+            params=[sched, comment],
         ).collect()
 
         session.sql(f"ALTER TASK {fqn} RESUME").collect()
