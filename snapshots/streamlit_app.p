@@ -18,16 +18,16 @@ except Exception:
     session = None
 
 # --- App imports (our modules) ---
+from utils.dmfs import run_task_now, task_name_for_config
 from utils.meta import (
     DQConfig, DQCheck,
-    DQ_CONFIG_TBL, _q,
+    DQ_CONFIG_TBL, _q, _parse_relation_name,
     list_configs, get_config, get_checks,
     list_databases, list_schemas, list_tables, list_columns,
     fq_table,
 )
 from utils import schedules
 from services.configs import save_config_and_checks, delete_config_full
-from services.runner import run_now as run_checks_now
 from services.state import get_state, set_state
 from utils.checkdefs import build_rule_for_column_check, build_rule_for_table_check
 
@@ -110,22 +110,6 @@ def stateless_table_picker(preselect_fqn: Optional[str]):
 
     return db_sel, sch_sel, tbl_sel, fq_table(db_sel, sch_sel, tbl_sel)
 
-
-def build_task_fqn(target_table_fqn: Optional[str], config_id: Optional[str]) -> Optional[str]:
-    """Build the Snowflake task FQN for the given configuration."""
-    if not target_table_fqn or not config_id:
-        return None
-    parts = [part.strip() for part in target_table_fqn.split(".") if part.strip()]
-    if len(parts) != 3:
-        return None
-    db, schema, _ = parts
-
-    def quote_ident(identifier: str) -> str:
-        identifier = identifier.strip('"')
-        return f'"{identifier}"'
-
-    task_name = f'"DQ_TASK_{config_id.upper()}"'
-    return f"{quote_ident(db)}.{quote_ident(schema)}.{task_name}"
 
 def render_home():
     st.title("Zeus Data Quality")
@@ -667,57 +651,35 @@ def render_config_editor():
 
         if run_now_btn:
             try:
-                run_output = run_checks_now(session, dq_cfg, checks_rebound)
+                db, schema, _ = _parse_relation_name(dq_cfg.target_table_fqn or "")
             except Exception as exc:
-                err_msg = f"Failed to run checks immediately: {exc}"
+                err_msg = f"Failed to determine task location: {exc}"
                 st.error(err_msg)
                 remember("error", err_msg)
             else:
-                check_results = run_output.get("checks", []) if isinstance(run_output, dict) else []
-                if not check_results:
-                    info_msg = "Run completed but no check results were returned."
-                    st.info(info_msg)
-                    remember("info", info_msg)
+                if not db or not schema:
+                    warn_msg = "Run Now requires a fully qualified target table (database and schema)."
+                    st.warning(warn_msg)
+                    remember("warning", warn_msg)
                 else:
-                    summary_rows = []
-                    total_failures = 0
-                    for chk_res in check_results:
-                        failures = int(chk_res.get("failures") or 0)
-                        total_failures += failures
-                        summary_rows.append(
-                            {
-                                "Check ID": chk_res.get("check_id"),
-                                "Type": chk_res.get("type"),
-                                "Aggregate": "Yes" if chk_res.get("aggregate") else "No",
-                                "Failures": failures,
-                            }
-                        )
-
-                    st.markdown("#### Run Now summary")
-                    summary_df = pd.DataFrame(summary_rows)
-                    st.dataframe(summary_df, use_container_width=True, hide_index=True)
-
-                    if total_failures:
-                        warn_msg = (
-                            f"Run completed with {total_failures} failure"
-                            f"{'s' if total_failures != 1 else ''}."
-                        )
-                        st.warning(warn_msg)
-                        remember("warning", warn_msg)
+                    task_name = task_name_for_config(dq_cfg.config_id)
+                    try:
+                        result_df = run_task_now(session, db, schema, dq_cfg.config_id)
+                    except Exception as exc:
+                        err_msg = f"Failed to trigger task run: {exc}"
+                        st.error(err_msg)
+                        remember("error", err_msg)
                     else:
-                        success_msg = "Run completed with no failures."
+                        request_id = None
+                        if not result_df.empty and "REQUEST_ID" in result_df.columns:
+                            request_id = result_df.iloc[0]["REQUEST_ID"]
+                        success_msg = f"Triggered `{task_name}` task run."
+                        if request_id:
+                            success_msg = (
+                                f"Triggered `{task_name}` task run (request `{request_id}`)."
+                            )
                         st.success(success_msg)
                         remember("success", success_msg)
-
-                    for chk_res in check_results:
-                        sample = chk_res.get("sample") or []
-                        if not sample:
-                            continue
-                        st.markdown(
-                            f"**Sample failing rows – {chk_res.get('check_id')}**"
-                        )
-                        sample_df = pd.DataFrame(sample)
-                        st.dataframe(sample_df, use_container_width=True, hide_index=True)
 
         if apply_now and status == 'ACTIVE':
             sched = schedules.ensure_task_for_config(session, dq_cfg)

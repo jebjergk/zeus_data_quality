@@ -1,13 +1,17 @@
 from typing import Any, Dict
 
-from utils.meta import _parse_relation_name, _q
+from utils.dmfs import create_or_update_task, task_name_for_config
+from utils.meta import _parse_relation_name
 
 
 def ensure_task_for_config(session, cfg) -> Dict[str, Any]:
-    base_task_name = f"DQ_TASK_{cfg.config_id}"
+    base_task_name = task_name_for_config(cfg.config_id)
 
     if not session:
         return {"status": "FALLBACK", "reason": "Missing session", "task": base_task_name}
+
+    if not getattr(cfg, "schedule_enabled", True):
+        return {"status": "SCHEDULE_DISABLED", "task": base_task_name}
 
     target_fqn = getattr(cfg, "target_table_fqn", "")
     try:
@@ -26,27 +30,35 @@ def ensure_task_for_config(session, cfg) -> Dict[str, Any]:
             "task": base_task_name,
         }
 
-    fq_task_identifier = f"{_q(db)}.{_q(schema)}.{_q(base_task_name)}"
-    schedule_expression = "USING CRON 0 8 * * * Europe/Berlin"
-    call_statement = f"CALL {_q(db)}.{_q(schema)}.SP_RUN_DQ_CONFIG('{cfg.config_id}')"
+    try:
+        warehouse = session.get_current_warehouse()
+    except Exception:  # pragma: no cover - defensive branch
+        warehouse = None
+
+    if not warehouse:
+        return {"status": "NO_WAREHOUSE", "task": base_task_name}
+
+    schedule_cron = (getattr(cfg, "schedule_cron", None) or "0 8 * * *").strip() or "0 8 * * *"
+    schedule_tz = (getattr(cfg, "schedule_timezone", None) or "Europe/Berlin").strip() or "Europe/Berlin"
 
     try:
-        session.sql(
-            f"""
-            CREATE OR REPLACE TASK {fq_task_identifier}
-            WAREHOUSE = IDENTIFIER(CURRENT_WAREHOUSE())
-            SCHEDULE = '{schedule_expression}'
-            AS {call_statement}
-            """
-        ).collect()
-        session.sql(f"ALTER TASK {fq_task_identifier} RESUME").collect()
-        return {
-            "status": "TASK_CREATED",
-            "task": f"{db}.{schema}.{base_task_name}",
-        }
+        create_or_update_task(
+            session,
+            db,
+            schema,
+            warehouse,
+            cfg.config_id,
+            schedule_cron=schedule_cron,
+            tz=schedule_tz,
+        )
     except Exception as exc:
         return {
             "status": "FALLBACK",
             "reason": str(exc),
             "task": f"{db}.{schema}.{base_task_name}",
         }
+
+    return {
+        "status": "TASK_CREATED",
+        "task": f"{db}.{schema}.{base_task_name}",
+    }
