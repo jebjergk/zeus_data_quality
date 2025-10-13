@@ -74,6 +74,16 @@ def navigate_to(page: str) -> None:
     if page == "home":
         st.session_state["cfg_mode"] = "list"
 
+
+def open_config_editor(
+    config_id: Optional[str] = None, target_fqn: Optional[str] = None
+) -> None:
+    """Switch to the configuration editor with the given selection."""
+    st.session_state["cfg_mode"] = "edit"
+    st.session_state["selected_config_id"] = config_id
+    st.session_state["editor_target_fqn"] = target_fqn
+    st.rerun()
+
 def stateless_table_picker(preselect_fqn: Optional[str]):
     """Simple, stateless DB → Schema → Table picker. Returns (db, schema, table, fqn)."""
     def split_fqn(fqn):
@@ -169,15 +179,6 @@ def render_config_list():
                 st.error(message)
             else:
                 st.info(message)
-    # Create button on right
-    _, _, create_col = st.columns([6, 2, 2])
-    with create_col:
-        if st.button("➕ Create"):
-            st.session_state["cfg_mode"] = "edit"
-            st.session_state["selected_config_id"] = None
-            st.session_state["editor_target_fqn"] = None
-            st.rerun()
-
     search_query = st.text_input(
         "Search configurations",
         key="config_list_search",
@@ -187,7 +188,7 @@ def render_config_list():
 
     cfgs = list_configs(session)
     if not cfgs:
-        st.info("No configurations yet. Click **Create** to add one.")
+        st.info("No configurations yet. Use the sidebar to create one via **Create configuration**.")
         return
 
     if search_query:
@@ -222,10 +223,7 @@ def render_config_list():
             a1, a2 = st.columns(2)
             with a1:
                 if st.button("✏️ Edit", key=f"edit_{cfg.config_id}"):
-                    st.session_state["cfg_mode"] = "edit"
-                    st.session_state["selected_config_id"] = cfg.config_id
-                    st.session_state["editor_target_fqn"] = cfg.target_table_fqn
-                    st.rerun()
+                    open_config_editor(cfg.config_id, cfg.target_table_fqn)
             with a2:
                 if st.button("🗑️ Delete", key=f"del_{cfg.config_id}"):
                     out = delete_config_full(session, cfg.config_id)
@@ -985,6 +983,14 @@ with st.sidebar:
         args=("monitor",),
     )
     st.divider()
+    if current_page == "cfg" and st.session_state.get("cfg_mode", "list") == "list":
+        if st.button(
+            "➕ Create configuration",
+            use_container_width=True,
+            key="sidebar_create_config",
+        ):
+            open_config_editor()
+        st.divider()
     run_as_role = st.text_input("RUN_AS_ROLE", value=state.get("run_as_role") or "")
     dmf_role = st.text_input("DMF_ROLE", value=state.get("dmf_role") or "")
     set_state(run_as_role or None, dmf_role or None)
