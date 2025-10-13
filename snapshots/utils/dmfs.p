@@ -154,6 +154,8 @@ def create_or_update_task(
     sched = f"USING CRON {schedule_cron} {tz}"
     comment = f"Auto task for DQ config {config_id}"
 
+    meta_location = f"{db_name}.{schema_name}".strip(".")
+
     def _handle_task_error(exc: Exception) -> Exception:
         message = str(exc)
         lowered = message.lower()
@@ -163,6 +165,18 @@ def create_or_update_task(
                 "Pick an existing warehouse (e.g. by running `USE WAREHOUSE <name>` in Snowflake) "
                 "before enabling schedules."
             )
+        if "002043" in message or "object does not exist" in lowered:
+            hint = (
+                " Snowflake could not find one of the required objects. "
+                "Confirm that the metadata schema"
+            )
+            if meta_location:
+                hint += f" `{meta_location}`"
+            hint += (
+                " exists, that the `SP_RUN_DQ_CONFIG(VARCHAR)` stored procedure is deployed "
+                "there, and that your role has privileges to use it."
+            )
+            return ValueError(message + "." + hint)
         return exc
 
     if warehouse is None or str(warehouse).strip() == "":
