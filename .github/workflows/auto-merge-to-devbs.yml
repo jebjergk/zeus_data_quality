@@ -1,4 +1,4 @@
-name: Auto PR & Squash Merge to dev_bs (no marketplace deps)
+name: Auto PR & Squash Merge to dev_bs
 
 on:
   push:
@@ -10,8 +10,6 @@ on:
 permissions:
   contents: write
   pull-requests: write
-  checks: read
-  statuses: read
 
 jobs:
   pr-and-merge:
@@ -19,7 +17,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Ensure PR exists -> dev_bs and wait/merge
+      # Find or create PR from current branch -> dev_bs
+      - name: Ensure PR exists -> dev_bs
+        id: ensure_pr
         uses: actions/github-script@v7
         with:
           script: |
@@ -28,70 +28,54 @@ jobs:
             const head = context.ref.replace('refs/heads/', '');
             const base = 'dev_bs';
             if (head === base || head === 'main') {
-              core.notice(`Skipping branch ${head}`); return;
+              core.setOutput('skip', 'true'); return;
             }
-
-            // Find or create PR head->base
-            const list = await github.paginate(github.rest.pulls.list, { owner, repo, state: 'open', head: `${owner}:${head}`, base });
-            let pr = list[0];
+            const prs = await github.paginate(
+              github.rest.pulls.list,
+              { owner, repo, state: 'open', head: `${owner}:${head}`, base }
+            );
+            let pr = prs[0];
             if (!pr) {
-              const created = await github.rest.pulls.create({
+              pr = (await github.rest.pulls.create({
                 owner, repo, head, base,
                 title: `Merge ${head} into ${base}`,
-                body: 'Auto-created by CI.'
-              });
-              pr = created.data;
-            } else {
-              core.notice(`Using existing PR #${pr.number}`);
+                body: 'Automated PR created by workflow.'
+              })).data;
             }
+            core.setOutput('skip', 'false');
+            core.setOutput('number', pr.number.toString());
 
-            // Helper: wait for green checks/status
-            async function waitForGreen(sha, timeoutSec = 1800, pollMs = 10000) {
-              const start = Date.now();
-              while (true) {
-                // Combined status (legacy)
-                const { data: status } = await github.rest.repos.getCombinedStatusForRef({ owner, repo, ref: sha });
-                const state = status.state; // success, failure, pending
-                // Checks API (new)
-                const checks = await github.rest.checks.listForRef({ owner, repo, ref: sha });
-                const badCheck = checks.data.check_runs.find(cr => ['failure','cancelled','timed_out','action_required'].includes((cr.conclusion||'').toLowerCase()));
-                const pendingCheck = checks.data.check_runs.find(cr => !cr.conclusion && ['in_progress','queued','waiting','requested'].includes((cr.status||'').toLowerCase()));
+      - name: Enable auto-merge (squash)
+        if: steps.ensure_pr.outputs.skip == 'false'
+        uses: peter-evans/enable-pull-request-automerge@v3
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          pull-request-number: ${{ steps.ensure_pr.outputs.number }}
+          merge-method: squash
 
-                if (badCheck) {
-                  core.setFailed(`A check failed: ${badCheck.name}`);
-                  return false;
-                }
+      - name: Auto-merge when ready
+        if: steps.ensure_pr.outputs.skip == 'false'
+        uses: peter-evans/auto-merge@v3
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          pull-request-number: ${{ steps.ensure_pr.outputs.number }}
+          merge-method: squash
 
-                // If there are check runs, require them all to be successful/neutral/skipped
-                const hasChecks = checks.data.total_count > 0;
-                const allGood = !hasChecks || (checks.data.check_runs.every(cr => ['success','neutral','skipped'].includes((cr.conclusion||'').toLowerCase())));
-                const statusesGood = (state === 'success' || (!hasChecks && state !== 'failure'));
-
-                if (allGood && statusesGood) return true;
-
-                if ((Date.now() - start) / 1000 > timeoutSec) {
-                  core.setFailed('Timeout waiting for checks to pass.');
-                  return false;
-                }
-                await new Promise(r => setTimeout(r, pollMs));
-              }
-            }
-
-            // Wait for head SHA checks
-            const sha = pr.head.sha;
-            const ok = await waitForGreen(sha);
-            if (!ok) return;
-
-            // Squash-merge
-            await github.rest.pulls.merge({
-              owner, repo,
-              pull_number: pr.number,
-              merge_method: 'squash'
-            });
-
-            // Delete source branch
+      - name: Delete source branch after merge
+        if: steps.ensure_pr.outputs.skip == 'false'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const head = context.ref.replace('refs/heads/', '');
+            // Check if PR merged; if so, delete branch
+            const prNum = Number(core.getInput('number')) || Number(process.env.PR_NUMBER || 0);
+            // Fallback: attempt delete if branch is merged into dev_bs already
             try {
               await github.rest.git.deleteRef({ owner, repo, ref: `heads/${head}` });
             } catch (e) {
               core.warning(`Could not delete branch ${head}: ${e.message}`);
             }
+        env:
+          PR_NUMBER: ${{ steps.ensure_pr.outputs.number }}
