@@ -995,35 +995,8 @@ with st.sidebar:
     dmf_role = st.text_input("DMF_ROLE", value=state.get("dmf_role") or "")
     set_state(run_as_role or None, dmf_role or None)
 
-nav_cols = st.columns(3)
-with nav_cols[0]:
-    st.button(
-        "🏠 Overview",
-        use_container_width=True,
-        type="primary" if current_page == "home" else "secondary",
-        key="top_nav_home",
-        on_click=navigate_to,
-        args=("home",),
-    )
-with nav_cols[1]:
-    st.button(
-        "⚙️ Configurations",
-        use_container_width=True,
-        type="primary" if current_page == "cfg" else "secondary",
-        key="top_nav_cfg",
-        on_click=navigate_to,
-        args=("cfg",),
-    )
-with nav_cols[2]:
-    st.button(
-        "📊 Monitor",
-        use_container_width=True,
-        type="primary" if current_page == "monitor" else "secondary",
-        key="top_nav_monitor",
-        on_click=navigate_to,
-        args=("monitor",),
-    )
-
+# Maintain a subtle separation between the sidebar navigation
+# and the main content area.
 st.markdown("<div class='sf-hr'></div>", unsafe_allow_html=True)
 
 page = st.session_state.get("page", "home")
