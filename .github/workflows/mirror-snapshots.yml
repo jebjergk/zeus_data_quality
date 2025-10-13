@@ -28,11 +28,13 @@ jobs:
           python tools/mirror_snapshots.py
       - name: Commit snapshot updates (if any)
         run: |
-          if [ -n "$(git status --porcelain snapshots)" ]; then
-            git config user.name "github-actions[bot]"
-            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git add snapshots
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add snapshots || true
+          if git diff --cached --quiet; then
+            echo "No snapshot changes to commit."
+          else
             git commit -m "chore: update /snapshots .p mirror"
             git push
-          else
-            echo "No snapshot changes to commit."
+          fi
