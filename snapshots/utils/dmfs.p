@@ -2,6 +2,11 @@
 
 import re
 from typing import Any, List, Set, Tuple
+
+try:  # pragma: no cover - optional dependency in some environments
+    import streamlit as st
+except ModuleNotFoundError:  # pragma: no cover - defensive guard when Streamlit absent
+    st = None  # type: ignore
 from utils.meta import (
     DQConfig,
     DQCheck,
@@ -20,6 +25,9 @@ __all__ = [
     "_safe_ident",
     "task_name_for_config",
     "_q",
+    "ensure_session_context",
+    "session_snapshot",
+    "preflight_requirements",
     "create_or_update_task",
     "run_task_now",
 ]
@@ -35,6 +43,87 @@ def _q(db: str, sch: str, obj: str) -> str:
     """Return a fully qualified, quoted Snowflake identifier."""
 
     return f"{_qi(db)}.{_qi(sch)}.{_qi(obj)}"
+
+
+def ensure_session_context(session, role: str, warehouse: str, db: str, schema: str):
+    """Force a deterministic Snowflake session context for DQ task operations."""
+
+    if role:
+        session.sql(f"USE ROLE {_qi(role)}").collect()
+    if warehouse:
+        session.sql(f"USE WAREHOUSE {_qi(warehouse)}").collect()
+    if db:
+        session.sql(f"USE DATABASE {_qi(db)}").collect()
+    if schema:
+        session.sql(f"USE SCHEMA {_qi(schema)}").collect()
+    session.sql("ALTER SESSION SET QUOTED_IDENTIFIERS_IGNORE_CASE = FALSE").collect()
+
+
+if st is not None:  # pragma: no cover - decorator depends on Streamlit runtime
+
+    @st.cache_data(show_spinner=False, ttl=60)
+    def session_snapshot(session):
+        return session.sql(
+            """
+              SELECT
+                CURRENT_ACCOUNT()       AS ACCOUNT,
+                CURRENT_REGION()        AS REGION,
+                CURRENT_ORGANIZATION_NAME() AS ORG,
+                CURRENT_ROLE()          AS ROLE,
+                CURRENT_SECONDARY_ROLES() AS SECONDARY_ROLES,
+                CURRENT_WAREHOUSE()     AS WAREHOUSE,
+                CURRENT_DATABASE()      AS DB,
+                CURRENT_SCHEMA()        AS SCHEMA
+            """
+        ).to_pandas()
+
+else:  # pragma: no cover - Streamlit unavailable
+
+    def session_snapshot(session):
+        return session.sql(
+            """
+              SELECT
+                CURRENT_ACCOUNT()       AS ACCOUNT,
+                CURRENT_REGION()        AS REGION,
+                CURRENT_ORGANIZATION_NAME() AS ORG,
+                CURRENT_ROLE()          AS ROLE,
+                CURRENT_SECONDARY_ROLES() AS SECONDARY_ROLES,
+                CURRENT_WAREHOUSE()     AS WAREHOUSE,
+                CURRENT_DATABASE()      AS DB,
+                CURRENT_SCHEMA()        AS SCHEMA
+            """
+        ).to_pandas()
+
+
+def preflight_requirements(
+    session,
+    db: str,
+    schema: str,
+    warehouse: str,
+    proc_name: str = "SP_RUN_DQ_CONFIG",
+    arg_sig: str = "(VARCHAR)",
+):
+    """Validate that the required schema, procedure, and warehouse are usable."""
+
+    session.sql(
+        f"SELECT 1 FROM {_qi(db)}.INFORMATION_SCHEMA.SCHEMATA WHERE SCHEMA_NAME = ?",
+        params=[schema],
+    ).collect()
+
+    rows = session.sql(
+        f"""
+          SELECT 1
+          FROM {_qi(db)}.INFORMATION_SCHEMA.PROCEDURES
+          WHERE PROCEDURE_SCHEMA = ? AND PROCEDURE_NAME = ? AND ARGUMENT_SIGNATURE = ?
+        """,
+        params=[schema, proc_name, arg_sig],
+    ).collect()
+    if not rows:
+        raise ValueError(f"Procedure not found: {_q(db, schema, proc_name)}{arg_sig}")
+
+    wh = session.sql(f"SHOW WAREHOUSES LIKE {_qi(warehouse)}").collect()
+    if not wh:
+        raise ValueError(f"Warehouse not found or no USAGE: {warehouse}")
 
 def _split_fqn(fqn: str) -> Tuple[str, str, str]:
     parts: List[str] = []
@@ -137,8 +226,11 @@ def create_or_update_task(
     schema: Any,
     warehouse: Any,
     config_id: Any,
+    *,
     schedule_cron: str = "0 8 * * *",
     tz: str = "Europe/Berlin",
+    run_role: Any = None,
+    proc_name: str = "SP_RUN_DQ_CONFIG",
 ) -> None:
     """Create or update the Snowflake task for the given configuration."""
 
@@ -150,7 +242,7 @@ def create_or_update_task(
 
     name = task_name_for_config(config_id)
     fqn = _q(db_name, schema_name, name)
-    proc = _q(db_name, schema_name, "DQ_RUN_CONFIG")
+    proc = _q(db_name, schema_name, proc_name)
     sched = f"USING CRON {schedule_cron} {tz}"
     comment = f"Auto task for DQ config {config_id}"
 
@@ -173,7 +265,7 @@ def create_or_update_task(
             if meta_location:
                 hint += f" `{meta_location}`"
             hint += (
-                " exists, that the `DQ_RUN_CONFIG(VARCHAR)` stored procedure is deployed "
+                " exists, that the `SP_RUN_DQ_CONFIG(VARCHAR)` stored procedure is deployed "
                 "there, and that your role has privileges to use it."
             )
             return ValueError(message + "." + hint)
@@ -186,46 +278,37 @@ def create_or_update_task(
         )
 
     warehouse_name = str(warehouse).strip()
+    run_role_name = str(run_role).strip() if run_role is not None else ""
 
     try:
-        session.sql(f"USE WAREHOUSE {_qi(warehouse_name)}").collect()
-
-        warehouses = session.sql(f"SHOW WAREHOUSES LIKE {_qi(warehouse_name)}").collect()
-        if not warehouses:
-            raise ValueError("Warehouse not found or no USAGE privilege")
-
-        proc_rows = session.sql(
-            f"""
-            SELECT 1
-            FROM {_qi(db_name)}.INFORMATION_SCHEMA.PROCEDURES
-            WHERE PROCEDURE_SCHEMA = ?
-              AND PROCEDURE_NAME = 'DQ_RUN_CONFIG'
-              AND ARGUMENT_SIGNATURE = '(VARCHAR)'
-            LIMIT 1
-            """,
-            params=[schema_name.upper()],
-        ).collect()
-        if not proc_rows:
-            raise ValueError("Stored procedure DQ_RUN_CONFIG(VARCHAR) not found")
+        ensure_session_context(session, run_role_name, warehouse_name, db_name, schema_name)
+        preflight_requirements(
+            session,
+            db_name,
+            schema_name,
+            warehouse_name,
+            proc_name=proc_name,
+            arg_sig="(VARCHAR)",
+        )
 
         session.sql(
             f"""
-         CREATE TASK IF NOT EXISTS {fqn}
-           WAREHOUSE = {_qi(warehouse_name)}
-           SCHEDULE  = ?
-           COMMENT   = ?
-         AS
-           CALL {proc}(?);
+        CREATE TASK IF NOT EXISTS {fqn}
+          WAREHOUSE = {_qi(warehouse_name)}
+          SCHEDULE  = ?
+          COMMENT   = ?
+        AS
+          CALL {proc}(?);
         """,
             params=[sched, comment, config_id],
         ).collect()
 
         session.sql(
             f"""
-         ALTER TASK {fqn} SET
-           WAREHOUSE = {_qi(warehouse_name)},
-           SCHEDULE  = ?,
-           COMMENT   = ?
+        ALTER TASK {fqn} SET
+          WAREHOUSE = {_qi(warehouse_name)},
+          SCHEDULE  = ?,
+          COMMENT   = ?
         """,
             params=[sched, comment],
         ).collect()

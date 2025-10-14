@@ -59,6 +59,7 @@ def ensure_task_for_config(session, cfg) -> Dict[str, Any]:
             cfg.config_id,
             schedule_cron=schedule_cron,
             tz=schedule_tz,
+            run_role=getattr(cfg, "run_as_role", None),
         )
     except Exception as exc:
         return {
