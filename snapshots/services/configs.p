@@ -8,6 +8,7 @@ except Exception:
     Session = Any  # type: ignore
 
 from utils import dmfs, meta
+from utils.config import get_metadata_namespace
 
 @contextmanager
 def transaction(session: Session):
@@ -25,12 +26,20 @@ def save_config_and_checks(session: Session, cfg: meta.DQConfig, checks: List[me
         meta.upsert_checks(session, checks)
         result: Dict[str, Any] = {"config_id": cfg.config_id, "status": cfg.status}
         if apply_now:
-            created = dmfs.attach_dmfs(session, cfg, checks)
+            meta_db, meta_schema = get_metadata_namespace()
+            created = dmfs.attach_dmfs(session, cfg, checks, db=meta_db, schema=meta_schema)
             result["dmfs_attached"] = created
     return result
 
 def delete_config_full(session: Session, config_id: str) -> Dict[str, Any]:
     checks = meta.get_checks(session, config_id)
-    dropped = dmfs.detach_dmfs_safe(session, config_id, checks)
+    meta_db, meta_schema = get_metadata_namespace()
+    dropped = dmfs.detach_dmfs_safe(
+        session,
+        config_id,
+        checks,
+        db=meta_db,
+        schema=meta_schema,
+    )
     meta.delete_config(session, config_id)
     return {"config_id": config_id, "dmfs_dropped": dropped}

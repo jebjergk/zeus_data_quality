@@ -1,7 +1,8 @@
 from typing import Any, Dict
 
 from utils.dmfs import create_or_update_task, task_name_for_config
-from utils.meta import _parse_relation_name, metadata_db_schema
+from utils.meta import _parse_relation_name
+from utils.config import get_metadata_namespace, get_proc_name
 
 
 def ensure_task_for_config(session, cfg) -> Dict[str, Any]:
@@ -41,14 +42,7 @@ def ensure_task_for_config(session, cfg) -> Dict[str, Any]:
     schedule_cron = (getattr(cfg, "schedule_cron", None) or "0 8 * * *").strip() or "0 8 * * *"
     schedule_tz = (getattr(cfg, "schedule_timezone", None) or "Europe/Berlin").strip() or "Europe/Berlin"
 
-    try:
-        meta_db, meta_schema = metadata_db_schema(session)
-    except Exception as exc:
-        return {
-            "status": "FALLBACK",
-            "reason": f"Unable to determine metadata schema: {exc}",
-            "task": base_task_name,
-        }
+    meta_db, meta_schema = get_metadata_namespace()
 
     try:
         create_or_update_task(
@@ -60,6 +54,7 @@ def ensure_task_for_config(session, cfg) -> Dict[str, Any]:
             schedule_cron=schedule_cron,
             tz=schedule_tz,
             run_role=getattr(cfg, "run_as_role", None),
+            proc_name=get_proc_name(),
         )
     except Exception as exc:
         return {
