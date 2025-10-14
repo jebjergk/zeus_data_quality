@@ -44,8 +44,12 @@ from utils import schedules
 from services.configs import save_config_and_checks, delete_config_full
 from services.state import get_state, set_state
 from utils.checkdefs import build_rule_for_column_check, build_rule_for_table_check
+from utils.config import get_metadata_namespace, get_proc_name
 
 RUN_RESULTS_TBL = "DQ_RUN_RESULTS"
+
+METADATA_DB, METADATA_SCHEMA = get_metadata_namespace()
+PROC_NAME = get_proc_name()
 
 st.set_page_config(page_title="Zeus Data Quality", layout="wide")
 
@@ -688,7 +692,12 @@ def render_config_editor():
                 else:
                     task_name = task_name_for_config(dq_cfg.config_id)
                     try:
-                        result_df = run_task_now(session, db, schema, dq_cfg.config_id)
+                        result_df = run_task_now(
+                            session,
+                            METADATA_DB,
+                            METADATA_SCHEMA,
+                            dq_cfg.config_id,
+                        )
                     except Exception as exc:
                         err_msg = f"Failed to trigger task run: {exc}"
                         st.error(err_msg)
@@ -708,6 +717,7 @@ def render_config_editor():
         run_task_via_system_proc_flag = bool(st.session_state.get("run_task_via_system_proc", False))
 
         if apply_now and status == 'ACTIVE':
+            st.caption(f"Namespace: {METADATA_DB}.{METADATA_SCHEMA}, Proc: {PROC_NAME}")
             dbg_df = None
             snapshot_error: Optional[Exception] = None
             try:
@@ -715,16 +725,15 @@ def render_config_editor():
             except Exception as exc:  # pragma: no cover - Snowflake specific
                 snapshot_error = exc
 
-            meta_db = meta_schema = None
+            meta_db, meta_schema = METADATA_DB, METADATA_SCHEMA
             metadata_error: Optional[Exception] = None
             task_fqn: Optional[str] = None
             proc_fqn: Optional[str] = None
-            try:
-                meta_db, meta_schema = metadata_db_schema(session)
+            if not meta_db or not meta_schema:
+                metadata_error = ValueError("Metadata namespace is not configured")
+            else:
                 task_fqn = _q_task(meta_db, meta_schema, task_name_for_config(dq_cfg.config_id))
-                proc_fqn = _q_task(meta_db, meta_schema, "SP_RUN_DQ_CONFIG")
-            except Exception as exc:  # pragma: no cover - Snowflake specific
-                metadata_error = exc
+                proc_fqn = _q_task(meta_db, meta_schema, PROC_NAME)
 
             try:
                 warehouse_name = session.get_current_warehouse()
@@ -749,9 +758,9 @@ def render_config_editor():
                         inferred_task_fqn = task_name_for_config(dq_cfg.config_id)
                 if not inferred_proc_fqn:
                     if meta_db and meta_schema:
-                        inferred_proc_fqn = _q_task(meta_db, meta_schema, "SP_RUN_DQ_CONFIG")
+                        inferred_proc_fqn = _q_task(meta_db, meta_schema, PROC_NAME)
                     else:
-                        inferred_proc_fqn = "SP_RUN_DQ_CONFIG"
+                        inferred_proc_fqn = PROC_NAME
                 st.markdown(
                     f"**Task FQN:** `{inferred_task_fqn}`  \\\n+**Procedure FQN:** `{inferred_proc_fqn}`"
                 )
@@ -785,7 +794,7 @@ def render_config_editor():
                             meta_db,
                             meta_schema,
                             warehouse_name,
-                            proc_name="SP_RUN_DQ_CONFIG",
+                            proc_name=PROC_NAME,
                             arg_sig="(VARCHAR)",
                         )
                 except Exception as exc:  # pragma: no cover - Snowflake specific

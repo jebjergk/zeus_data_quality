@@ -13,7 +13,6 @@ from utils.meta import (
     _q as _q_meta,
     DQ_CONFIG_TBL,
     DQ_CHECK_TBL,
-    metadata_db_schema,
 )
 
 AGG_PREFIX = "AGG:"
@@ -158,21 +157,27 @@ def _view_name(config_id: str, check_id: str) -> str:
     raw = f"DQ_{config_id}_{check_id}_FAILS".upper()
     return re.sub(r"[^A-Z0-9_]", "_", raw)
 
-def attach_dmfs(session, config: DQConfig, checks: List[DQCheck]) -> List[str]:
+def attach_dmfs(
+    session,
+    config: DQConfig,
+    checks: List[DQCheck],
+    *,
+    db: str,
+    schema: str,
+) -> List[str]:
     created: List[str] = []
-    meta_db, meta_schema = metadata_db_schema(session)
     for chk in checks:
         rule = (chk.rule_expr or "").strip()
         if rule.upper().startswith(AGG_PREFIX):  # skip aggregates
             continue
-        db, sch, tbl = _split_fqn(chk.table_fqn)
+        src_db, src_schema, src_tbl = _split_fqn(chk.table_fqn)
         vname = _view_name(chk.config_id, chk.check_id)
         predicate = rule[:-1] if rule.endswith(";") else rule
         session.sql(f"""
-            CREATE OR REPLACE VIEW {_q_meta(meta_db)}.{_q_meta(meta_schema)}.{_q_meta(vname)} AS
-            SELECT * FROM {_q_meta(db)}.{_q_meta(sch)}.{_q_meta(tbl)} WHERE NOT ({predicate})
+            CREATE OR REPLACE VIEW {_q_meta(db)}.{_q_meta(schema)}.{_q_meta(vname)} AS
+            SELECT * FROM {_q_meta(src_db)}.{_q_meta(src_schema)}.{_q_meta(src_tbl)} WHERE NOT ({predicate})
         """).collect()
-        created.append(f"{meta_db}.{meta_schema}.{vname}")
+        created.append(f"{db}.{schema}.{vname}")
     return created
 
 def _active_configs_using_table(session, table_fqn: str) -> Set[str]:
@@ -186,16 +191,22 @@ def _active_configs_using_table(session, table_fqn: str) -> Set[str]:
         out.add(r[0] if not hasattr(r, "asDict") else r.asDict().get("CONFIG_ID"))
     return out
 
-def detach_dmfs_safe(session, config_id: str, checks: List[DQCheck]) -> List[str]:
+def detach_dmfs_safe(
+    session,
+    config_id: str,
+    checks: List[DQCheck],
+    *,
+    db: str,
+    schema: str,
+) -> List[str]:
     dropped: List[str] = []
-    meta_db, meta_schema = metadata_db_schema(session)
     row_checks = [c for c in checks if not (c.rule_expr or "").upper().startswith(AGG_PREFIX)]
     tables = {c.table_fqn for c in row_checks}
     shared = {t for t in tables if len(_active_configs_using_table(session, t) - {config_id}) > 0}
     for chk in row_checks:
         if chk.table_fqn in shared: continue
         vname = _view_name(chk.config_id, chk.check_id)
-        fqn = f"{_q_meta(meta_db)}.{_q_meta(meta_schema)}.{_q_meta(vname)}"
+        fqn = f"{_q_meta(db)}.{_q_meta(schema)}.{_q_meta(vname)}"
         session.sql(f"DROP VIEW IF EXISTS {fqn}").collect()
         dropped.append(fqn)
     return dropped
@@ -222,7 +233,7 @@ def task_name_for_config(config_id: Any) -> str:
 
 def create_or_update_task(
     session,
-    database: Any,
+    db: Any,
     schema: Any,
     warehouse: Any,
     config_id: Any,
@@ -234,7 +245,7 @@ def create_or_update_task(
 ) -> None:
     """Create or update the Snowflake task for the given configuration."""
 
-    db_name = "" if database is None else str(database)
+    db_name = "" if db is None else str(db)
     schema_name = "" if schema is None else str(schema)
 
     if not db_name or not schema_name:
@@ -318,10 +329,15 @@ def create_or_update_task(
         raise _handle_task_error(exc)
 
 
-def run_task_now(session, database: Any, schema: Any, config_id: Any):
+def run_task_now(session, db: Any, schema: Any, config_id: Any):
     """Force-run the Snowflake task for the given configuration."""
 
-    fqn = _q(database, schema, task_name_for_config(config_id))
+    db_name = "" if db is None else str(db).strip()
+    schema_name = "" if schema is None else str(schema).strip()
+    if not db_name or not schema_name:
+        raise ValueError("Database and schema are required to trigger a task run")
+
+    fqn = _q(db_name, schema_name, task_name_for_config(config_id))
     return session.sql(
         "SELECT SYSTEM$TASK_FORCE_RUN(?) AS REQUEST_ID",
         params=[fqn],

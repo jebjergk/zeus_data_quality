@@ -25,7 +25,6 @@ __all__ = [
     "DQCheck",
     "_q",
     "fq_table",
-    "metadata_db_schema",
     "ensure_meta_tables",
     "upsert_config",
     "list_configs",
@@ -115,19 +114,6 @@ def _current_db_schema(session: Session) -> Tuple[Optional[str], Optional[str]]:
             except Exception:
                 pass
     return current_db, current_schema
-
-def metadata_db_schema(session: Session) -> Tuple[str, str]:
-    cfg_db, cfg_schema, _ = _parse_relation_name(DQ_CONFIG_TBL)
-    chk_db, chk_schema, _ = _parse_relation_name(DQ_CHECK_TBL)
-    current_db, current_schema = _current_db_schema(session)
-
-    db = (cfg_db or chk_db or current_db)
-    schema = (cfg_schema or chk_schema or current_schema)
-
-    if not db or not schema:
-        raise ValueError("Unable to determine metadata schema for DQ views")
-
-    return db, schema
 
 def ensure_meta_tables(session: Session):
     if not session: return
