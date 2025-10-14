@@ -1,5 +1,5 @@
 import json
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 from uuid import uuid4
 
 import streamlit as st
@@ -25,7 +25,14 @@ except Exception:
     session = None
 
 # --- App imports (our modules) ---
-from utils.dmfs import run_task_now, task_name_for_config
+from utils.dmfs import (
+    run_task_now,
+    task_name_for_config,
+    ensure_session_context,
+    session_snapshot,
+    preflight_requirements,
+    _q as _q_task,
+)
 from utils.meta import (
     DQConfig, DQCheck,
     DQ_CONFIG_TBL, _q, _parse_relation_name,
@@ -564,6 +571,16 @@ def render_config_editor():
             disabled=not schedule_enabled
         )
 
+        st.checkbox(
+            "Use SYSTEM$TASK_FORCE_RUN fallback",
+            value=bool(st.session_state.get("run_task_via_system_proc", False)),
+            help=(
+                "When enabled, the app will invoke `SYSTEM$TASK_FORCE_RUN` with the generated task name "
+                "after scheduling to verify privileges."
+            ),
+            key="run_task_via_system_proc",
+        )
+
         c1, c2, c3, c4 = st.columns(4)
         with c1: apply_now = st.form_submit_button("Save & Apply")
         with c2: save_draft = st.form_submit_button("Save as Draft")
@@ -688,8 +705,102 @@ def render_config_editor():
                         st.success(success_msg)
                         remember("success", success_msg)
 
+        run_task_via_system_proc_flag = bool(st.session_state.get("run_task_via_system_proc", False))
+
         if apply_now and status == 'ACTIVE':
-            sched = schedules.ensure_task_for_config(session, dq_cfg)
+            dbg_df = None
+            snapshot_error: Optional[Exception] = None
+            try:
+                dbg_df = session_snapshot(session)
+            except Exception as exc:  # pragma: no cover - Snowflake specific
+                snapshot_error = exc
+
+            meta_db = meta_schema = None
+            metadata_error: Optional[Exception] = None
+            task_fqn: Optional[str] = None
+            proc_fqn: Optional[str] = None
+            try:
+                meta_db, meta_schema = metadata_db_schema(session)
+                task_fqn = _q_task(meta_db, meta_schema, task_name_for_config(dq_cfg.config_id))
+                proc_fqn = _q_task(meta_db, meta_schema, "SP_RUN_DQ_CONFIG")
+            except Exception as exc:  # pragma: no cover - Snowflake specific
+                metadata_error = exc
+
+            try:
+                warehouse_name = session.get_current_warehouse()
+            except Exception:  # pragma: no cover - Snowflake specific
+                warehouse_name = None
+            warehouse_name = (warehouse_name or "").strip()
+            run_role_name = (dq_cfg.run_as_role or "").strip()
+
+            task_failure_reported = False
+
+            def show_task_failure(message: str) -> None:
+                nonlocal task_failure_reported
+                task_failure_reported = True
+                st.error(message)
+                remember("error", message)
+                inferred_task_fqn = task_fqn
+                inferred_proc_fqn = proc_fqn
+                if not inferred_task_fqn:
+                    if meta_db and meta_schema:
+                        inferred_task_fqn = _q_task(meta_db, meta_schema, task_name_for_config(dq_cfg.config_id))
+                    else:
+                        inferred_task_fqn = task_name_for_config(dq_cfg.config_id)
+                if not inferred_proc_fqn:
+                    if meta_db and meta_schema:
+                        inferred_proc_fqn = _q_task(meta_db, meta_schema, "SP_RUN_DQ_CONFIG")
+                    else:
+                        inferred_proc_fqn = "SP_RUN_DQ_CONFIG"
+                st.markdown(
+                    f"**Task FQN:** `{inferred_task_fqn}`  \\\n+**Procedure FQN:** `{inferred_proc_fqn}`"
+                )
+                if dbg_df is not None:
+                    st.caption("Session snapshot at failure:")
+                    st.dataframe(dbg_df, use_container_width=True, hide_index=True)
+                elif snapshot_error is not None:
+                    st.caption(f"Session snapshot unavailable: {snapshot_error}")
+
+            sched: Dict[str, Any] = {}
+            if metadata_error is not None:
+                show_task_failure(f"Unable to determine metadata schema: {metadata_error}")
+                sched = {
+                    "status": "FALLBACK",
+                    "reason": str(metadata_error),
+                    "task": task_name_for_config(dq_cfg.config_id),
+                }
+            else:
+                preflight_failed = False
+                try:
+                    ensure_session_context(
+                        session,
+                        run_role_name,
+                        warehouse_name,
+                        meta_db or "",
+                        meta_schema or "",
+                    )
+                    if meta_db and meta_schema and warehouse_name:
+                        preflight_requirements(
+                            session,
+                            meta_db,
+                            meta_schema,
+                            warehouse_name,
+                            proc_name="SP_RUN_DQ_CONFIG",
+                            arg_sig="(VARCHAR)",
+                        )
+                except Exception as exc:  # pragma: no cover - Snowflake specific
+                    show_task_failure(f"Task preflight failed: {exc}")
+                    sched = {
+                        "status": "FALLBACK",
+                        "reason": str(exc),
+                        "task": task_fqn or task_name_for_config(dq_cfg.config_id),
+                    }
+                    preflight_failed = True
+                if not preflight_failed:
+                    sched = schedules.ensure_task_for_config(session, dq_cfg)
+                    if sched.get("status") == "FALLBACK" and sched.get("reason"):
+                        show_task_failure(f"Task creation failed: {sched['reason']}")
+
             sched_status = sched.get("status")
             if sched_status == "TASK_CREATED":
                 cron_disp = dq_cfg.schedule_cron or "0 8 * * *"
@@ -712,6 +823,8 @@ def render_config_editor():
                 )
                 st.warning(warn_msg)
                 remember("warning", warn_msg)
+            elif sched_status == "FALLBACK" and task_failure_reported:
+                pass
             else:
                 reason = sched.get("reason")
                 if reason:
@@ -723,6 +836,54 @@ def render_config_editor():
                     warn_msg = "Could not create task automatically; stored fallback intent."
                 st.warning(warn_msg)
                 remember("warning", warn_msg)
+
+            if run_task_via_system_proc_flag:
+                if not task_fqn:
+                    warn_msg = (
+                        "SYSTEM$TASK_FORCE_RUN fallback skipped because the task name could not be determined."
+                    )
+                    st.warning(warn_msg)
+                    remember("warning", warn_msg)
+                elif not warehouse_name:
+                    warn_msg = (
+                        "SYSTEM$TASK_FORCE_RUN fallback skipped because no active warehouse is set."
+                    )
+                    st.warning(warn_msg)
+                    remember("warning", warn_msg)
+                elif not (meta_db and meta_schema):
+                    warn_msg = (
+                        "SYSTEM$TASK_FORCE_RUN fallback skipped due to incomplete database/schema context."
+                    )
+                    st.warning(warn_msg)
+                    remember("warning", warn_msg)
+                else:
+                    try:
+                        ensure_session_context(
+                            session,
+                            run_role_name,
+                            warehouse_name,
+                            meta_db,
+                            meta_schema,
+                        )
+                        fallback_df = session.sql(
+                            "SELECT SYSTEM$TASK_FORCE_RUN(?) AS REQUEST_ID",
+                            params=[task_fqn],
+                        ).to_pandas()
+                    except Exception as exc:  # pragma: no cover - Snowflake specific
+                        warn_msg = f"SYSTEM$TASK_FORCE_RUN fallback failed: {exc}"
+                        st.warning(warn_msg)
+                        remember("warning", warn_msg)
+                    else:
+                        request_id = None
+                        if not fallback_df.empty and "REQUEST_ID" in fallback_df.columns:
+                            request_id = fallback_df.iloc[0]["REQUEST_ID"]
+                        info_msg = f"Invoked `SYSTEM$TASK_FORCE_RUN` for `{task_fqn}`."
+                        if request_id:
+                            info_msg = (
+                                f"Invoked `SYSTEM$TASK_FORCE_RUN` for `{task_fqn}` (request `{request_id}`)."
+                            )
+                        st.info(info_msg)
+                        remember("info", info_msg)
 
         st.session_state["last_notices"] = post_submit_notices
         st.session_state["cfg_mode"] = "list"; st.rerun()
