@@ -260,67 +260,45 @@ def preflight_requirements(
     if not warehouse_name:
         raise ValueError("Warehouse is required for preflight checks")
 
-    info_schema_error: Optional[Exception] = None
     try:
-        wh = session.sql(
-            f"""
-              SELECT 1
-              FROM {_q("SNOWFLAKE", "INFORMATION_SCHEMA", "WAREHOUSES")}
-              WHERE UPPER("WAREHOUSE_NAME") = UPPER({_ql(warehouse_name)})
-            """
+        show_rows = session.sql(
+            f"SHOW WAREHOUSES LIKE {_ql(warehouse_name)}"
         ).collect()
-    except Exception as exc:  # pragma: no cover - depends on account privileges
-        wh = []
-        info_schema_error = exc
+    except Exception as exc:  # pragma: no cover - SHOW availability varies
+        message = f"Warehouse not found or no USAGE: {warehouse_name}"
+        raise ValueError(message) from exc
 
-    if not wh:
-        try:
-            show_rows = session.sql(
-                f"SHOW WAREHOUSES LIKE {_ql(warehouse_name)}"
-            ).collect()
-        except Exception as exc:  # pragma: no cover - SHOW availability varies
-            message = f"Warehouse not found or no USAGE: {warehouse_name}"
-            if info_schema_error is not None:
-                message += (
-                    f". INFORMATION_SCHEMA lookup failed with: {info_schema_error}"
-                )
-            raise ValueError(message) from exc
+    expected = warehouse_name.strip('"').upper()
 
-        expected = warehouse_name.strip('"').upper()
-
-        def _row_name(row: Any) -> str:
-            if hasattr(row, "as_dict"):
-                data = row.as_dict()
-                for key in ("WAREHOUSE_NAME", "NAME", "name"):
-                    value = data.get(key)
-                    if value is not None:
-                        return str(value)
+    def _row_name(row: Any) -> str:
+        if hasattr(row, "as_dict"):
+            data = row.as_dict()
             for key in ("WAREHOUSE_NAME", "NAME", "name"):
-                try:
-                    value = row[key]  # type: ignore[index]
-                except Exception:  # pragma: no cover - snowpark row access varies
-                    continue
+                value = data.get(key)
                 if value is not None:
                     return str(value)
+        for key in ("WAREHOUSE_NAME", "NAME", "name"):
             try:
-                return str(row[0])  # type: ignore[index]
-            except Exception:  # pragma: no cover - defensive fallback
-                return ""
+                value = row[key]  # type: ignore[index]
+            except Exception:  # pragma: no cover - snowpark row access varies
+                continue
+            if value is not None:
+                return str(value)
+        try:
+            return str(row[0])  # type: ignore[index]
+        except Exception:  # pragma: no cover - defensive fallback
+            return ""
 
-        matched = False
-        for row in show_rows:
-            value = _row_name(row).strip().strip('"').upper()
-            if value == expected:
-                matched = True
-                break
+    matched = False
+    for row in show_rows:
+        value = _row_name(row).strip().strip('"').upper()
+        if value == expected:
+            matched = True
+            break
 
-        if not matched:
-            message = f"Warehouse not found or no USAGE: {warehouse_name}"
-            if info_schema_error is not None:
-                message += (
-                    f". INFORMATION_SCHEMA lookup failed with: {info_schema_error}"
-                )
-            raise ValueError(message)
+    if not matched:
+        message = f"Warehouse not found or no USAGE: {warehouse_name}"
+        raise ValueError(message)
 
 def _split_fqn(fqn: str) -> Tuple[str, str, str]:
     parts: List[str] = []
