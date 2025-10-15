@@ -96,3 +96,103 @@ def run_dq_config(session: Session, CONFIG_ID: str) -> str:
 
     return f"OK run_id={run_id} checks={total_checks}"
 $$;
+
+CREATE OR REPLACE PROCEDURE ZEUS_ANALYTICS_SIMU.DISCOVERY.SP_DQ_MANAGE_TASK(
+    TARGET_DB STRING,
+    TARGET_SCHEMA STRING,
+    TASK_WAREHOUSE STRING,
+    CONFIG_ID STRING,
+    PROC_NAME STRING,
+    CRON STRING,
+    TZ STRING,
+    ENABLE BOOLEAN
+)
+RETURNS STRING
+LANGUAGE SQL
+EXECUTE AS OWNER
+AS
+$$
+DECLARE
+    v_db STRING := COALESCE(TARGET_DB, '');
+    v_schema STRING := COALESCE(TARGET_SCHEMA, '');
+    v_wh STRING := COALESCE(TASK_WAREHOUSE, '');
+    v_config STRING := COALESCE(CONFIG_ID, '');
+    v_proc STRING := COALESCE(PROC_NAME, '');
+    v_cron STRING := COALESCE(CRON, '');
+    v_tz STRING := COALESCE(TZ, '');
+    v_enable BOOLEAN := ENABLE;
+    v_safe_config STRING;
+    v_task_name STRING;
+    v_task_fqn STRING;
+    v_proc_fqn STRING;
+    v_sched STRING;
+    v_comment STRING;
+    v_db_ident STRING;
+    v_schema_ident STRING;
+    v_wh_ident STRING;
+BEGIN
+    IF v_db = '' THEN
+        RAISE STATEMENT_ERROR WITH MESSAGE => 'TARGET_DB is required';
+    END IF;
+    IF v_schema = '' THEN
+        RAISE STATEMENT_ERROR WITH MESSAGE => 'TARGET_SCHEMA is required';
+    END IF;
+    IF v_wh = '' THEN
+        RAISE STATEMENT_ERROR WITH MESSAGE => 'TASK_WAREHOUSE is required';
+    END IF;
+    IF v_proc = '' THEN
+        RAISE STATEMENT_ERROR WITH MESSAGE => 'PROC_NAME is required';
+    END IF;
+
+    v_safe_config := REGEXP_REPLACE(UPPER(v_config), '[^A-Z0-9_]', '_');
+    v_safe_config := REGEXP_REPLACE(v_safe_config, '_+', '_');
+    v_safe_config := TRIM(BOTH '_' FROM v_safe_config);
+    IF v_safe_config = '' THEN
+        v_safe_config := 'X';
+    END IF;
+
+    v_task_name := 'DQ_TASK_' || v_safe_config;
+
+    v_db_ident := '"' || REPLACE(v_db, '"', '""') || '"';
+    v_schema_ident := '"' || REPLACE(v_schema, '"', '""') || '"';
+    v_wh_ident := '"' || REPLACE(v_wh, '"', '""') || '"';
+
+    v_task_fqn := v_db_ident || '.' || v_schema_ident || '.' || '"' || REPLACE(v_task_name, '"', '""') || '"';
+    v_proc_fqn := v_db_ident || '.' || v_schema_ident || '.' || '"' || REPLACE(v_proc, '"', '""') || '"';
+
+    v_sched := 'USING CRON ' || v_cron || ' ' || v_tz;
+    v_comment := 'Auto task for DQ config ' || v_config;
+
+    EXECUTE IMMEDIATE 'USE DATABASE ' || v_db_ident;
+    EXECUTE IMMEDIATE 'USE SCHEMA ' || v_schema_ident;
+    EXECUTE IMMEDIATE 'USE WAREHOUSE ' || v_wh_ident;
+
+    EXECUTE IMMEDIATE
+        'CREATE TASK IF NOT EXISTS ' || v_task_fqn || CHR(10) ||
+        '  WAREHOUSE = ' || v_wh_ident || CHR(10) ||
+        '  SCHEDULE  = ?' || CHR(10) ||
+        '  COMMENT   = ?' || CHR(10) ||
+        'AS' || CHR(10) ||
+        '  CALL ' || v_proc_fqn || '(?)'
+        USING (v_sched, v_comment, v_config);
+
+    EXECUTE IMMEDIATE
+        'ALTER TASK ' || v_task_fqn || ' SET' || CHR(10) ||
+        '  WAREHOUSE = ' || v_wh_ident || ',' || CHR(10) ||
+        '  SCHEDULE  = ?,' || CHR(10) ||
+        '  COMMENT   = ?'
+        USING (v_sched, v_comment);
+
+    IF v_enable THEN
+        EXECUTE IMMEDIATE 'ALTER TASK ' || v_task_fqn || ' RESUME';
+    END IF;
+
+    RETURN 'TASK ' || v_task_fqn || ' UPDATED';
+END;
+$$;
+
+-- Grant execute permissions on the task management procedure to the application role.
+-- Replace <your_app_role> with the appropriate role name for your deployment.
+-- GRANT EXECUTE ON PROCEDURE ZEUS_ANALYTICS_SIMU.DISCOVERY.SP_DQ_MANAGE_TASK(
+--     STRING, STRING, STRING, STRING, STRING, STRING, STRING, BOOLEAN
+-- ) TO ROLE <your_app_role>;

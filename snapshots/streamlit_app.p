@@ -796,6 +796,14 @@ def render_config_editor():
                             proc_name=PROC_NAME,
                             arg_sig="(VARCHAR)",
                         )
+                        preflight_requirements(
+                            session,
+                            meta_db,
+                            meta_schema,
+                            warehouse_name,
+                            proc_name="SP_DQ_MANAGE_TASK",
+                            arg_sig="(STRING, STRING, STRING, STRING, STRING, STRING, STRING, BOOLEAN)",
+                        )
                 except Exception as exc:  # pragma: no cover - Snowflake specific
                     show_task_failure(f"Task preflight failed: {exc}")
                     sched = {
@@ -827,7 +835,7 @@ def render_config_editor():
             elif sched_status == "NO_WAREHOUSE":
                 warn_msg = (
                     "No active warehouse is set for this session. "
-                    "Run `USE WAREHOUSE <name>` in Snowflake or set a default warehouse, then save & apply again."
+                    "Select a warehouse in Snowflake or configure a default before saving again."
                 )
                 st.warning(warn_msg)
                 remember("warning", warn_msg)
