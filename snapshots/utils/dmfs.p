@@ -88,21 +88,6 @@ def ensure_session_context(session, role: str, warehouse: str, db: str, schema: 
                 f"Active role {_qi(current_role)} does not match required role {_qi(role)}."
             )
 
-    if warehouse:
-        current_warehouse: Optional[str]
-        try:
-            current_warehouse = getattr(session, "get_current_warehouse")()
-        except Exception:
-            current_warehouse = None
-        if not current_warehouse:
-            issues.append(
-                f"No active warehouse detected. Activate {_qi(warehouse)} and retry."
-            )
-        elif _normalize(current_warehouse) != _normalize(warehouse):
-            issues.append(
-                f"Active warehouse {_qi(current_warehouse)} does not match {_qi(warehouse)}."
-            )
-
     if db and "." in db and not schema:
         raise ValueError(
             "Metadata database value appears to include a schema. "
@@ -197,7 +182,7 @@ def preflight_requirements(
     proc_name: str = PROC_NAME,
     arg_sig: str = "(VARCHAR)",
 ):
-    """Validate that the required schema, procedure, and warehouse are usable."""
+    """Validate that the required schema and procedure are usable."""
 
     db_name = str(db or "").strip()
     if not db_name:
@@ -205,7 +190,6 @@ def preflight_requirements(
 
     schema_name = str(schema or "").strip()
     proc_identifier = str(proc_name or "").strip()
-    warehouse_name = str(warehouse or "").strip()
 
     if not schema_name:
         raise ValueError("Schema name is required for preflight checks")
@@ -257,57 +241,9 @@ def preflight_requirements(
             f"{_q(db_name, schema_name, proc_identifier)}"
         )
 
-    if not warehouse_name:
-        raise ValueError("Warehouse is required for preflight checks")
+    # Warehouse visibility checks are intentionally omitted. Any missing or
+    # unauthorized warehouse references will surface during DDL execution.
 
-    try:
-        show_rows = session.sql(
-            f"SHOW WAREHOUSES LIKE {_ql(warehouse_name)}"
-        ).collect()
-    except Exception as exc:  # pragma: no cover - SHOW availability varies
-        error_message = str(exc)
-        if "Insufficient privileges" in error_message:
-            message = (
-                "Warehouse not found or insufficient privileges "
-                f"(USAGE and MONITOR required): {warehouse_name}"
-            )
-            raise ValueError(message) from exc
-        raise
-
-    expected = warehouse_name.strip('"').upper()
-
-    def _row_name(row: Any) -> str:
-        if hasattr(row, "as_dict"):
-            data = row.as_dict()
-            for key in ("WAREHOUSE_NAME", "NAME", "name"):
-                value = data.get(key)
-                if value is not None:
-                    return str(value)
-        for key in ("WAREHOUSE_NAME", "NAME", "name"):
-            try:
-                value = row[key]  # type: ignore[index]
-            except Exception:  # pragma: no cover - snowpark row access varies
-                continue
-            if value is not None:
-                return str(value)
-        try:
-            return str(row[0])  # type: ignore[index]
-        except Exception:  # pragma: no cover - defensive fallback
-            return ""
-
-    matched = False
-    for row in show_rows:
-        value = _row_name(row).strip().strip('"').upper()
-        if value == expected:
-            matched = True
-            break
-
-    if not matched:
-        message = (
-            "Warehouse not found or insufficient privileges "
-            f"(USAGE and MONITOR required): {warehouse_name}"
-        )
-        raise ValueError(message)
 
 def _split_fqn(fqn: str) -> Tuple[str, str, str]:
     parts: List[str] = []
