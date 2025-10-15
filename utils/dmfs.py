@@ -112,8 +112,6 @@ def ensure_session_context(session, role: str, warehouse: str, db: str, schema: 
     if issues:
         raise ValueError(" ".join(issues))
 
-    session.sql("ALTER SESSION SET QUOTED_IDENTIFIERS_IGNORE_CASE = FALSE").collect()
-
 
 if st is not None:  # pragma: no cover - decorator depends on Streamlit runtime
 
