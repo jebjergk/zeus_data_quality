@@ -265,8 +265,14 @@ def preflight_requirements(
             f"SHOW WAREHOUSES LIKE {_ql(warehouse_name)}"
         ).collect()
     except Exception as exc:  # pragma: no cover - SHOW availability varies
-        message = f"Warehouse not found or no USAGE: {warehouse_name}"
-        raise ValueError(message) from exc
+        error_message = str(exc)
+        if "Insufficient privileges" in error_message:
+            message = (
+                "Warehouse not found or insufficient privileges "
+                f"(USAGE and MONITOR required): {warehouse_name}"
+            )
+            raise ValueError(message) from exc
+        raise
 
     expected = warehouse_name.strip('"').upper()
 
@@ -297,7 +303,10 @@ def preflight_requirements(
             break
 
     if not matched:
-        message = f"Warehouse not found or no USAGE: {warehouse_name}"
+        message = (
+            "Warehouse not found or insufficient privileges "
+            f"(USAGE and MONITOR required): {warehouse_name}"
+        )
         raise ValueError(message)
 
 def _split_fqn(fqn: str) -> Tuple[str, str, str]:
