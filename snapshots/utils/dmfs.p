@@ -149,6 +149,46 @@ else:  # pragma: no cover - Streamlit unavailable
         ).to_pandas()
 
 
+def _normalize_signature(signature: str) -> str:
+    """Return a normalized version of a Snowflake argument signature."""
+
+    sig = re.sub(r"\s+", " ", (signature or "").strip().upper())
+    if not sig:
+        return sig
+
+    if not sig.startswith("(") or not sig.endswith(")"):
+        return sig
+
+    inner = sig[1:-1].strip()
+    if not inner:
+        return "()"
+
+    args: List[str] = []
+    depth = 0
+    start = 0
+    for index, ch in enumerate(inner):
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+        elif ch == "," and depth == 0:
+            args.append(inner[start:index].strip())
+            start = index + 1
+    args.append(inner[start:].strip())
+
+    cleaned: List[str] = []
+    for arg in args:
+        if not arg:
+            continue
+        tokens = arg.split()
+        tokens = [tok for tok in tokens if tok not in {"IN", "OUT", "INOUT"}]
+        if len(tokens) > 1:
+            tokens = tokens[1:]
+        cleaned.append(" ".join(tokens))
+
+    return "(" + ", ".join(cleaned) + ")"
+
+
 def preflight_requirements(
     session,
     db: str,
@@ -184,15 +224,38 @@ def preflight_requirements(
 
     rows = session.sql(
         f"""
-          SELECT 1
+          SELECT "ARGUMENT_SIGNATURE"
           FROM {_q(db_name, "INFORMATION_SCHEMA", "PROCEDURES")}
           WHERE UPPER("PROCEDURE_SCHEMA") = UPPER({_ql(schema_name)})
             AND UPPER("PROCEDURE_NAME") = UPPER({_ql(proc_identifier)})
-            AND "ARGUMENT_SIGNATURE" = {_ql(arg_sig)}
         """
     ).collect()
     if not rows:
         raise ValueError(f"Procedure not found: {_q(db_name, schema_name, proc_identifier)}{arg_sig}")
+
+    expected_signature = _normalize_signature(arg_sig)
+
+    def _extract_signature(row: Any) -> str:
+        if isinstance(row, dict):
+            value = row.get("ARGUMENT_SIGNATURE")
+        else:
+            try:
+                value = row["ARGUMENT_SIGNATURE"]  # type: ignore[index]
+            except Exception:  # pragma: no cover - Snowpark rows index differently
+                value = row[0]
+        return "" if value is None else str(value)
+
+    normalized_rows = []
+    for row in rows:
+        signature_value = _extract_signature(row)
+        normalized_rows.append((_normalize_signature(signature_value), signature_value))
+    if expected_signature not in {norm for norm, _ in normalized_rows}:
+        available = ", ".join(original for _, original in normalized_rows)
+        raise ValueError(
+            "Procedure signature mismatch: "
+            f"expected {arg_sig}, found [{available}] on "
+            f"{_q(db_name, schema_name, proc_identifier)}"
+        )
 
     if not warehouse_name:
         raise ValueError("Warehouse is required for preflight checks")
