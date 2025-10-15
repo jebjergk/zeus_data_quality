@@ -1,7 +1,7 @@
 """Convenience helpers for attaching and detaching Data Monitoring Framework views."""
 
 import re
-from typing import Any, List, Set, Tuple
+from typing import Any, List, Optional, Set, Tuple
 
 try:  # pragma: no cover - optional dependency in some environments
     import streamlit as st
@@ -47,6 +47,12 @@ def _q(db: str, sch: str, obj: str) -> str:
     return f"{_qi(db)}.{_qi(sch)}.{_qi(obj)}"
 
 
+def _ql(value: str) -> str:
+    """Return a properly quoted Snowflake string literal."""
+
+    return "'" + value.replace("'", "''") + "'"
+
+
 def _is_missing_object_error(exc: Exception) -> bool:
     """Return ``True`` if *exc* matches a Snowflake "object missing" error."""
 
@@ -60,37 +66,52 @@ def _is_missing_object_error(exc: Exception) -> bool:
 
 
 def ensure_session_context(session, role: str, warehouse: str, db: str, schema: str):
-    """Force a deterministic Snowflake session context for DQ task operations."""
+    """Validate that the active Snowflake session matches expected context."""
 
+    def _normalize(value: Optional[str]) -> str:
+        return (value or "").strip().strip('"').upper()
+
+    issues: List[str] = []
+
+    current_role: Optional[str] = None
     if role:
         try:
-            session.sql(f"USE ROLE {_qi(role)}").collect()
-        except Exception as exc:
-            raise RuntimeError(f"Failed to set role '{role}': {exc}") from exc
+            current_role = getattr(session, "get_current_role")()
+        except Exception:
+            current_role = None
+        if not current_role:
+            issues.append(
+                f"Active role could not be verified. Switch to {_qi(role)} before continuing."
+            )
+        elif _normalize(current_role) != _normalize(role):
+            issues.append(
+                f"Active role {_qi(current_role)} does not match required role {_qi(role)}."
+            )
+
     if warehouse:
+        current_warehouse: Optional[str]
         try:
-            session.sql(f"USE WAREHOUSE {_qi(warehouse)}").collect()
-        except Exception as exc:
-            raise RuntimeError(f"Failed to use warehouse '{warehouse}': {exc}") from exc
+            current_warehouse = getattr(session, "get_current_warehouse")()
+        except Exception:
+            current_warehouse = None
+        if not current_warehouse:
+            issues.append(
+                f"No active warehouse detected. Activate {_qi(warehouse)} and retry."
+            )
+        elif _normalize(current_warehouse) != _normalize(warehouse):
+            issues.append(
+                f"Active warehouse {_qi(current_warehouse)} does not match {_qi(warehouse)}."
+            )
+
     if db and "." in db and not schema:
         raise ValueError(
             "Metadata database value appears to include a schema. "
             "Set DQ_METADATA_DB and DQ_METADATA_SCHEMA separately."
         )
-    if db:
-        try:
-            session.sql(f"USE DATABASE {_qi(db)}").collect()
-        except Exception as exc:
-            if _is_missing_object_error(exc):
-                raise ValueError(f"Database not found or accessible: {db}") from exc
-            raise
-    if schema:
-        try:
-            session.sql(f"USE SCHEMA {_qi(schema)}").collect()
-        except Exception as exc:
-            if _is_missing_object_error(exc):
-                raise ValueError(f"Schema not found or accessible: {db}.{schema}") from exc
-            raise
+
+    if issues:
+        raise ValueError(" ".join(issues))
+
     session.sql("ALTER SESSION SET QUOTED_IDENTIFIERS_IGNORE_CASE = FALSE").collect()
 
 
@@ -140,23 +161,51 @@ def preflight_requirements(
 ):
     """Validate that the required schema, procedure, and warehouse are usable."""
 
-    session.sql(
-        f"SELECT 1 FROM {_qi(db)}.INFORMATION_SCHEMA.SCHEMATA WHERE SCHEMA_NAME = ?",
-        params=[schema],
+    db_name = str(db or "").strip()
+    if not db_name:
+        raise ValueError("Database is required for preflight checks")
+
+    schema_name = str(schema or "").strip()
+    proc_identifier = str(proc_name or "").strip()
+    warehouse_name = str(warehouse or "").strip()
+
+    if not schema_name:
+        raise ValueError("Schema name is required for preflight checks")
+
+    schema_rows = session.sql(
+        f"""
+          SELECT 1
+          FROM {_q(db_name, "INFORMATION_SCHEMA", "SCHEMATA")}
+          WHERE UPPER("SCHEMA_NAME") = UPPER({_ql(schema_name)})
+        """
     ).collect()
+    if not schema_rows:
+        raise ValueError(
+            f"Schema not found or accessible: {_qi(db_name)}.{_qi(schema_name)}"
+        )
 
     rows = session.sql(
         f"""
           SELECT 1
-          FROM {_qi(db)}.INFORMATION_SCHEMA.PROCEDURES
-          WHERE PROCEDURE_SCHEMA = ? AND PROCEDURE_NAME = ? AND ARGUMENT_SIGNATURE = ?
-        """,
-        params=[schema, proc_name, arg_sig],
+          FROM {_q(db_name, "INFORMATION_SCHEMA", "PROCEDURES")}
+          WHERE UPPER("PROCEDURE_SCHEMA") = UPPER({_ql(schema_name)})
+            AND UPPER("PROCEDURE_NAME") = UPPER({_ql(proc_identifier)})
+            AND "ARGUMENT_SIGNATURE" = {_ql(arg_sig)}
+        """
     ).collect()
     if not rows:
-        raise ValueError(f"Procedure not found: {_q(db, schema, proc_name)}{arg_sig}")
+        raise ValueError(f"Procedure not found: {_q(db_name, schema_name, proc_identifier)}{arg_sig}")
 
-    wh = session.sql(f"SHOW WAREHOUSES LIKE {_qi(warehouse)}").collect()
+    if not warehouse_name:
+        raise ValueError("Warehouse is required for preflight checks")
+
+    wh = session.sql(
+        f"""
+          SELECT 1
+          FROM {_q("SNOWFLAKE", "INFORMATION_SCHEMA", "WAREHOUSES")}
+          WHERE UPPER("WAREHOUSE_NAME") = UPPER({_ql(warehouse_name)})
+        """
+    ).collect()
     if not wh:
         raise ValueError(f"Warehouse not found or no USAGE: {warehouse}")
 
@@ -217,11 +266,12 @@ def attach_dmfs(
     return created
 
 def _active_configs_using_table(session, table_fqn: str) -> Set[str]:
+    table_literal = _ql(str(table_fqn or ""))
     df = session.sql(f"""
         SELECT DISTINCT k.CONFIG_ID
         FROM {_q_meta(DQ_CONFIG_TBL)} c JOIN {_q_meta(DQ_CHECK_TBL)} k USING(CONFIG_ID)
-        WHERE UPPER(c.STATUS)='ACTIVE' AND k.TABLE_FQN = ?
-    """, params=[table_fqn])
+        WHERE UPPER(c.STATUS)='ACTIVE' AND k.TABLE_FQN = {table_literal}
+    """)
     out: Set[str] = set()
     for r in df.collect():
         out.add(r[0] if not hasattr(r, "asDict") else r.asDict().get("CONFIG_ID"))
@@ -375,6 +425,5 @@ def run_task_now(session, db: Any, schema: Any, config_id: Any):
 
     fqn = _q(db_name, schema_name, task_name_for_config(config_id))
     return session.sql(
-        "SELECT SYSTEM$TASK_FORCE_RUN(?) AS REQUEST_ID",
-        params=[fqn],
+        f"SELECT SYSTEM$TASK_FORCE_RUN({_ql(fqn)}) AS REQUEST_ID"
     ).to_pandas()
