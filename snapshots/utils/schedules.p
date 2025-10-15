@@ -1,8 +1,10 @@
 from typing import Any, Dict
 
+from utils.configs import get_metadata_namespace, get_proc_name
 from utils.dmfs import create_or_update_task, task_name_for_config
 from utils.meta import _parse_relation_name
-from utils.config import get_metadata_namespace, get_proc_name
+
+PROC_NAME = get_proc_name()
 
 
 def ensure_task_for_config(session, cfg) -> Dict[str, Any]:
@@ -54,7 +56,7 @@ def ensure_task_for_config(session, cfg) -> Dict[str, Any]:
             schedule_cron=schedule_cron,
             tz=schedule_tz,
             run_role=getattr(cfg, "run_as_role", None),
-            proc_name=get_proc_name(),
+            proc_name=PROC_NAME,
         )
     except Exception as exc:
         return {
