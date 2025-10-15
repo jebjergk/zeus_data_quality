@@ -373,33 +373,26 @@ def create_or_update_task(
     if not db_name or not schema_name:
         raise ValueError("Database and schema are required to manage tasks")
 
-    name = task_name_for_config(config_id)
-    fqn = _q(db_name, schema_name, name)
-    proc = _q(db_name, schema_name, proc_name)
-    sched = f"USING CRON {schedule_cron} {tz}"
-    comment = f"Auto task for DQ config {config_id}"
-
-    meta_location = f"{db_name}.{schema_name}".strip(".")
-
     def _handle_task_error(exc: Exception) -> Exception:
         message = str(exc)
         lowered = message.lower()
         if "nonexistent warehouse" in lowered or "091083" in lowered:
             return ValueError(
                 "The current session warehouse is missing or inaccessible. "
-                "Pick an existing warehouse (e.g. by running `USE WAREHOUSE <name>` in Snowflake) "
-                "before enabling schedules."
+                "Select a valid warehouse before enabling schedules."
             )
         if "002043" in message or "object does not exist" in lowered:
             hint = (
                 " Snowflake could not find one of the required objects. "
                 "Confirm that the metadata schema"
             )
+            meta_location = f"{db_name}.{schema_name}".strip(".")
             if meta_location:
                 hint += f" `{meta_location}`"
             hint += (
-                " exists, that the `DQ_RUN_CONFIG(VARCHAR)` stored procedure is deployed "
-                "there, and that your role has privileges to use it."
+                " exists, that the `DQ_RUN_CONFIG(VARCHAR)` and "
+                "`SP_DQ_MANAGE_TASK(STRING, STRING, STRING, STRING, STRING, STRING, STRING, BOOLEAN)` "
+                "stored procedures are deployed there, and that your role has privileges to use them."
             )
             return ValueError(message + "." + hint)
         return exc
@@ -423,30 +416,29 @@ def create_or_update_task(
             proc_name=proc_name,
             arg_sig="(VARCHAR)",
         )
+        preflight_requirements(
+            session,
+            db_name,
+            schema_name,
+            warehouse_name,
+            proc_name="SP_DQ_MANAGE_TASK",
+            arg_sig="(STRING, STRING, STRING, STRING, STRING, STRING, STRING, BOOLEAN)",
+        )
 
+        manage_proc = _q(db_name, schema_name, "SP_DQ_MANAGE_TASK")
         session.sql(
-            f"""
-        CREATE TASK IF NOT EXISTS {fqn}
-          WAREHOUSE = {_qi(warehouse_name)}
-          SCHEDULE  = ?
-          COMMENT   = ?
-        AS
-          CALL {proc}(?);
-        """,
-            params=[sched, comment, config_id],
+            f"CALL {manage_proc}(?, ?, ?, ?, ?, ?, ?, ?)",
+            params=[
+                db_name,
+                schema_name,
+                warehouse_name,
+                str(config_id),
+                proc_name,
+                schedule_cron,
+                tz,
+                True,
+            ],
         ).collect()
-
-        session.sql(
-            f"""
-        ALTER TASK {fqn} SET
-          WAREHOUSE = {_qi(warehouse_name)},
-          SCHEDULE  = ?,
-          COMMENT   = ?
-        """,
-            params=[sched, comment],
-        ).collect()
-
-        session.sql(f"ALTER TASK {fqn} RESUME").collect()
     except Exception as exc:  # pragma: no cover - Snowflake specific
         raise _handle_task_error(exc)
 
