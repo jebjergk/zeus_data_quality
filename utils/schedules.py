@@ -1,7 +1,7 @@
 from typing import Any, Dict
 
 from utils.configs import get_metadata_namespace, get_proc_name
-from utils.dmfs import create_or_update_task, task_name_for_config
+from utils.dmfs import create_or_update_task, task_name_for_config, _q
 from utils.meta import _parse_relation_name
 
 PROC_NAME = get_proc_name()
@@ -46,6 +46,8 @@ def ensure_task_for_config(session, cfg) -> Dict[str, Any]:
 
     meta_db, meta_schema = get_metadata_namespace()
 
+    task_fqn = _q(meta_db, meta_schema, base_task_name)
+
     try:
         create_or_update_task(
             session,
@@ -59,13 +61,6 @@ def ensure_task_for_config(session, cfg) -> Dict[str, Any]:
             proc_name=PROC_NAME,
         )
     except Exception as exc:
-        return {
-            "status": "FALLBACK",
-            "reason": str(exc),
-            "task": f"{meta_db}.{meta_schema}.{base_task_name}",
-        }
+        return {"status": "FALLBACK", "reason": str(exc), "task": task_fqn}
 
-    return {
-        "status": "TASK_CREATED",
-        "task": f"{meta_db}.{meta_schema}.{base_task_name}",
-    }
+    return {"status": "TASK_CREATED", "task": task_fqn}

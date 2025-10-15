@@ -14,9 +14,13 @@ try:
 except Exception:
     Session = Any  # type: ignore
 
+from utils.configs import get_metadata_namespace
+
+METADATA_DB, METADATA_SCHEMA = get_metadata_namespace()
+
 # Override with fully-qualified names if desired (e.g., "DB.SCHEMA.DQ_CONFIG")
-DQ_CONFIG_TBL: str = "DQ_CONFIG"
-DQ_CHECK_TBL: str = "DQ_CHECK"
+DQ_CONFIG_TBL: str = f"{METADATA_DB}.{METADATA_SCHEMA}.DQ_CONFIG"
+DQ_CHECK_TBL: str = f"{METADATA_DB}.{METADATA_SCHEMA}.DQ_CHECK"
 
 __all__ = [
     "DQ_CONFIG_TBL",

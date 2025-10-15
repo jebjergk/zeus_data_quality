@@ -46,10 +46,9 @@ from services.state import get_state, set_state
 from utils.checkdefs import build_rule_for_column_check, build_rule_for_table_check
 from utils.configs import get_metadata_namespace, get_proc_name
 
-RUN_RESULTS_TBL = "DQ_RUN_RESULTS"
-
 METADATA_DB, METADATA_SCHEMA = get_metadata_namespace()
 PROC_NAME = get_proc_name()
+RUN_RESULTS_TBL = f"{METADATA_DB}.{METADATA_SCHEMA}.DQ_RUN_RESULTS"
 
 st.set_page_config(page_title="Zeus Data Quality", layout="wide")
 
