@@ -1,4 +1,11 @@
-# services/configs.py
+"""High-level helpers for persisting DQ configs and their checks.
+
+This module contains service-layer routines that coordinate metadata
+operations and DMFS attachments inside a Snowflake transaction. It
+complements :mod:`utils.configs`, which exposes shared configuration
+defaults and helpers consumed across the codebase.
+"""
+
 from contextlib import contextmanager
 from typing import Dict, Any, List
 
