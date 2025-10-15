@@ -7,6 +7,8 @@ try:  # pragma: no cover - optional dependency in some environments
     import streamlit as st
 except ModuleNotFoundError:  # pragma: no cover - defensive guard when Streamlit absent
     st = None  # type: ignore
+
+from utils.configs import get_proc_name
 from utils.meta import (
     DQConfig,
     DQCheck,
@@ -16,6 +18,7 @@ from utils.meta import (
 )
 
 AGG_PREFIX = "AGG:"
+PROC_NAME = get_proc_name()
 
 __all__ = [
     "AGG_PREFIX",
@@ -99,7 +102,7 @@ def preflight_requirements(
     db: str,
     schema: str,
     warehouse: str,
-    proc_name: str = "SP_RUN_DQ_CONFIG",
+    proc_name: str = PROC_NAME,
     arg_sig: str = "(VARCHAR)",
 ):
     """Validate that the required schema, procedure, and warehouse are usable."""

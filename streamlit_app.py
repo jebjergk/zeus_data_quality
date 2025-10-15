@@ -44,7 +44,7 @@ from utils import schedules
 from services.configs import save_config_and_checks, delete_config_full
 from services.state import get_state, set_state
 from utils.checkdefs import build_rule_for_column_check, build_rule_for_table_check
-from utils.config import get_metadata_namespace, get_proc_name
+from utils.configs import get_metadata_namespace, get_proc_name
 
 RUN_RESULTS_TBL = "DQ_RUN_RESULTS"
 

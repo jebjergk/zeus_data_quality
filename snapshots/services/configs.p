@@ -8,7 +8,7 @@ except Exception:
     Session = Any  # type: ignore
 
 from utils import dmfs, meta
-from utils.config import get_metadata_namespace
+from utils.configs import get_metadata_namespace
 
 @contextmanager
 def transaction(session: Session):
