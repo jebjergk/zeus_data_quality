@@ -112,25 +112,24 @@ LANGUAGE SQL
 EXECUTE AS OWNER
 AS
 $$
-DECLARE
-    v_db STRING := COALESCE(TARGET_DB, '');
-    v_schema STRING := COALESCE(TARGET_SCHEMA, '');
-    v_wh STRING := COALESCE(TASK_WAREHOUSE, '');
-    v_config STRING := COALESCE(CONFIG_ID, '');
-    v_proc STRING := COALESCE(PROC_NAME, '');
-    v_cron STRING := COALESCE(CRON, '');
-    v_tz STRING := COALESCE(TZ, '');
-    v_enable BOOLEAN := ENABLE;
-    v_safe_config STRING;
-    v_task_name STRING;
-    v_task_fqn STRING;
-    v_proc_fqn STRING;
-    v_sched STRING;
-    v_comment STRING;
-    v_db_ident STRING;
-    v_schema_ident STRING;
-    v_wh_ident STRING;
 BEGIN
+    LET v_db STRING := COALESCE(TARGET_DB, '');
+    LET v_schema STRING := COALESCE(TARGET_SCHEMA, '');
+    LET v_wh STRING := COALESCE(TASK_WAREHOUSE, '');
+    LET v_config STRING := COALESCE(CONFIG_ID, '');
+    LET v_proc STRING := COALESCE(PROC_NAME, '');
+    LET v_cron STRING := COALESCE(CRON, '');
+    LET v_tz STRING := COALESCE(TZ, '');
+    LET v_enable BOOLEAN := COALESCE(ENABLE, FALSE);
+    LET v_safe_config STRING := NULL;
+    LET v_task_name STRING := NULL;
+    LET v_task_fqn STRING := NULL;
+    LET v_proc_fqn STRING := NULL;
+    LET v_sched STRING := NULL;
+    LET v_comment STRING := NULL;
+    LET v_db_ident STRING := NULL;
+    LET v_schema_ident STRING := NULL;
+    LET v_wh_ident STRING := NULL;
     IF v_db = '' THEN
         RAISE STATEMENT_ERROR WITH MESSAGE => 'TARGET_DB is required';
     END IF;
