@@ -1,3 +1,12 @@
+"""Shared configuration defaults for metadata objects and procedures.
+
+The utilities here provide the canonical database and schema locations
+for metadata tables along with the stored procedure name used when
+running DQ configs. Service modules (for example
+``services.configs``) import these helpers so the defaults stay in one
+place and can be overridden with environment variables.
+"""
+
 import os
 
 # Defaults (adjust to your environment if different)
