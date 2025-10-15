@@ -47,17 +47,50 @@ def _q(db: str, sch: str, obj: str) -> str:
     return f"{_qi(db)}.{_qi(sch)}.{_qi(obj)}"
 
 
+def _is_missing_object_error(exc: Exception) -> bool:
+    """Return ``True`` if *exc* matches a Snowflake "object missing" error."""
+
+    message = str(exc).lower()
+    return (
+        "does not exist" in message
+        or "object does not exist" in message
+        or "002043" in message
+        or "2043" in message
+    )
+
+
 def ensure_session_context(session, role: str, warehouse: str, db: str, schema: str):
     """Force a deterministic Snowflake session context for DQ task operations."""
 
     if role:
-        session.sql(f"USE ROLE {_qi(role)}").collect()
+        try:
+            session.sql(f"USE ROLE {_qi(role)}").collect()
+        except Exception as exc:
+            raise RuntimeError(f"Failed to set role '{role}': {exc}") from exc
     if warehouse:
-        session.sql(f"USE WAREHOUSE {_qi(warehouse)}").collect()
+        try:
+            session.sql(f"USE WAREHOUSE {_qi(warehouse)}").collect()
+        except Exception as exc:
+            raise RuntimeError(f"Failed to use warehouse '{warehouse}': {exc}") from exc
+    if db and "." in db and not schema:
+        raise ValueError(
+            "Metadata database value appears to include a schema. "
+            "Set DQ_METADATA_DB and DQ_METADATA_SCHEMA separately."
+        )
     if db:
-        session.sql(f"USE DATABASE {_qi(db)}").collect()
+        try:
+            session.sql(f"USE DATABASE {_qi(db)}").collect()
+        except Exception as exc:
+            if _is_missing_object_error(exc):
+                raise ValueError(f"Database not found or accessible: {db}") from exc
+            raise
     if schema:
-        session.sql(f"USE SCHEMA {_qi(schema)}").collect()
+        try:
+            session.sql(f"USE SCHEMA {_qi(schema)}").collect()
+        except Exception as exc:
+            if _is_missing_object_error(exc):
+                raise ValueError(f"Schema not found or accessible: {db}.{schema}") from exc
+            raise
     session.sql("ALTER SESSION SET QUOTED_IDENTIFIERS_IGNORE_CASE = FALSE").collect()
 
 
