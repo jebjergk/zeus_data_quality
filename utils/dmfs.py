@@ -325,7 +325,7 @@ def create_or_update_task(
     schedule_cron: str = "0 8 * * *",
     tz: str = "Europe/Berlin",
     run_role: Any = None,
-    proc_name: str = "SP_RUN_DQ_CONFIG",
+    proc_name: str = "DQ_RUN_CONFIG",
 ) -> None:
     """Create or update the Snowflake task for the given configuration."""
 
@@ -360,7 +360,7 @@ def create_or_update_task(
             if meta_location:
                 hint += f" `{meta_location}`"
             hint += (
-                " exists, that the `SP_RUN_DQ_CONFIG(VARCHAR)` stored procedure is deployed "
+                " exists, that the `DQ_RUN_CONFIG(VARCHAR)` stored procedure is deployed "
                 "there, and that your role has privileges to use it."
             )
             return ValueError(message + "." + hint)

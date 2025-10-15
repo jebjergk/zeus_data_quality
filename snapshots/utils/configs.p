@@ -12,7 +12,7 @@ import os
 # Defaults (adjust to your environment if different)
 DEFAULT_METADATA_DB = "ZEUS_ANALYTICS_SIMU"
 DEFAULT_METADATA_SCHEMA = "DISCOVERY"
-DEFAULT_PROC_NAME = "SP_RUN_DQ_CONFIG"  # or "DQ_RUN_CONFIG" if that's what you deploy
+DEFAULT_PROC_NAME = "DQ_RUN_CONFIG"
 
 
 def get_metadata_namespace():
