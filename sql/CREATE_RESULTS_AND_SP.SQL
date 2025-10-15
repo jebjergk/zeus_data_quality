@@ -174,14 +174,14 @@ BEGIN
         '  COMMENT   = ?' || CHR(10) ||
         'AS' || CHR(10) ||
         '  CALL ' || v_proc_fqn || '(?)'
-        USING (v_sched, v_comment, v_config);
+        USING v_sched, v_comment, v_config;
 
     EXECUTE IMMEDIATE
         'ALTER TASK ' || v_task_fqn || ' SET' || CHR(10) ||
         '  WAREHOUSE = ' || v_wh_ident || ',' || CHR(10) ||
         '  SCHEDULE  = ?,' || CHR(10) ||
         '  COMMENT   = ?'
-        USING (v_sched, v_comment);
+        USING v_sched, v_comment;
 
     IF v_enable THEN
         EXECUTE IMMEDIATE 'ALTER TASK ' || v_task_fqn || ' RESUME';
