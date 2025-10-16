@@ -162,14 +162,59 @@ def _normalize_signature(signature: str) -> str:
     args.append(inner[start:].strip())
 
     cleaned: List[str] = []
+    type_synonyms = {
+        "STRING": "STRING",
+        "VARCHAR": "STRING",
+        "TEXT": "STRING",
+        "CHAR": "STRING",
+        "CHARACTER": "STRING",
+        "CHARACTER VARYING": "STRING",
+        "NVARCHAR": "STRING",
+    }
+    known_type_bases = set(type_synonyms)
+    known_type_bases.update(
+        {
+            "BOOLEAN",
+            "NUMBER",
+            "NUMERIC",
+            "DECIMAL",
+            "INT",
+            "INTEGER",
+            "BIGINT",
+            "SMALLINT",
+            "FLOAT",
+            "DOUBLE",
+            "REAL",
+            "BINARY",
+            "VARIANT",
+            "OBJECT",
+            "ARRAY",
+            "DATE",
+            "TIME",
+            "TIMESTAMP",
+            "TIMESTAMP_NTZ",
+            "TIMESTAMP_LTZ",
+            "TIMESTAMP_TZ",
+        }
+    )
+
     for arg in args:
         if not arg:
             continue
         tokens = arg.split()
         tokens = [tok for tok in tokens if tok not in {"IN", "OUT", "INOUT"}]
         if len(tokens) > 1:
-            tokens = tokens[1:]
-        cleaned.append(" ".join(tokens))
+            first = tokens[0].upper()
+            first_base = first.split("(", 1)[0]
+            if first_base not in known_type_bases:
+                tokens = tokens[1:]
+
+        type_name = " ".join(tokens).strip()
+        upper_name = type_name.upper()
+        base_name = upper_name.split("(", 1)[0].strip()
+        canonical_base = type_synonyms.get(base_name, base_name)
+        remainder = upper_name[len(base_name) :]
+        cleaned.append(canonical_base + remainder)
 
     return "(" + ", ".join(cleaned) + ")"
 
