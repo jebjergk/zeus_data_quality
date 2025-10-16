@@ -911,47 +911,47 @@ def render_config_editor():
                     "SYSTEM$TASK_FORCE_RUN fallback skipped because the task name could not be determined."
                 )
                 st.warning(warn_msg)
-                    remember("warning", warn_msg)
-                elif not warehouse_name:
-                    warn_msg = (
-                        "SYSTEM$TASK_FORCE_RUN fallback skipped because no active warehouse is set."
+                remember("warning", warn_msg)
+            elif not warehouse_name:
+                warn_msg = (
+                    "SYSTEM$TASK_FORCE_RUN fallback skipped because no active warehouse is set."
+                )
+                st.warning(warn_msg)
+                remember("warning", warn_msg)
+            elif not (meta_db and meta_schema):
+                warn_msg = (
+                    "SYSTEM$TASK_FORCE_RUN fallback skipped due to incomplete database/schema context."
+                )
+                st.warning(warn_msg)
+                remember("warning", warn_msg)
+            else:
+                try:
+                    ensure_session_context(
+                        session,
+                        run_role_name,
+                        warehouse_name,
+                        meta_db,
+                        meta_schema,
                     )
-                    st.warning(warn_msg)
-                    remember("warning", warn_msg)
-                elif not (meta_db and meta_schema):
-                    warn_msg = (
-                        "SYSTEM$TASK_FORCE_RUN fallback skipped due to incomplete database/schema context."
-                    )
+                    fallback_df = session.sql(
+                        "SELECT SYSTEM$TASK_FORCE_RUN(?) AS REQUEST_ID",
+                        params=[task_fqn],
+                    ).to_pandas()
+                except Exception as exc:  # pragma: no cover - Snowflake specific
+                    warn_msg = f"SYSTEM$TASK_FORCE_RUN fallback failed: {exc}"
                     st.warning(warn_msg)
                     remember("warning", warn_msg)
                 else:
-                    try:
-                        ensure_session_context(
-                            session,
-                            run_role_name,
-                            warehouse_name,
-                            meta_db,
-                            meta_schema,
+                    request_id = None
+                    if not fallback_df.empty and "REQUEST_ID" in fallback_df.columns:
+                        request_id = fallback_df.iloc[0]["REQUEST_ID"]
+                    info_msg = f"Invoked `SYSTEM$TASK_FORCE_RUN` for `{task_fqn}`."
+                    if request_id:
+                        info_msg = (
+                            f"Invoked `SYSTEM$TASK_FORCE_RUN` for `{task_fqn}` (request `{request_id}`)."
                         )
-                        fallback_df = session.sql(
-                            "SELECT SYSTEM$TASK_FORCE_RUN(?) AS REQUEST_ID",
-                            params=[task_fqn],
-                        ).to_pandas()
-                    except Exception as exc:  # pragma: no cover - Snowflake specific
-                        warn_msg = f"SYSTEM$TASK_FORCE_RUN fallback failed: {exc}"
-                        st.warning(warn_msg)
-                        remember("warning", warn_msg)
-                    else:
-                        request_id = None
-                        if not fallback_df.empty and "REQUEST_ID" in fallback_df.columns:
-                            request_id = fallback_df.iloc[0]["REQUEST_ID"]
-                        info_msg = f"Invoked `SYSTEM$TASK_FORCE_RUN` for `{task_fqn}`."
-                        if request_id:
-                            info_msg = (
-                                f"Invoked `SYSTEM$TASK_FORCE_RUN` for `{task_fqn}` (request `{request_id}`)."
-                            )
-                        st.info(info_msg)
-                        remember("info", info_msg)
+                    st.info(info_msg)
+                    remember("info", info_msg)
         elif run_task_via_system_proc_flag:
             info_msg = (
                 "SYSTEM$TASK_FORCE_RUN fallback is available when **Run Now** is used. "
