@@ -138,22 +138,22 @@ BEGIN
     v_tz := TRIM(v_tz);
 
     IF (v_db = '') THEN
-        RAISE STATEMENT_ERROR USING MESSAGE = 'TARGET_DB is required';
+        RETURN 'ERROR: TARGET_DB is required';
     END IF;
     IF (v_schema = '') THEN
-        RAISE STATEMENT_ERROR USING MESSAGE = 'TARGET_SCHEMA is required';
+        RETURN 'ERROR: TARGET_SCHEMA is required';
     END IF;
     IF (v_wh = '') THEN
-        RAISE STATEMENT_ERROR USING MESSAGE = 'TASK_WAREHOUSE is required';
+        RETURN 'ERROR: TASK_WAREHOUSE is required';
     END IF;
     IF (v_proc = '') THEN
-        RAISE STATEMENT_ERROR USING MESSAGE = 'PROC_NAME is required';
+        RETURN 'ERROR: PROC_NAME is required';
     END IF;
     IF (v_cron = '') THEN
-        RAISE STATEMENT_ERROR USING MESSAGE = 'CRON is required';
+        RETURN 'ERROR: CRON is required';
     END IF;
     IF (v_tz = '') THEN
-        RAISE STATEMENT_ERROR USING MESSAGE = 'TZ is required';
+        RETURN 'ERROR: TZ is required';
     END IF;
 
     v_db_ident := '"' || REPLACE(v_db, '"', '""') || '"';
@@ -195,7 +195,7 @@ BEGIN
         EXECUTE IMMEDIATE 'ALTER TASK ' || v_task_fqn || ' RESUME';
     END IF;
 
-    RETURN 'TASK ' || v_task_fqn || ' UPDATED';
+    RETURN 'OK: TASK ' || v_task_fqn || ' UPDATED';
 END;
 $$;
 
