@@ -174,10 +174,6 @@ BEGIN
     v_sched := 'USING CRON ' || v_cron || ' ' || v_tz;
     v_comment := 'Auto task for DQ config ' || v_config;
 
-    EXECUTE IMMEDIATE 'USE DATABASE ' || v_db_ident;
-    EXECUTE IMMEDIATE 'USE SCHEMA ' || v_schema_ident;
-    EXECUTE IMMEDIATE 'USE WAREHOUSE ' || v_wh_ident;
-
     EXECUTE IMMEDIATE
         'CREATE TASK IF NOT EXISTS ' || v_task_fqn || CHR(10) ||
         '  WAREHOUSE = ' || v_wh_ident || CHR(10) ||
