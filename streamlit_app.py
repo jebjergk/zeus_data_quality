@@ -31,6 +31,7 @@ from utils.dmfs import (
     ensure_session_context,
     session_snapshot,
     preflight_requirements,
+    DEFAULT_WAREHOUSE,
     _q as _q_task,
 )
 from utils.meta import (
@@ -742,6 +743,27 @@ def render_config_editor():
             run_role_name = (dq_cfg.run_as_role or "").strip()
 
             task_failure_reported = False
+            task_manage_sql: Optional[str] = None
+
+            if meta_db and meta_schema:
+                def _quote_ident(value: Optional[str]) -> str:
+                    text = "" if value is None else str(value)
+                    return '"' + text.replace('"', '""') + '"'
+
+                def _quote_literal(value: Optional[str]) -> str:
+                    if value is None:
+                        return "NULL"
+                    text = str(value)
+                    return "'" + text.replace("'", "''") + "'"
+
+                cron_expression = (dq_cfg.schedule_cron or "0 8 * * *").strip() or "0 8 * * *"
+                timezone_name = (dq_cfg.schedule_timezone or "Europe/Berlin").strip() or "Europe/Berlin"
+                task_manage_sql = (
+                    f"CALL {_quote_ident(meta_db)}.{_quote_ident(meta_schema)}.\"SP_DQ_MANAGE_TASK\"("
+                    f"{_quote_literal(meta_db)}, {_quote_literal(meta_schema)}, {_quote_literal(DEFAULT_WAREHOUSE)}, "
+                    f"{_quote_literal(dq_cfg.config_id)}, {_quote_literal(PROC_NAME)}, "
+                    f"{_quote_literal(cron_expression)}, {_quote_literal(timezone_name)}, TRUE)"
+                )
 
             def show_task_failure(message: str) -> None:
                 nonlocal task_failure_reported
@@ -763,6 +785,9 @@ def render_config_editor():
                 st.markdown(
                     f"**Task FQN:** `{inferred_task_fqn}`  \\\n+**Procedure FQN:** `{inferred_proc_fqn}`"
                 )
+                if task_manage_sql:
+                    st.caption("Task creation call (for debugging):")
+                    st.code(task_manage_sql, language="sql")
                 if dbg_df is not None:
                     st.caption("Session snapshot at failure:")
                     st.dataframe(dbg_df, use_container_width=True, hide_index=True)
