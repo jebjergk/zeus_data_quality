@@ -162,7 +162,7 @@ BEGIN
 
     v_safe_config := REGEXP_REPLACE(UPPER(v_config), '[^A-Z0-9_]', '_');
     v_safe_config := REGEXP_REPLACE(v_safe_config, '_+', '_');
-    v_safe_config := TRIM(BOTH '_' FROM v_safe_config);
+    v_safe_config := TRIM(v_safe_config, '_');
     IF (v_safe_config = '') THEN
         v_safe_config := 'X';
     END IF;
@@ -191,7 +191,7 @@ BEGIN
         'SCHEDULE  = ' || '''' || REPLACE(v_sched, '''', '''''') || '''' || ', ' ||
         'COMMENT   = ' || '''' || REPLACE(v_comment, '''', '''''') || '''';
 
-    IF v_enable THEN
+    IF (v_enable) THEN
         EXECUTE IMMEDIATE 'ALTER TASK ' || v_task_fqn || ' RESUME';
     END IF;
 
