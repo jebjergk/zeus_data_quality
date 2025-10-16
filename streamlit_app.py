@@ -839,12 +839,11 @@ def render_config_editor():
                         meta_db or "",
                         meta_schema or "",
                     )
-                    if meta_db and meta_schema and warehouse_name:
+                    if meta_db and meta_schema:
                         preflight_requirements(
                             session,
                             meta_db,
                             meta_schema,
-                            warehouse_name,
                             proc_name=PROC_NAME,
                             arg_sig="(VARCHAR)",
                         )
@@ -852,7 +851,6 @@ def render_config_editor():
                             session,
                             meta_db,
                             meta_schema,
-                            warehouse_name,
                             proc_name="SP_DQ_MANAGE_TASK",
                             arg_sig="(STRING, STRING, STRING, STRING, STRING, STRING, STRING, BOOLEAN)",
                         )

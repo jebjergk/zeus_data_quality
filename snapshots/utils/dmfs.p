@@ -76,12 +76,6 @@ def ensure_session_context(session, role: str, warehouse: str, db: str, schema: 
         text = (value or "").strip().strip('"').strip("'")
         return text.upper()
 
-    def _display(value: Optional[str]) -> str:
-        normalized = _normalize(value)
-        if not normalized:
-            return "<none>"
-        return _qi(normalized)
-
     issues: List[str] = []
 
     current_role: Optional[str] = None
@@ -98,47 +92,6 @@ def ensure_session_context(session, role: str, warehouse: str, db: str, schema: 
             issues.append(
                 f"Active role {_qi(current_role)} does not match required role {_qi(role)}."
             )
-
-    expected_wh = _normalize(warehouse)
-    if warehouse and not expected_wh:
-        issues.append("Warehouse name could not be interpreted. Select a valid warehouse and retry.")
-    elif expected_wh:
-        current_wh: Optional[str] = None
-        get_wh = getattr(session, "get_current_warehouse", None)
-        if callable(get_wh):
-            try:
-                current_wh = get_wh()
-            except Exception:
-                current_wh = None
-        current_normalized = _normalize(current_wh)
-        if current_normalized != expected_wh:
-            set_wh = getattr(session, "use_warehouse", None)
-            switched = False
-            refreshed_wh: Optional[str] = None
-            if callable(set_wh):
-                try:
-                    set_wh(expected_wh)
-                    switched = True
-                except Exception as exc:
-                    issues.append(
-                        "Active warehouse could not be set to "
-                        f"{_qi(expected_wh)} ({exc})."
-                    )
-            if not switched:
-                current_normalized = _normalize(current_wh)
-            else:
-                if callable(get_wh):
-                    try:
-                        refreshed_wh = get_wh()
-                    except Exception:
-                        refreshed_wh = None
-                current_normalized = _normalize(refreshed_wh if refreshed_wh is not None else current_wh)
-            if current_normalized != expected_wh:
-                issues.append(
-                    "Active warehouse "
-                    f"{_display(refreshed_wh if refreshed_wh is not None else current_wh)} "
-                    f"does not match required {_qi(expected_wh)}."
-                )
 
     if db and "." in db and not schema:
         raise ValueError(
@@ -275,7 +228,6 @@ def preflight_requirements(
     session,
     db: str,
     schema: str,
-    warehouse: str,
     proc_name: str = PROC_NAME,
     arg_sig: str = "(VARCHAR)",
 ):
@@ -339,7 +291,8 @@ def preflight_requirements(
         )
 
     # Warehouse visibility checks are intentionally omitted. Any missing or
-    # unauthorized warehouse references will surface during DDL execution.
+    # unauthorized warehouse references will surface during stored procedure
+    # execution.
 
 
 def _split_fqn(fqn: str) -> Tuple[str, str, str]:
@@ -470,30 +423,6 @@ def create_or_update_task(
     if not db_name or not schema_name:
         raise ValueError("Database and schema are required to manage tasks")
 
-    def _handle_task_error(exc: Exception) -> Exception:
-        message = str(exc)
-        lowered = message.lower()
-        if "nonexistent warehouse" in lowered or "091083" in lowered:
-            return ValueError(
-                "The current session warehouse is missing or inaccessible. "
-                "Select a valid warehouse before enabling schedules."
-            )
-        if "002043" in message or "object does not exist" in lowered:
-            hint = (
-                " Snowflake could not find one of the required objects. "
-                "Confirm that the metadata schema"
-            )
-            meta_location = f"{db_name}.{schema_name}".strip(".")
-            if meta_location:
-                hint += f" `{meta_location}`"
-            hint += (
-                " exists, that the `DQ_RUN_CONFIG(VARCHAR)` and "
-                "`SP_DQ_MANAGE_TASK(STRING, STRING, STRING, STRING, STRING, STRING, STRING, BOOLEAN)` "
-                "stored procedures are deployed there, and that your role has privileges to use them."
-            )
-            return ValueError(message + "." + hint)
-        return exc
-
     # Until the UI supports selecting a warehouse reliably, always fall back to
     # the default DMF warehouse so that task creation succeeds without manual
     # session context tweaks.
@@ -508,7 +437,6 @@ def create_or_update_task(
             session,
             db_name,
             schema_name,
-            warehouse_name,
             proc_name=proc_name,
             arg_sig="(VARCHAR)",
         )
@@ -516,13 +444,12 @@ def create_or_update_task(
             session,
             db_name,
             schema_name,
-            warehouse_name,
             proc_name="SP_DQ_MANAGE_TASK",
             arg_sig="(STRING, STRING, STRING, STRING, STRING, STRING, STRING, BOOLEAN)",
         )
 
         result = session.sql(
-            'CALL "ZEUS_ANALYTICS_SIMU"."DISCOVERY"."SP_DQ_MANAGE_TASK"(?, ?, ?, ?, ?, ?, ?, ?)',
+            f'CALL {_q(db_name, schema_name, "SP_DQ_MANAGE_TASK")}(?, ?, ?, ?, ?, ?, ?, ?)',
             params=[
                 db_name,
                 schema_name,
@@ -534,15 +461,15 @@ def create_or_update_task(
                 True,
             ],
         ).collect()
-    except Exception as exc:  # pragma: no cover - Snowflake specific
-        raise _handle_task_error(exc)
+    except Exception:
+        raise
 
     if not result:
         raise ValueError("Task management procedure returned no result")
 
     message = str(result[0][0])
     if message.upper().startswith("ERROR:"):
-        raise ValueError(message[6:].strip())
+        raise ValueError(message)
 
 
 def run_task_now(session, db: Any, schema: Any, config_id: Any):
