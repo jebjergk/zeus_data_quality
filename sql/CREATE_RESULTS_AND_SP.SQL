@@ -125,22 +125,37 @@ BEGIN
     LET v_task_name STRING := NULL;
     LET v_task_fqn STRING := NULL;
     LET v_proc_fqn STRING := NULL;
-    LET v_sched STRING := NULL;
-    LET v_comment STRING := NULL;
+    LET v_sched_text STRING := NULL;
+    LET v_sched_literal STRING := NULL;
+    LET v_comment_text STRING := NULL;
+    LET v_comment_literal STRING := NULL;
+    LET v_config_literal STRING := NULL;
     LET v_db_ident STRING := NULL;
     LET v_schema_ident STRING := NULL;
     LET v_wh_ident STRING := NULL;
+    v_db := TRIM(v_db);
+    v_schema := TRIM(v_schema);
+    v_wh := TRIM(v_wh);
+    v_proc := TRIM(v_proc);
+    v_cron := TRIM(v_cron);
+    v_tz := TRIM(v_tz);
     IF v_db = '' THEN
-        RAISE STATEMENT_ERROR WITH MESSAGE => 'TARGET_DB is required';
+        RAISE STATEMENT_ERROR WITH MESSAGE = 'TARGET_DB is required';
     END IF;
     IF v_schema = '' THEN
-        RAISE STATEMENT_ERROR WITH MESSAGE => 'TARGET_SCHEMA is required';
+        RAISE STATEMENT_ERROR WITH MESSAGE = 'TARGET_SCHEMA is required';
     END IF;
     IF v_wh = '' THEN
-        RAISE STATEMENT_ERROR WITH MESSAGE => 'TASK_WAREHOUSE is required';
+        RAISE STATEMENT_ERROR WITH MESSAGE = 'TASK_WAREHOUSE is required';
     END IF;
     IF v_proc = '' THEN
-        RAISE STATEMENT_ERROR WITH MESSAGE => 'PROC_NAME is required';
+        RAISE STATEMENT_ERROR WITH MESSAGE = 'PROC_NAME is required';
+    END IF;
+    IF v_cron = '' THEN
+        RAISE STATEMENT_ERROR WITH MESSAGE = 'CRON schedule is required';
+    END IF;
+    IF v_tz = '' THEN
+        RAISE STATEMENT_ERROR WITH MESSAGE = 'Time zone is required';
     END IF;
 
     v_safe_config := REGEXP_REPLACE(UPPER(v_config), '[^A-Z0-9_]', '_');
@@ -159,8 +174,11 @@ BEGIN
     v_task_fqn := v_db_ident || '.' || v_schema_ident || '.' || '"' || REPLACE(v_task_name, '"', '""') || '"';
     v_proc_fqn := v_db_ident || '.' || v_schema_ident || '.' || '"' || REPLACE(v_proc, '"', '""') || '"';
 
-    v_sched := 'USING CRON ' || v_cron || ' ' || v_tz;
-    v_comment := 'Auto task for DQ config ' || v_config;
+    v_sched_text := 'USING CRON ' || v_cron || ' ' || v_tz;
+    v_sched_literal := '''' || REPLACE(v_sched_text, '''', '''''') || '''';
+    v_comment_text := 'Auto task for DQ config ' || v_config;
+    v_comment_literal := '''' || REPLACE(v_comment_text, '''', '''''') || '''';
+    v_config_literal := '''' || REPLACE(v_config, '''', '''''') || '''';
 
     EXECUTE IMMEDIATE 'USE DATABASE ' || v_db_ident;
     EXECUTE IMMEDIATE 'USE SCHEMA ' || v_schema_ident;
@@ -169,18 +187,16 @@ BEGIN
     EXECUTE IMMEDIATE
         'CREATE TASK IF NOT EXISTS ' || v_task_fqn || CHR(10) ||
         '  WAREHOUSE = ' || v_wh_ident || CHR(10) ||
-        '  SCHEDULE  = ?' || CHR(10) ||
-        '  COMMENT   = ?' || CHR(10) ||
+        '  SCHEDULE  = ' || v_sched_literal || CHR(10) ||
+        '  COMMENT   = ' || v_comment_literal || CHR(10) ||
         'AS' || CHR(10) ||
-        '  CALL ' || v_proc_fqn || '(?)'
-        USING v_sched, v_comment, v_config;
+        '  CALL ' || v_proc_fqn || '(' || v_config_literal || ')';
 
     EXECUTE IMMEDIATE
         'ALTER TASK ' || v_task_fqn || ' SET' || CHR(10) ||
         '  WAREHOUSE = ' || v_wh_ident || ',' || CHR(10) ||
-        '  SCHEDULE  = ?,' || CHR(10) ||
-        '  COMMENT   = ?'
-        USING v_sched, v_comment;
+        '  SCHEDULE  = ' || v_sched_literal || ',' || CHR(10) ||
+        '  COMMENT   = ' || v_comment_literal;
 
     IF v_enable THEN
         EXECUTE IMMEDIATE 'ALTER TASK ' || v_task_fqn || ' RESUME';
@@ -191,7 +207,4 @@ END;
 $$;
 
 -- Grant execute permissions on the task management procedure to the application role.
--- Replace <your_app_role> with the appropriate role name for your deployment.
--- GRANT EXECUTE ON PROCEDURE ZEUS_ANALYTICS_SIMU.DISCOVERY.SP_DQ_MANAGE_TASK(
---     STRING, STRING, STRING, STRING, STRING, STRING, STRING, BOOLEAN
--- ) TO ROLE <your_app_role>;
+-- GRANT EXECUTE ON PROCEDURE "ZEUS_ANALYTICS_SIMU"."DISCOVERY"."SP_DQ_MANAGE_TASK"(STRING, STRING, STRING, STRING, STRING, STRING, STRING, BOOLEAN) TO ROLE <app_role>;

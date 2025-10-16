@@ -367,8 +367,8 @@ def create_or_update_task(
 ) -> None:
     """Create or update the Snowflake task for the given configuration."""
 
-    db_name = "" if db is None else str(db)
-    schema_name = "" if schema is None else str(schema)
+    db_name = "" if db is None else str(db).strip()
+    schema_name = "" if schema is None else str(schema).strip()
 
     if not db_name or not schema_name:
         raise ValueError("Database and schema are required to manage tasks")
@@ -405,6 +405,8 @@ def create_or_update_task(
 
     warehouse_name = str(warehouse).strip()
     run_role_name = str(run_role).strip() if run_role is not None else ""
+    cron_expression = str(schedule_cron or "").strip()
+    timezone_name = str(tz or "").strip()
 
     try:
         ensure_session_context(session, run_role_name, warehouse_name, db_name, schema_name)
@@ -426,18 +428,19 @@ def create_or_update_task(
         )
 
         manage_proc = _q(db_name, schema_name, "SP_DQ_MANAGE_TASK")
+        call_params = [
+            db_name,
+            schema_name,
+            warehouse_name,
+            str(config_id),
+            proc_name,
+            cron_expression,
+            timezone_name,
+            True,
+        ]
         session.sql(
             f"CALL {manage_proc}(?, ?, ?, ?, ?, ?, ?, ?)",
-            params=[
-                db_name,
-                schema_name,
-                warehouse_name,
-                str(config_id),
-                proc_name,
-                schedule_cron,
-                tz,
-                True,
-            ],
+            params=call_params,
         ).collect()
     except Exception as exc:  # pragma: no cover - Snowflake specific
         raise _handle_task_error(exc)
