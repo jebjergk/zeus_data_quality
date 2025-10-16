@@ -905,12 +905,14 @@ def render_config_editor():
                 st.warning(warn_msg)
                 remember("warning", warn_msg)
 
-            if run_task_via_system_proc_flag:
-                if not task_fqn:
-                    warn_msg = (
-                        "SYSTEM$TASK_FORCE_RUN fallback skipped because the task name could not be determined."
-                    )
-                    st.warning(warn_msg)
+        should_force_run = run_task_via_system_proc_flag and run_now_btn
+
+        if should_force_run:
+            if not task_fqn:
+                warn_msg = (
+                    "SYSTEM$TASK_FORCE_RUN fallback skipped because the task name could not be determined."
+                )
+                st.warning(warn_msg)
                     remember("warning", warn_msg)
                 elif not warehouse_name:
                     warn_msg = (
@@ -952,6 +954,13 @@ def render_config_editor():
                             )
                         st.info(info_msg)
                         remember("info", info_msg)
+        elif run_task_via_system_proc_flag:
+            info_msg = (
+                "SYSTEM$TASK_FORCE_RUN fallback is available when **Run Now** is used. "
+                "Save & Apply will only update the configuration."
+            )
+            st.info(info_msg)
+            remember("info", info_msg)
 
         st.session_state["last_notices"] = post_submit_notices
         st.session_state["cfg_mode"] = "list"; st.rerun()
