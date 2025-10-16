@@ -20,6 +20,9 @@ from utils.meta import (
 AGG_PREFIX = "AGG:"
 PROC_NAME = get_proc_name()
 
+# Temporary warehouse override until dynamic selection is restored.
+DEFAULT_WAREHOUSE = "DQ_WH"
+
 __all__ = [
     "AGG_PREFIX",
     "attach_dmfs",
@@ -32,6 +35,7 @@ __all__ = [
     "preflight_requirements",
     "create_or_update_task",
     "run_task_now",
+    "DEFAULT_WAREHOUSE",
 ]
 
 
@@ -490,13 +494,10 @@ def create_or_update_task(
             return ValueError(message + "." + hint)
         return exc
 
-    if warehouse is None or str(warehouse).strip() == "":
-        raise ValueError(
-            "A warehouse is required to schedule tasks. "
-            "Select a warehouse in the app or configure a default in Snowflake before enabling schedules."
-        )
-
-    warehouse_name = str(warehouse).strip()
+    # Until the UI supports selecting a warehouse reliably, always fall back to
+    # the default DMF warehouse so that task creation succeeds without manual
+    # session context tweaks.
+    warehouse_name = DEFAULT_WAREHOUSE
     run_role_name = str(run_role).strip() if run_role is not None else ""
     cron_expression = str(schedule_cron or "").strip()
     timezone_name = str(tz or "").strip()
