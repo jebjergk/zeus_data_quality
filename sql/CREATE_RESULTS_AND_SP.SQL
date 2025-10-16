@@ -110,35 +110,33 @@ CREATE OR REPLACE PROCEDURE ZEUS_ANALYTICS_SIMU.DISCOVERY.SP_DQ_MANAGE_TASK(
 RETURNS STRING
 LANGUAGE SQL
 EXECUTE AS OWNER
-AS
-$$
+AS $$
+DECLARE
+    v_db            STRING   DEFAULT COALESCE(TARGET_DB, '');
+    v_schema        STRING   DEFAULT COALESCE(TARGET_SCHEMA, '');
+    v_wh            STRING   DEFAULT COALESCE(TASK_WAREHOUSE, '');
+    v_config        STRING   DEFAULT COALESCE(CONFIG_ID, '');
+    v_proc          STRING   DEFAULT COALESCE(PROC_NAME, '');
+    v_cron          STRING   DEFAULT COALESCE(CRON, '');
+    v_tz            STRING   DEFAULT COALESCE(TZ, '');
+    v_enable        BOOLEAN  DEFAULT COALESCE(ENABLE, FALSE);
+    v_safe_config   STRING;
+    v_task_name     STRING;
+    v_db_ident      STRING;
+    v_schema_ident  STRING;
+    v_wh_ident      STRING;
+    v_task_fqn      STRING;
+    v_proc_fqn      STRING;
+    v_sched         STRING;
+    v_comment       STRING;
 BEGIN
-    LET v_db STRING := COALESCE(TARGET_DB, '');
-    LET v_schema STRING := COALESCE(TARGET_SCHEMA, '');
-    LET v_wh STRING := COALESCE(TASK_WAREHOUSE, '');
-    LET v_config STRING := COALESCE(CONFIG_ID, '');
-    LET v_proc STRING := COALESCE(PROC_NAME, '');
-    LET v_cron STRING := COALESCE(CRON, '');
-    LET v_tz STRING := COALESCE(TZ, '');
-    LET v_enable BOOLEAN := COALESCE(ENABLE, FALSE);
-    LET v_safe_config STRING := NULL;
-    LET v_task_name STRING := NULL;
-    LET v_task_fqn STRING := NULL;
-    LET v_proc_fqn STRING := NULL;
-    LET v_sched_text STRING := NULL;
-    LET v_sched_literal STRING := NULL;
-    LET v_comment_text STRING := NULL;
-    LET v_comment_literal STRING := NULL;
-    LET v_config_literal STRING := NULL;
-    LET v_db_ident STRING := NULL;
-    LET v_schema_ident STRING := NULL;
-    LET v_wh_ident STRING := NULL;
     v_db := TRIM(v_db);
     v_schema := TRIM(v_schema);
     v_wh := TRIM(v_wh);
     v_proc := TRIM(v_proc);
     v_cron := TRIM(v_cron);
     v_tz := TRIM(v_tz);
+
     IF v_db = '' THEN
         RAISE STATEMENT_ERROR WITH MESSAGE = 'TARGET_DB is required';
     END IF;
@@ -152,11 +150,15 @@ BEGIN
         RAISE STATEMENT_ERROR WITH MESSAGE = 'PROC_NAME is required';
     END IF;
     IF v_cron = '' THEN
-        RAISE STATEMENT_ERROR WITH MESSAGE = 'CRON schedule is required';
+        RAISE STATEMENT_ERROR WITH MESSAGE = 'CRON is required';
     END IF;
     IF v_tz = '' THEN
-        RAISE STATEMENT_ERROR WITH MESSAGE = 'Time zone is required';
+        RAISE STATEMENT_ERROR WITH MESSAGE = 'TZ is required';
     END IF;
+
+    v_db_ident := '"' || REPLACE(v_db, '"', '""') || '"';
+    v_schema_ident := '"' || REPLACE(v_schema, '"', '""') || '"';
+    v_wh_ident := '"' || REPLACE(v_wh, '"', '""') || '"';
 
     v_safe_config := REGEXP_REPLACE(UPPER(v_config), '[^A-Z0-9_]', '_');
     v_safe_config := REGEXP_REPLACE(v_safe_config, '_+', '_');
@@ -164,21 +166,13 @@ BEGIN
     IF v_safe_config = '' THEN
         v_safe_config := 'X';
     END IF;
-
     v_task_name := 'DQ_TASK_' || v_safe_config;
 
-    v_db_ident := '"' || REPLACE(v_db, '"', '""') || '"';
-    v_schema_ident := '"' || REPLACE(v_schema, '"', '""') || '"';
-    v_wh_ident := '"' || REPLACE(v_wh, '"', '""') || '"';
+    v_task_fqn := v_db_ident || '.' || v_schema_ident || '."' || REPLACE(v_task_name, '"', '""') || '"';
+    v_proc_fqn := v_db_ident || '.' || v_schema_ident || '."' || REPLACE(v_proc, '"', '""') || '"';
 
-    v_task_fqn := v_db_ident || '.' || v_schema_ident || '.' || '"' || REPLACE(v_task_name, '"', '""') || '"';
-    v_proc_fqn := v_db_ident || '.' || v_schema_ident || '.' || '"' || REPLACE(v_proc, '"', '""') || '"';
-
-    v_sched_text := 'USING CRON ' || v_cron || ' ' || v_tz;
-    v_sched_literal := '''' || REPLACE(v_sched_text, '''', '''''') || '''';
-    v_comment_text := 'Auto task for DQ config ' || v_config;
-    v_comment_literal := '''' || REPLACE(v_comment_text, '''', '''''') || '''';
-    v_config_literal := '''' || REPLACE(v_config, '''', '''''') || '''';
+    v_sched := 'USING CRON ' || v_cron || ' ' || v_tz;
+    v_comment := 'Auto task for DQ config ' || v_config;
 
     EXECUTE IMMEDIATE 'USE DATABASE ' || v_db_ident;
     EXECUTE IMMEDIATE 'USE SCHEMA ' || v_schema_ident;
@@ -187,16 +181,15 @@ BEGIN
     EXECUTE IMMEDIATE
         'CREATE TASK IF NOT EXISTS ' || v_task_fqn || CHR(10) ||
         '  WAREHOUSE = ' || v_wh_ident || CHR(10) ||
-        '  SCHEDULE  = ' || v_sched_literal || CHR(10) ||
-        '  COMMENT   = ' || v_comment_literal || CHR(10) ||
-        'AS' || CHR(10) ||
-        '  CALL ' || v_proc_fqn || '(' || v_config_literal || ')';
+        '  SCHEDULE  = ' || '''' || REPLACE(v_sched, '''', '''''') || '''' || CHR(10) ||
+        '  COMMENT   = ' || '''' || REPLACE(v_comment, '''', '''''') || '''' || CHR(10) ||
+        'AS CALL ' || v_proc_fqn || '(''' || REPLACE(v_config, '''', '''''') || ''')';
 
     EXECUTE IMMEDIATE
-        'ALTER TASK ' || v_task_fqn || ' SET' || CHR(10) ||
-        '  WAREHOUSE = ' || v_wh_ident || ',' || CHR(10) ||
-        '  SCHEDULE  = ' || v_sched_literal || ',' || CHR(10) ||
-        '  COMMENT   = ' || v_comment_literal;
+        'ALTER TASK ' || v_task_fqn || ' SET ' ||
+        'WAREHOUSE = ' || v_wh_ident || ', ' ||
+        'SCHEDULE  = ' || '''' || REPLACE(v_sched, '''', '''''') || '''' || ', ' ||
+        'COMMENT   = ' || '''' || REPLACE(v_comment, '''', '''''') || '''';
 
     IF v_enable THEN
         EXECUTE IMMEDIATE 'ALTER TASK ' || v_task_fqn || ' RESUME';

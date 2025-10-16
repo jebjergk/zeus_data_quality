@@ -427,20 +427,18 @@ def create_or_update_task(
             arg_sig="(STRING, STRING, STRING, STRING, STRING, STRING, STRING, BOOLEAN)",
         )
 
-        manage_proc = _q(db_name, schema_name, "SP_DQ_MANAGE_TASK")
-        call_params = [
-            db_name,
-            schema_name,
-            warehouse_name,
-            str(config_id),
-            proc_name,
-            cron_expression,
-            timezone_name,
-            True,
-        ]
         session.sql(
-            f"CALL {manage_proc}(?, ?, ?, ?, ?, ?, ?, ?)",
-            params=call_params,
+            'CALL "ZEUS_ANALYTICS_SIMU"."DISCOVERY"."SP_DQ_MANAGE_TASK"(?, ?, ?, ?, ?, ?, ?, ?)',
+            params=[
+                db_name,
+                schema_name,
+                warehouse_name,
+                str(config_id),
+                proc_name,
+                cron_expression,
+                timezone_name,
+                True,
+            ],
         ).collect()
     except Exception as exc:  # pragma: no cover - Snowflake specific
         raise _handle_task_error(exc)
