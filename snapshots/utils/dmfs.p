@@ -69,7 +69,14 @@ def ensure_session_context(session, role: str, warehouse: str, db: str, schema: 
     """Validate that the active Snowflake session matches expected context."""
 
     def _normalize(value: Optional[str]) -> str:
-        return (value or "").strip().strip('"').upper()
+        text = (value or "").strip().strip('"').strip("'")
+        return text.upper()
+
+    def _display(value: Optional[str]) -> str:
+        normalized = _normalize(value)
+        if not normalized:
+            return "<none>"
+        return _qi(normalized)
 
     issues: List[str] = []
 
@@ -87,6 +94,47 @@ def ensure_session_context(session, role: str, warehouse: str, db: str, schema: 
             issues.append(
                 f"Active role {_qi(current_role)} does not match required role {_qi(role)}."
             )
+
+    expected_wh = _normalize(warehouse)
+    if warehouse and not expected_wh:
+        issues.append("Warehouse name could not be interpreted. Select a valid warehouse and retry.")
+    elif expected_wh:
+        current_wh: Optional[str] = None
+        get_wh = getattr(session, "get_current_warehouse", None)
+        if callable(get_wh):
+            try:
+                current_wh = get_wh()
+            except Exception:
+                current_wh = None
+        current_normalized = _normalize(current_wh)
+        if current_normalized != expected_wh:
+            set_wh = getattr(session, "use_warehouse", None)
+            switched = False
+            refreshed_wh: Optional[str] = None
+            if callable(set_wh):
+                try:
+                    set_wh(expected_wh)
+                    switched = True
+                except Exception as exc:
+                    issues.append(
+                        "Active warehouse could not be set to "
+                        f"{_qi(expected_wh)} ({exc})."
+                    )
+            if not switched:
+                current_normalized = _normalize(current_wh)
+            else:
+                if callable(get_wh):
+                    try:
+                        refreshed_wh = get_wh()
+                    except Exception:
+                        refreshed_wh = None
+                current_normalized = _normalize(refreshed_wh if refreshed_wh is not None else current_wh)
+            if current_normalized != expected_wh:
+                issues.append(
+                    "Active warehouse "
+                    f"{_display(refreshed_wh if refreshed_wh is not None else current_wh)} "
+                    f"does not match required {_qi(expected_wh)}."
+                )
 
     if db and "." in db and not schema:
         raise ValueError(
