@@ -172,16 +172,32 @@ def render_config_list():
         for note in notices:
             kind = note.get("type", "info")
             message = note.get("message", "")
-            if not message:
-                continue
             if kind == "success":
-                st.success(message)
+                if message:
+                    st.success(message)
             elif kind == "warning":
-                st.warning(message)
+                if message:
+                    st.warning(message)
             elif kind == "error":
-                st.error(message)
+                if message:
+                    st.error(message)
+            elif kind == "sql":
+                if message:
+                    st.caption(message)
+                st.code(
+                    note.get("code", ""),
+                    language=note.get("language", "sql"),
+                )
+                continue
             else:
-                st.info(message)
+                if message:
+                    st.info(message)
+
+            code_snippet = note.get("code")
+            if code_snippet:
+                if message:
+                    st.caption(message)
+                st.code(code_snippet, language=note.get("language", "text"))
     search_query = st.text_input(
         "Search configurations",
         key="config_list_search",
@@ -743,6 +759,7 @@ def render_config_editor():
             run_role_name = (dq_cfg.run_as_role or "").strip()
 
             task_failure_reported = False
+            task_sql_recorded = False
             task_manage_sql: Optional[str] = None
 
             if meta_db and meta_schema:
@@ -766,7 +783,7 @@ def render_config_editor():
                 )
 
             def show_task_failure(message: str) -> None:
-                nonlocal task_failure_reported
+                nonlocal task_failure_reported, task_sql_recorded
                 task_failure_reported = True
                 st.error(message)
                 remember("error", message)
@@ -788,6 +805,16 @@ def render_config_editor():
                 if task_manage_sql:
                     st.caption("Task creation call (for debugging):")
                     st.code(task_manage_sql, language="sql")
+                    if not task_sql_recorded:
+                        post_submit_notices.append(
+                            {
+                                "type": "sql",
+                                "message": "Task creation call (for debugging):",
+                                "code": task_manage_sql,
+                                "language": "sql",
+                            }
+                        )
+                        task_sql_recorded = True
                 if dbg_df is not None:
                     st.caption("Session snapshot at failure:")
                     st.dataframe(dbg_df, use_container_width=True, hide_index=True)
