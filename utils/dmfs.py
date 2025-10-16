@@ -427,7 +427,7 @@ def create_or_update_task(
             arg_sig="(STRING, STRING, STRING, STRING, STRING, STRING, STRING, BOOLEAN)",
         )
 
-        session.sql(
+        result = session.sql(
             'CALL "ZEUS_ANALYTICS_SIMU"."DISCOVERY"."SP_DQ_MANAGE_TASK"(?, ?, ?, ?, ?, ?, ?, ?)',
             params=[
                 db_name,
@@ -442,6 +442,13 @@ def create_or_update_task(
         ).collect()
     except Exception as exc:  # pragma: no cover - Snowflake specific
         raise _handle_task_error(exc)
+
+    if not result:
+        raise ValueError("Task management procedure returned no result")
+
+    message = str(result[0][0])
+    if message.upper().startswith("ERROR:"):
+        raise ValueError(message[6:].strip())
 
 
 def run_task_now(session, db: Any, schema: Any, config_id: Any):
