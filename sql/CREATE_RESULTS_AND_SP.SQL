@@ -15,6 +15,7 @@ LANGUAGE PYTHON
 RUNTIME_VERSION = '3.10'
 PACKAGES = ('snowflake-snowpark-python')
 HANDLER = 'run_dq_config'
+EXECUTE AS CALLER
 AS
 $$
 import uuid

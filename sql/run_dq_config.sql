@@ -4,6 +4,7 @@
 create or replace procedure DQ_RUN_CONFIG(CONFIG_ID STRING)
 returns STRING
 language SQL
+execute as caller
 as
 $$
 begin
