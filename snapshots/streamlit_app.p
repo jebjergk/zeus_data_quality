@@ -591,16 +591,6 @@ def render_config_editor():
             disabled=not schedule_enabled
         )
 
-        st.checkbox(
-            "Use SYSTEM$TASK_FORCE_RUN fallback",
-            value=bool(st.session_state.get("run_task_via_system_proc", False)),
-            help=(
-                "When enabled, the app will invoke `SYSTEM$TASK_FORCE_RUN` with the generated task name "
-                "after scheduling to verify privileges."
-            ),
-            key="run_task_via_system_proc",
-        )
-
         c1, c2, c3, c4 = st.columns(4)
         with c1: apply_now = st.form_submit_button("Save & Apply")
         with c2: save_draft = st.form_submit_button("Save as Draft")
@@ -729,8 +719,6 @@ def render_config_editor():
                             )
                         st.success(success_msg)
                         remember("success", success_msg)
-
-        run_task_via_system_proc_flag = bool(st.session_state.get("run_task_via_system_proc", False))
 
         if apply_now and status == 'ACTIVE':
             st.caption(f"Namespace: {METADATA_DB}.{METADATA_SCHEMA}, Proc: {PROC_NAME}")
@@ -902,63 +890,6 @@ def render_config_editor():
                     warn_msg = "Could not create task automatically; stored fallback intent."
                 st.warning(warn_msg)
                 remember("warning", warn_msg)
-
-        should_force_run = run_task_via_system_proc_flag and run_now_btn
-
-        if should_force_run:
-            if not task_fqn:
-                warn_msg = (
-                    "SYSTEM$TASK_FORCE_RUN fallback skipped because the task name could not be determined."
-                )
-                st.warning(warn_msg)
-                remember("warning", warn_msg)
-            elif not warehouse_name:
-                warn_msg = (
-                    "SYSTEM$TASK_FORCE_RUN fallback skipped because no active warehouse is set."
-                )
-                st.warning(warn_msg)
-                remember("warning", warn_msg)
-            elif not (meta_db and meta_schema):
-                warn_msg = (
-                    "SYSTEM$TASK_FORCE_RUN fallback skipped due to incomplete database/schema context."
-                )
-                st.warning(warn_msg)
-                remember("warning", warn_msg)
-            else:
-                try:
-                    ensure_session_context(
-                        session,
-                        run_role_name,
-                        warehouse_name,
-                        meta_db,
-                        meta_schema,
-                    )
-                    fallback_df = session.sql(
-                        "SELECT SYSTEM$TASK_FORCE_RUN(?) AS REQUEST_ID",
-                        params=[task_fqn],
-                    ).to_pandas()
-                except Exception as exc:  # pragma: no cover - Snowflake specific
-                    warn_msg = f"SYSTEM$TASK_FORCE_RUN fallback failed: {exc}"
-                    st.warning(warn_msg)
-                    remember("warning", warn_msg)
-                else:
-                    request_id = None
-                    if not fallback_df.empty and "REQUEST_ID" in fallback_df.columns:
-                        request_id = fallback_df.iloc[0]["REQUEST_ID"]
-                    info_msg = f"Invoked `SYSTEM$TASK_FORCE_RUN` for `{task_fqn}`."
-                    if request_id:
-                        info_msg = (
-                            f"Invoked `SYSTEM$TASK_FORCE_RUN` for `{task_fqn}` (request `{request_id}`)."
-                        )
-                    st.info(info_msg)
-                    remember("info", info_msg)
-        elif run_task_via_system_proc_flag:
-            info_msg = (
-                "SYSTEM$TASK_FORCE_RUN fallback is available when **Run Now** is used. "
-                "Save & Apply will only update the configuration."
-            )
-            st.info(info_msg)
-            remember("info", info_msg)
 
         st.session_state["last_notices"] = post_submit_notices
         st.session_state["cfg_mode"] = "list"; st.rerun()
