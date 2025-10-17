@@ -38,8 +38,7 @@ from utils.meta import (
     DQConfig, DQCheck,
     _q, _parse_relation_name,
     list_configs, get_config, get_checks,
-    list_databases, list_schemas, list_tables, list_columns,
-    fq_table,
+    list_columns,
 )
 from utils import schedules
 from services.configs import save_config_and_checks, delete_config_full
@@ -47,6 +46,7 @@ from services.state import get_state, set_state
 from utils.checkdefs import build_rule_for_column_check, build_rule_for_table_check
 from utils.configs import get_metadata_namespace, get_proc_name
 from views.profile_view import render_profile
+from views.table_picker import stateless_table_picker, session_cache_token
 
 ALLOWED_PAGES = {"home", "cfg", "profile", "monitor", "docs"}
 
@@ -145,69 +145,6 @@ def open_config_editor(
     st.rerun()
 
 
-def _session_cache_token(session_obj) -> str:
-    for attr in ("session_id", "_session_id"):
-        token = getattr(session_obj, attr, None)
-        if token:
-            return str(token)
-    getter = getattr(session_obj, "get_session_id", None)
-    if callable(getter):
-        try:
-            token = getter()
-            if token:
-                return str(token)
-        except Exception:
-            pass
-    return str(id(session_obj))
-
-
-def _list_databases_cached(session_obj) -> List[str]:
-    if not session_obj:
-        return []
-
-    @st.cache_data(ttl=300, show_spinner=False)
-    def _load_databases(cache_token: str) -> List[str]:
-        try:
-            return list_databases(session_obj)
-        except Exception as exc:
-            st.error(f"Failed to list databases: {exc}")
-            return []
-
-    return _load_databases(_session_cache_token(session_obj))
-
-
-def _list_schemas_cached(session_obj, database: str) -> List[str]:
-    if not session_obj or not database:
-        return []
-
-    @st.cache_data(ttl=300, show_spinner=False)
-    def _load_schemas(cache_token: Tuple[str, str]) -> List[str]:
-        _, db_name = cache_token
-        try:
-            return list_schemas(session_obj, db_name)
-        except Exception as exc:
-            st.error(f"Failed to list schemas for {db_name}: {exc}")
-            return []
-
-    return _load_schemas((_session_cache_token(session_obj), database))
-
-
-def _list_tables_cached(session_obj, database: str, schema: str) -> List[str]:
-    if not session_obj or not (database and schema):
-        return []
-
-    @st.cache_data(ttl=300, show_spinner=False)
-    def _load_tables(cache_token: Tuple[str, str, str]) -> List[str]:
-        _, db_name, schema_name = cache_token
-        try:
-            return list_tables(session_obj, db_name, schema_name)
-        except Exception as exc:
-            st.error(f"Failed to list tables for {db_name}.{schema_name}: {exc}")
-            return []
-
-    return _load_tables((_session_cache_token(session_obj), database, schema))
-
-
 def _list_columns_cached(session_obj, database: str, schema: str, table: str) -> List[str]:
     if not session_obj or not (database and schema and table):
         return []
@@ -221,51 +158,7 @@ def _list_columns_cached(session_obj, database: str, schema: str, table: str) ->
             st.error(f"Failed to list columns for {db_name}.{schema_name}.{table_name}: {exc}")
             return []
 
-    return _load_columns((_session_cache_token(session_obj), database, schema, table))
-
-
-def stateless_table_picker(preselect_fqn: Optional[str]):
-    """Simple, stateless DB → Schema → Table picker. Returns (db, schema, table, fqn)."""
-
-    def split_fqn(fqn):
-        if not fqn or fqn.count(".") != 2:
-            return None, None, None
-        a, b, c = [p.strip('"') for p in fqn.split(".")]
-        return a, b, c
-
-    pre_db, pre_sch, pre_tbl = split_fqn(preselect_fqn or "")
-
-    dbs = _list_databases_cached(session)
-    db_index = (
-        next((i for i, v in enumerate(dbs) if pre_db and v.upper() == pre_db.upper()), 0)
-        if dbs
-        else 0
-    )
-    db_sel = st.selectbox("Database", dbs or ["— none —"], index=db_index if dbs else 0)
-    if not dbs or db_sel == "— none —":
-        return None, None, None, ""
-
-    schemas = _list_schemas_cached(session, db_sel)
-    sch_index = (
-        next((i for i, v in enumerate(schemas) if pre_sch and v.upper() == pre_sch.upper()), 0)
-        if schemas
-        else 0
-    )
-    sch_sel = st.selectbox("Schema", schemas or ["— none —"], index=sch_index if schemas else 0)
-    if not schemas or sch_sel == "— none —":
-        return db_sel, None, None, ""
-
-    tables = _list_tables_cached(session, db_sel, sch_sel)
-    tbl_index = (
-        next((i for i, v in enumerate(tables) if pre_tbl and v.upper() == pre_tbl.upper()), 0)
-        if tables
-        else 0
-    )
-    tbl_sel = st.selectbox("Table", tables or ["— none —"], index=tbl_index if tables else 0)
-    if not tables or tbl_sel == "— none —":
-        return db_sel, sch_sel, None, ""
-
-    return db_sel, sch_sel, tbl_sel, fq_table(db_sel, sch_sel, tbl_sel)
+    return _load_columns((session_cache_token(session_obj), database, schema, table))
 
 
 def render_home():
@@ -490,7 +383,7 @@ def render_config_editor():
     # Target (picker is stateless, we persist a single FQN)
     st.subheader("Target")
     base_fqn = st.session_state.get("editor_target_fqn") or (cfg.target_table_fqn if cfg else None)
-    db_sel, sch_sel, tbl_sel, target_table = stateless_table_picker(base_fqn)
+    db_sel, sch_sel, tbl_sel, target_table = stateless_table_picker(session, base_fqn)
     if target_table:
         st.session_state["editor_target_fqn"] = target_table
     st.caption(f"Target Table: {target_table or '— not selected —'}")

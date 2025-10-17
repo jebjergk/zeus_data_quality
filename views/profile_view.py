@@ -13,6 +13,7 @@ import streamlit as st
 from services.profile import build_profile_suggestion
 from services.profiling import save_profile_results
 from utils.meta import _q
+from views.table_picker import session_cache_token, stateless_table_picker
 
 
 FULL_SCAN_WARNING_THRESHOLD = 1_000_000
@@ -35,27 +36,8 @@ class ColumnProfile:
     error: Optional[str] = None
 
 
-def _table_picker(preselect_fqn: Optional[str]):
-    # Imported lazily to avoid circular imports when streamlit_app imports this module.
-    from streamlit_app import stateless_table_picker  # type: ignore
-
-    return stateless_table_picker(preselect_fqn)
-
-
-def _session_cache_token(session) -> str:
-    for attr in ("session_id", "_session_id"):
-        token = getattr(session, attr, None)
-        if token:
-            return str(token)
-    getter = getattr(session, "get_session_id", None)
-    if callable(getter):
-        try:
-            token = getter()
-            if token:
-                return str(token)
-        except Exception:
-            pass
-    return str(id(session))
+def _table_picker(session_obj, preselect_fqn: Optional[str]):
+    return stateless_table_picker(session_obj, preselect_fqn)
 
 
 def _fetch_columns(session, fqn: str) -> List[Tuple[str, str]]:
@@ -82,7 +64,7 @@ def _fetch_columns(session, fqn: str) -> List[Tuple[str, str]]:
             columns.append((str(name), str(dtype or "")))
         return columns
 
-    session_token = _session_cache_token(session) if session else ""  # pragma: no cover - defensive
+    session_token = session_cache_token(session) if session else ""  # pragma: no cover - defensive
     return _load_columns(session_token, fqn)
 
 
@@ -273,7 +255,7 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
     )
 
     base_selection = st.session_state.get("profile_target_fqn")
-    _db_sel, _sch_sel, _tbl_sel, selected_fqn = _table_picker(base_selection)
+    _db_sel, _sch_sel, _tbl_sel, selected_fqn = _table_picker(session, base_selection)
     if selected_fqn:
         st.session_state["profile_target_fqn"] = selected_fqn
 
