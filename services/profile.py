@@ -96,11 +96,54 @@ def build_profile_suggestion(profile_result: Dict[str, Any]) -> Optional[Dict[st
             "data_type": data_type,
         }
 
-    if not suggestion_columns:
+    suggestion_table: Dict[str, Dict[str, Any]] = {}
+    best_ts_col: Optional[str] = None
+    best_score = -1.0
+    for column in columns:
+        name = column.get("name") or column.get("column_name")
+        if not name:
+            continue
+        data_type = str(column.get("data_type") or "")
+        if not _is_temporal(data_type):
+            continue
+        null_pct = float(column.get("null_pct") or 0.0)
+        score = 100.0 - null_pct
+        name_upper = name.upper()
+        for boost, keyword in (
+            (50, "UPDATE"),
+            (45, "MODIFIED"),
+            (40, "LOAD"),
+            (35, "CREATE"),
+            (30, "EVENT"),
+            (25, "TIME"),
+        ):
+            if keyword in name_upper:
+                score += boost
+        if score > best_score:
+            best_score = score
+            best_ts_col = name
+
+    if best_ts_col:
+        suggestion_table["FRESHNESS"] = {
+            "severity": "WARN",
+            "params": {"timestamp_column": best_ts_col, "max_age_minutes": 1440},
+        }
+        suggestion_table["ROW_COUNT_ANOMALY"] = {
+            "severity": "WARN",
+            "params": {
+                "timestamp_column": best_ts_col,
+                "lookback_days": 28,
+                "sensitivity": 3.0,
+                "min_history_days": 7,
+            },
+        }
+
+    if not suggestion_columns and not suggestion_table:
         return None
 
     return {
         "target_table": profile_result.get("target_table"),
         "summary": summary,
         "columns": suggestion_columns,
+        "table": suggestion_table,
     }

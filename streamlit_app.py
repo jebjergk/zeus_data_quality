@@ -344,6 +344,30 @@ def render_config_editor():
                     st.session_state[f"{sk}_p_val_csv"] = params.get("allowed_values_csv", "")
                     st.session_state[f"{sk}_p_val_ratio"] = float(params.get("min_match_ratio", 0.8))
                     st.session_state[f"{sk}_sev_val"] = severity
+        suggested_table = suggestion_payload.get("table") or {}
+        freshness_payload = suggested_table.get("FRESHNESS") or {}
+        freshness_params = freshness_payload.get("params") or {}
+        ts_candidate = freshness_params.get("timestamp_column")
+        if isinstance(ts_candidate, str) and ts_candidate:
+            st.session_state["_dq_table_ts_col"] = ts_candidate
+        max_age_candidate = freshness_params.get("max_age_minutes")
+        if max_age_candidate is not None:
+            try:
+                st.session_state["_dq_table_max_age"] = int(max_age_candidate)
+            except (TypeError, ValueError):
+                pass
+        rowcount_payload = suggested_table.get("ROW_COUNT_ANOMALY") or {}
+        rowcount_params_raw = rowcount_payload.get("params") or {}
+        if rowcount_params_raw:
+            rc_params: Dict[str, Any] = {}
+            for key in ("timestamp_column", "lookback_days", "sensitivity", "min_history_days"):
+                if key in rowcount_params_raw and rowcount_params_raw[key] is not None:
+                    rc_params[key] = rowcount_params_raw[key]
+            if rc_params:
+                st.session_state["_dq_rowcount_params"] = rc_params
+                ts_from_rc = rc_params.get("timestamp_column")
+                if isinstance(ts_from_rc, str) and ts_from_rc and "_dq_table_ts_col" not in st.session_state:
+                    st.session_state["_dq_table_ts_col"] = ts_from_rc
 
     # Header
     back, title = st.columns([1, 8])
@@ -388,7 +412,7 @@ def render_config_editor():
 
     # -------- Form --------
     # Pre-populate table-level defaults from existing checks / state
-    existing_table_params = {}
+    existing_table_params: Dict[str, Dict[str, Any]] = {}
     legacy_row_count_params: Dict[str, object] = {}
     for ec in existing_checks:
         if not ec.column_name and ec.params_json:
@@ -402,26 +426,50 @@ def render_config_editor():
                 legacy_row_count_params = parsed_params or {}
                 continue
 
-            existing_table_params[key] = parsed_params
+            existing_table_params[key] = parsed_params or {}
+
+    if "_dq_rowcount_params" in st.session_state:
+        stored_params = st.session_state.get("_dq_rowcount_params") or {}
+        existing_table_params["ROW_COUNT_ANOMALY"] = {
+            **existing_table_params.get("ROW_COUNT_ANOMALY", {}),
+            **stored_params,
+        }
+
+    session_ts_col = st.session_state.get("_dq_table_ts_col")
+    session_max_age = st.session_state.get("_dq_table_max_age")
+    if session_ts_col or session_max_age is not None:
+        freshness_entry = existing_table_params.setdefault("FRESHNESS", {})
+        if session_ts_col and "timestamp_column" not in freshness_entry:
+            freshness_entry["timestamp_column"] = session_ts_col
+        if session_max_age is not None and "max_age_minutes" not in freshness_entry:
+            try:
+                freshness_entry["max_age_minutes"] = int(session_max_age)
+            except (TypeError, ValueError):
+                pass
 
     freshness_defaults = existing_table_params.get("FRESHNESS", {})
     ts_default = (
-        freshness_defaults.get("timestamp_column")
+        (session_ts_col if isinstance(session_ts_col, str) and session_ts_col else None)
+        or freshness_defaults.get("timestamp_column")
         or legacy_row_count_params.get("timestamp_column")
         or "LOAD_TIMESTAMP"
     )
+    max_age_source: Any = session_max_age if session_max_age is not None else freshness_defaults.get("max_age_minutes")
+    if max_age_source is None:
+        max_age_source = 1920
     try:
-        max_age_default = int(freshness_defaults.get("max_age_minutes", 1920))
+        max_age_default = int(max_age_source)
     except (TypeError, ValueError):
         max_age_default = 1920
 
-    if "ROW_COUNT_ANOMALY" not in existing_table_params:
-        existing_table_params["ROW_COUNT_ANOMALY"] = {
-            "timestamp_column": ts_default,
-            "lookback_days": 28,
-            "sensitivity": 3.0,
-            "min_history_days": 7,
-        }
+    rowcount_defaults = existing_table_params.get("ROW_COUNT_ANOMALY") or {}
+    if not rowcount_defaults:
+        rowcount_defaults = {}
+    rowcount_defaults.setdefault("timestamp_column", ts_default)
+    rowcount_defaults.setdefault("lookback_days", 28)
+    rowcount_defaults.setdefault("sensitivity", 3.0)
+    rowcount_defaults.setdefault("min_history_days", 7)
+    existing_table_params["ROW_COUNT_ANOMALY"] = rowcount_defaults
 
     current_cfg_id = getattr(cfg, "config_id", None)
     if st.session_state.get("_dq_table_cfg_id") != current_cfg_id:
@@ -682,11 +730,24 @@ def render_config_editor():
                     params_json=json.dumps(fr_params)
                 ))
 
+                row_defaults = existing_table_params.get("ROW_COUNT_ANOMALY", {}) or {}
+                try:
+                    lookback_days = int(row_defaults.get("lookback_days", 28))
+                except (TypeError, ValueError):
+                    lookback_days = 28
+                try:
+                    sensitivity = float(row_defaults.get("sensitivity", 3.0))
+                except (TypeError, ValueError):
+                    sensitivity = 3.0
+                try:
+                    min_history_days = int(row_defaults.get("min_history_days", 7))
+                except (TypeError, ValueError):
+                    min_history_days = 7
                 anomaly_params = {
-                    "timestamp_column": ts_col,
-                    "lookback_days": 28,
-                    "sensitivity": 3.0,
-                    "min_history_days": 7,
+                    "timestamp_column": ts_col or row_defaults.get("timestamp_column") or ts_default,
+                    "lookback_days": lookback_days,
+                    "sensitivity": sensitivity,
+                    "min_history_days": min_history_days,
                 }
                 try:
                     anomaly_rule, anomaly_is_agg = build_rule_for_table_check(target_table, "ROW_COUNT_ANOMALY", anomaly_params)
