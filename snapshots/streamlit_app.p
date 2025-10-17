@@ -93,12 +93,9 @@ def _get_page_from_query_params() -> Optional[str]:
     allowed = {"home", "cfg", "monitor", "docs"}
     candidate: Optional[str] = None
     try:
-        params = st.experimental_get_query_params()
-    except AttributeError:
-        try:
-            params = dict(st.query_params)  # type: ignore[attr-defined]
-        except Exception:
-            params = {}
+        params = dict(st.query_params)  # type: ignore[attr-defined]
+    except Exception:
+        params = {}
     value = params.get("page") if isinstance(params, dict) else None
     if isinstance(value, list):
         candidate = next((item for item in value if isinstance(item, str)), None)
