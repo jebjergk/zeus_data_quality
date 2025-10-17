@@ -303,5 +303,19 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
             continue
         with st.expander(f"{row['column_name']} ({len(values)} values)"):
             tv_df = pd.DataFrame(values)
-            tv_df.columns = ["Value", "Count"]
+            if tv_df.empty:
+                st.table(tv_df)
+                continue
+
+            # Normalize common column names when present; otherwise fall back gracefully
+            rename_map = {}
+            if "value" in tv_df.columns:
+                rename_map["value"] = "Value"
+            if "count" in tv_df.columns:
+                rename_map["count"] = "Count"
+            if rename_map:
+                tv_df = tv_df.rename(columns=rename_map)
+            elif tv_df.shape[1] == 2:
+                tv_df.columns = ["Value", "Count"]
+
             st.table(tv_df)
