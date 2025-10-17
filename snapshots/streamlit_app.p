@@ -1200,97 +1200,182 @@ def render_monitor():
 
 
 def render_docs() -> None:
-    st.title("📘 Documentation")
-    st.markdown(
-        """
-        Use these notes to understand how Zeus Data Quality orchestrates checks in Snowflake,
-        what each component is responsible for, and how automated runs stay in sync with your
-        configurations.
-        """
-    )
+    st.header("📘 Zeus Data Quality – Documentation")
 
-    overview_tab, lifecycle_tab, automation_tab = st.tabs(
-        ["Overview", "Check lifecycle", "Automation & roles"]
-    )
+    tabs = st.tabs([
+        "User Guide", "Technical Overview", "DQ Framework (DMF)", "Anomaly Detection",
+        "Data Governance", "Diagrams"
+    ])
 
-    with overview_tab:
-        st.subheader("System overview")
-        st.markdown(
-            """
-            The Streamlit interface writes configuration metadata to Snowflake, keeps an eye on
-            the stored procedures that evaluate checks, and surfaces recent run results back in the
-            monitor view.
-            """
-        )
-        st.graphviz_chart(
-            """
-            digraph {
-                rankdir=LR;
-                node [shape=rectangle, style="rounded,filled", fillcolor="#E5F6FD", color="#055e86", fontname="Helvetica"];
-                edge [color="#6b7280", fontname="Helvetica"];
+    # Pull dynamic names
+    meta_db, meta_schema = METADATA_DB, METADATA_SCHEMA
+    proc_name = PROC_NAME
+    cfg_tbl = DQ_CONFIG_TBL
+    run_tbl = RUN_RESULTS_TBL
 
-                app [label="Streamlit app"];
-                cfg [label="DQ_CONFIG_TBL"];
-                proc [label="SP_DQ_MANAGE_TASK / PROC"];
-                task [label="Snowflake Task"];
-                results [label="DQ_RUN_RESULTS"];
+    with tabs[0]:
+        st.subheader("User Guide")
+        st.markdown("""
+**What you can do**
+1. **Create/Edit Configs**: pick a table, choose columns, enable checks.
+2. **Save & Apply**: attaches failing-row views (DMF) and creates a daily task (08:00 Europe/Berlin).
+3. **Run Now**: ad-hoc evaluate all checks; results appear on **Monitor**.
+4. **Monitor**: filter, trend, inspect failures and anomalies.
 
-                app -> cfg [label="Save configurations"];
-                cfg -> proc [label="Create / sync procedures"];
-                proc -> task [label="Ensure schedule"];
-                task -> results [label="Write run output"];
-                results -> app [label="Visualise runs"];
-            }
-            """
-        )
+**Checks**
+- **Column**: UNIQUE, NULL_COUNT, MIN_MAX, WHITESPACE, FORMAT_DISTRIBUTION, VALUE_DISTRIBUTION  
+- **Table** (always included): FRESHNESS, ROW_COUNT_ANOMALY
 
-    with lifecycle_tab:
-        st.subheader("Check lifecycle")
-        st.markdown(
-            """
-            Every check begins with configuration metadata and ends with persisted results that you
-            can inspect in the monitor tab. The diagram highlights the per-run objects created when
-            a task executes.
-            """
-        )
-        st.graphviz_chart(
-            """
-            digraph {
-                rankdir=TB;
-                node [shape=rectangle, style="rounded,filled", fillcolor="#EAFBF0", color="#0a5c2b", fontname="Helvetica"];
-                edge [color="#6b7280", fontname="Helvetica"];
+**Tips**
+- Use a stable timestamp column (e.g., `LOAD_TIMESTAMP`) for table checks.
+- Start with sensitivity=3.0; adjust if you see false positives.
+        """)
 
-                config [label="Config row\n(target + checks)"];
-                task_run [label="Scheduled task run"];
-                proc_call [label="Stored procedure"];
-                checks [label="Check evaluation"];
-                artifacts [label="Views / failure samples"];
-                results [label="Run results table"];
+    with tabs[1]:
+        st.subheader("Technical Overview")
+        st.markdown(f"""
+**Runtime**
+- Streamlit (in Snowflake) using Snowpark Python.
 
-                config -> task_run [label="cron"];
-                task_run -> proc_call [label="CALL"];
-                proc_call -> checks [label="Iterate columns"];
-                checks -> artifacts [label="Create failing-row views"];
-                checks -> results [label="Insert status"];
-                artifacts -> results [label="Metadata links"];
-            }
-            """
-        )
+**Metadata & Results**
+- Configs: `{cfg_tbl}`
+- Checks:  `{_q(DQ_CHECK_TBL)}`
+- Results: `{run_tbl}`
 
-    with automation_tab:
-        st.subheader("Automation & roles")
-        st.markdown(
-            """
-            Keep these requirements in mind while deploying:
+**Procedures**
+- Runner: `{meta_db}.{meta_schema}.{proc_name}(VARCHAR)` – evaluates checks and logs into results.
+- Task Manager: `{meta_db}.{meta_schema}.SP_DQ_MANAGE_TASK(STRING, STRING, STRING, STRING, STRING, STRING, STRING, BOOLEAN)` – creates/updates task. **EXECUTE AS CALLER**.
 
-            - **RUN_AS_ROLE** controls permissions used when running the stored procedures.
-            - **DMF_ROLE** must own the Data Management Framework objects that house the metadata.
-            - The automatic task calls `PROC_NAME` to sync configuration changes and trigger runs.
+**Tasks**
+- One per config: `DQ_TASK_<CONFIG_ID>` in `{meta_db}.{meta_schema}`; body: `CALL {proc_name}('<CONFIG_ID>')`.
 
-            When roles or warehouses change, update the sidebar inputs and re-save configurations so
-            the automation task is recreated with the latest context.
-            """
-        )
+**Warehouses**
+- Schedules run on default app WH (e.g., `DQ_WH`).
+        """)
+
+        st.markdown("**Required Privileges (caller role)**")
+        st.code(f"""
+USAGE ON WAREHOUSE DQ_WH
+USAGE ON DATABASE {meta_db}
+USAGE ON SCHEMA {meta_db}.{meta_schema}
+CREATE TASK ON SCHEMA {meta_db}.{meta_schema}
+EXECUTE ON PROCEDURE {meta_db}.{meta_schema}.{proc_name}(VARCHAR)
+        """, language="text")
+
+    with tabs[2]:
+        st.subheader("Snowflake Data Quality Framework (DMF) usage")
+        st.markdown("""
+**Failing-row Views**
+- For row-level checks, the app creates views per check in the **metadata schema**:
+  - `DQ_<CONFIG_ID>_<CHECK_ID>_FAILS`
+- Each view is `SELECT * FROM <source_table> WHERE NOT (<predicate>)`.
+
+**Attach/Detach**
+- On **Save & Apply**: create/replace the needed FAIL views (skips AGG checks).
+- On delete or when a table is no longer monitored: drop views if no other active config shares that table.
+
+**Why DMF-style views?**
+- Zero-copy investigation of bad records
+- Stable, re-usable object per check
+        """)
+
+    with tabs[3]:
+        st.subheader("Anomaly Detection")
+        st.markdown("""
+**Current Implementation (Robust Z-Score)**
+- Build daily counts from `timestamp_column` over `lookback_days` (default 28).
+- Compute **median** and **MAD** over history (excluding today).
+- Today is **OK** iff:
+  1) `history_days >= min_history_days` (default 7), and
+  2) `|today - median| / (1.4826 * MAD) <= sensitivity` (default 3.0).
+
+**Why this approach?**
+- Pure SQL, robust to outliers, no external model.
+
+**Planned Cortex Path (optional)**
+- Replace the MAD step with **Snowflake Cortex time-series anomaly** over (day, count).
+- Parameters map roughly as:
+  - `lookback_days` → training window
+  - `sensitivity` → anomaly score threshold
+  - `min_history_days` → gating before scoring
+
+> Note: Your current `RULE_EXPR` for ROW_COUNT_ANOMALY is an `AGG:` SQL using the robust MAD method.
+        """)
+
+    with tabs[4]:
+        st.subheader("Data Governance & Security")
+        st.markdown("""
+**Roles & Isolation**
+- App runs with a specific **caller role** and uses **EXECUTE AS CALLER** for task management.
+- Config/results live in a dedicated metadata schema to isolate privileges.
+
+**Traceability**
+- `DQ_RUN_RESULTS` logs: run timestamp, check id/type, failures, `OK` flag, and error messages if any.
+- Tasks: one per config, auditable in ACCOUNT usage views.
+
+**Access Patterns**
+- Read-only access to source tables for checks.
+- Controlled write access only to metadata objects (config/checks/results).
+- DMF failing-row views live in metadata schema (no writes to source).
+
+**PII / Sensitive Data**
+- Prefer checks that don’t materialize sensitive columns in logs. Views expose only what investigators need.
+- If required, add column masking on sensitive attributes in metadata views.
+        """)
+
+    with tabs[5]:
+        st.subheader("Diagrams")
+
+        # Entity Map (metadata + runtime)
+        dot_entities = f'''
+digraph G {{
+  rankdir=LR;
+  node [shape=box, style="rounded,filled", fillcolor="#F8FBFF", color="#D7E1F2"];
+
+  subgraph cluster_meta {{
+    label = "Metadata Schema: {meta_db}.{meta_schema}";
+    color="#E7EDF8";
+    "{_q(DQ_CONFIG_TBL)}" [label="DQ_CONFIG\n(configs)"];
+    "{_q(DQ_CHECK_TBL)}"  [label="DQ_CHECK\n(check definitions)"];
+    "{run_tbl}"           [label="DQ_RUN_RESULTS\n(execution logs)"];
+    "SP_DQ_MANAGE_TASK"   [label="SP_DQ_MANAGE_TASK\n(task manager SP)"];
+    "{proc_name}"         [label="{proc_name}\n(check runner SP)"];
+  }}
+
+  "Source Tables" [shape=folder, fillcolor="#F0F9F2", color="#CFE8D5", label="Source Tables\n(DB.SCHEMA.TABLE)"];
+  "DMF Views"     [shape=folder, fillcolor="#FFF7ED", color="#F3D0A6", label="Failing-row Views\nDQ_<CONFIG>_<CHECK>_FAILS"];
+  "Tasks"         [shape=component, fillcolor="#F3F7FF", color="#D1DBF0", label="DQ_TASK_<CONFIG_ID>"];
+
+  "Source Tables" -> "{_q(DQ_CHECK_TBL)}" [label="table_fqn"];
+  "{_q(DQ_CONFIG_TBL)}" -> "{_q(DQ_CHECK_TBL)}" [label="1..* checks"];
+  "{_q(DQ_CHECK_TBL)}" -> "DMF Views" [label="row-level only"];
+  "Tasks" -> "{proc_name}" [label="CALL (<CONFIG_ID>)"];
+  "{proc_name}" -> "{run_tbl}" [label="INSERT results"];
+  "{_q(DQ_CHECK_TBL)}" -> "{proc_name}" [label="rules (row + AGG)"];
+}}
+'''
+        st.graphviz_chart(dot_entities)
+
+        # Workflow
+        dot_flow = f'''
+digraph W {{
+  rankdir=LR;
+  node [shape=box, style="rounded,filled", fillcolor="#FFFFFF", color="#D7E1F2"];
+
+  A [label="User edits config"];
+  B [label="Save & Apply"];
+  C [label="Attach DMF views\n(row checks)"];
+  D [label="Create/Update Task\n(SP_DQ_MANAGE_TASK)"];
+  E [label="Daily Run 08:00\nTask calls {proc_name}"];
+  F [label="Runner executes checks\n(AGG + row predicates)"];
+  G [label="Write results to\n{run_tbl}"];
+  H [label="Monitor page\nfilters, trends, anomalies"];
+
+  A -> B -> C -> D -> E -> F -> G -> H;
+}}
+'''
+        st.graphviz_chart(dot_flow)
+        st.caption("Rendered via Graphviz. Values are dynamic from app settings.")
 
 
 # ---------- Sidebar + routing ----------
