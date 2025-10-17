@@ -1245,6 +1245,26 @@ def render_docs() -> None:
     cfg_tbl = DQ_CONFIG_TBL
     run_tbl = RUN_RESULTS_TBL
 
+    # ``_q`` from ``utils.meta`` quotes identifiers for use in SQL. When
+    # metadata locations are provided as fully-qualified names (e.g., via
+    # environment variables) they may already contain quoting or other
+    # characters that ``_q`` does not handle gracefully.  In the docs we only
+    # need a human readable string, so compute a safe display variant and fall
+    # back to the raw name if quoting fails for any reason.
+    try:
+        cfg_tbl_display = _q(cfg_tbl)
+    except Exception:
+        cfg_tbl_display = cfg_tbl
+    cfg_tbl_node = cfg_tbl.replace('"', '')
+    cfg_tbl_label = cfg_tbl_display.replace('"', '\\"')
+
+    try:
+        checks_tbl_display = _q(DQ_CHECK_TBL)
+    except Exception:
+        checks_tbl_display = DQ_CHECK_TBL
+    checks_tbl_node = DQ_CHECK_TBL.replace('"', '')
+    checks_tbl_label = checks_tbl_display.replace('"', '\\"')
+
     with tabs[0]:
         st.subheader("User Guide")
         st.markdown("""
@@ -1270,8 +1290,8 @@ def render_docs() -> None:
 - Streamlit (in Snowflake) using Snowpark Python.
 
 **Metadata & Results**
-- Configs: `{cfg_tbl}`
-- Checks:  `{_q(DQ_CHECK_TBL)}`
+- Configs: `{cfg_tbl_display}`
+- Checks:  `{checks_tbl_display}`
 - Results: `{run_tbl}`
 
 **Procedures**
@@ -1367,8 +1387,8 @@ digraph G {{
   subgraph cluster_meta {{
     label = "Metadata Schema: {meta_db}.{meta_schema}";
     color="#E7EDF8";
-    "{_q(DQ_CONFIG_TBL)}" [label="DQ_CONFIG\n(configs)"];
-    "{_q(DQ_CHECK_TBL)}"  [label="DQ_CHECK\n(check definitions)"];
+    "{cfg_tbl_node}" [label="{cfg_tbl_label}\n(configs)"];
+    "{checks_tbl_node}"  [label="{checks_tbl_label}\n(check definitions)"];
     "{run_tbl}"           [label="DQ_RUN_RESULTS\n(execution logs)"];
     "SP_DQ_MANAGE_TASK"   [label="SP_DQ_MANAGE_TASK\n(task manager SP)"];
     "{proc_name}"         [label="{proc_name}\n(check runner SP)"];
@@ -1378,12 +1398,12 @@ digraph G {{
   "DMF Views"     [shape=folder, fillcolor="#FFF7ED", color="#F3D0A6", label="Failing-row Views\nDQ_<CONFIG>_<CHECK>_FAILS"];
   "Tasks"         [shape=component, fillcolor="#F3F7FF", color="#D1DBF0", label="DQ_TASK_<CONFIG_ID>"];
 
-  "Source Tables" -> "{_q(DQ_CHECK_TBL)}" [label="table_fqn"];
-  "{_q(DQ_CONFIG_TBL)}" -> "{_q(DQ_CHECK_TBL)}" [label="1..* checks"];
-  "{_q(DQ_CHECK_TBL)}" -> "DMF Views" [label="row-level only"];
+  "Source Tables" -> "{checks_tbl_node}" [label="table_fqn"];
+  "{cfg_tbl_node}" -> "{checks_tbl_node}" [label="1..* checks"];
+  "{checks_tbl_node}" -> "DMF Views" [label="row-level only"];
   "Tasks" -> "{proc_name}" [label="CALL (<CONFIG_ID>)"];
   "{proc_name}" -> "{run_tbl}" [label="INSERT results"];
-  "{_q(DQ_CHECK_TBL)}" -> "{proc_name}" [label="rules (row + AGG)"];
+  "{checks_tbl_node}" -> "{proc_name}" [label="rules (row + AGG)"];
 }}
 '''
         st.graphviz_chart(dot_entities)
