@@ -220,6 +220,7 @@ def run_table_profile(
             )
         else:
             metrics_sql.append("0 AS WHITESPACE_ROWS")
+        metrics_sql.append(f"AVG(LENGTH({qcol}::STRING)) AS AVG_LEN")
 
         sql = "SELECT " + ", ".join(metrics_sql) + f" FROM {sampled_ref}"
         try:
@@ -245,6 +246,11 @@ def run_table_profile(
         min_val = _extract_row_value(row, "MIN_VAL")
         max_val = _extract_row_value(row, "MAX_VAL")
         whitespace_rows = _extract_row_value(row, "WHITESPACE_ROWS", 0)
+        avg_len_raw = _extract_row_value(row, "AVG_LEN")
+        try:
+            avg_len = float(avg_len_raw) if avg_len_raw is not None else None
+        except Exception:
+            avg_len = None
         try:
             whitespace_rows_int = int(whitespace_rows)
         except Exception:
@@ -297,11 +303,13 @@ def run_table_profile(
                 "distinct_pct": distinct_pct,
                 "min_val": min_val if (min_val is not None) else None,
                 "max_val": max_val if (max_val is not None) else None,
+                "avg_len": avg_len,
                 "whitespace_pct": whitespace_pct,
                 "top_values": top_values,
                 "top_coverage_pct": coverage_pct,
                 "rows_profiled": rows_profiled,
                 "non_nulls": non_nulls,
+                "error": None,
             }
         )
 
