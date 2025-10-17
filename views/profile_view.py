@@ -5,15 +5,13 @@ import time
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Dict, Iterable, List, Optional, Tuple
-from uuid import uuid4
 
 import pandas as pd
 import streamlit as st
 
 from services.profile import build_profile_suggestion
-from services.profiling import save_profile_results
-from utils.meta import _q
-from views.table_picker import session_cache_token, stateless_table_picker
+from services.profiling import run_table_profile, save_profile_results
+from views.table_picker import stateless_table_picker
 
 
 FULL_SCAN_WARNING_THRESHOLD = 1_000_000
@@ -38,175 +36,6 @@ class ColumnProfile:
 
 def _table_picker(session_obj, preselect_fqn: Optional[str]):
     return stateless_table_picker(session_obj, preselect_fqn)
-
-
-def _fetch_columns(session, fqn: str) -> List[Tuple[str, str]]:
-    """Return column metadata as (name, data_type)."""
-
-    @st.cache_data(ttl=300, show_spinner=False)
-    def _load_columns(_session_token: str, table_fqn: str) -> List[Tuple[str, str]]:
-        try:
-            rows = session.sql(f"DESC TABLE {table_fqn}").collect()
-        except Exception as exc:  # pragma: no cover - Snowflake specific
-            st.error(f"Failed to describe table {table_fqn}: {exc}")
-            return []
-        columns: List[Tuple[str, str]] = []
-        for row in rows:
-            try:
-                name = row[0]
-                dtype = row[1]
-            except Exception:
-                data = getattr(row, "asDict", lambda: {})()
-                name = data.get("name")
-                dtype = data.get("type")
-            if not name:
-                continue
-            columns.append((str(name), str(dtype or "")))
-        return columns
-
-    session_token = session_cache_token(session) if session else ""  # pragma: no cover - defensive
-    return _load_columns(session_token, fqn)
-
-
-def _create_sample_table(session, source_fqn: str, sample_pct: Optional[float]) -> Tuple[str, int]:
-    pct: Optional[float]
-    if sample_pct is None:
-        pct = None
-    else:
-        pct = max(0.0, min(float(sample_pct), 100.0))
-        if pct <= 0 or math.isclose(pct, 100.0, abs_tol=1e-6):
-            pct = None
-
-    temp_name = f"PROFILE_SAMPLE_{uuid4().hex.upper()}"
-    sample_clause = "" if pct is None else f" TABLESAMPLE BERNOULLI ({pct})"
-    create_sql = f"CREATE OR REPLACE TEMP TABLE {_q(temp_name)} AS SELECT * FROM {source_fqn}{sample_clause}"
-    session.sql(create_sql).collect()
-    count_row = session.sql(f"SELECT COUNT(*) AS CNT FROM {_q(temp_name)}").collect()[0]
-    total = count_row[0] if isinstance(count_row, tuple) else count_row["CNT"]  # type: ignore[index]
-    try:
-        total_int = int(total)
-    except Exception:
-        total_int = 0
-    return temp_name, total_int
-
-
-def _profile_column(
-    session,
-    temp_table: str,
-    column_name: str,
-    data_type: str,
-    total_rows: int,
-    top_n: int,
-) -> ColumnProfile:
-    quoted_col = f'"{column_name}"'
-    top_n = max(0, min(int(top_n), MAX_TOP_N))
-    supports_text_metrics = any(key in data_type.upper() for key in ("CHAR", "TEXT", "STRING", "VARCHAR"))
-    whitespace_pct: Optional[float] = None
-    avg_len: Optional[float] = None
-    nulls = distincts = None
-    min_val = max_val = None
-    error: Optional[str] = None
-
-    metrics_sql = f"""
-        SELECT
-            COUNT(*) AS total_rows,
-            COUNT_IF({quoted_col} IS NULL) AS nulls,
-            COUNT(DISTINCT {quoted_col}) AS distincts,
-            MIN({quoted_col}) AS min_val,
-            MAX({quoted_col}) AS max_val,
-            AVG(LENGTH({quoted_col}::STRING)) AS avg_len,
-            AVG(CASE WHEN REGEXP_LIKE({quoted_col}::STRING, '^\\s*$') THEN 1 ELSE 0 END) AS whitespace_ratio
-        FROM {_q(temp_table)}
-    """
-    try:
-        row = session.sql(metrics_sql).collect()[0]
-        if hasattr(row, "asDict"):
-            data = row.asDict()
-            nulls = data.get("NULLS") or data.get("nulls")
-            distincts = data.get("DISTINCTS") or data.get("distincts")
-            min_val = data.get("MIN_VAL") or data.get("min_val")
-            max_val = data.get("MAX_VAL") or data.get("max_val")
-            avg_len_raw = data.get("AVG_LEN") or data.get("avg_len")
-            whitespace_raw = data.get("WHITESPACE_RATIO") or data.get("whitespace_ratio")
-        else:
-            nulls = row[1]
-            distincts = row[2]
-            min_val = row[3]
-            max_val = row[4]
-            avg_len_raw = row[5]
-            whitespace_raw = row[6]
-    except Exception as exc:  # pragma: no cover - Snowflake specific
-        error = str(exc)
-        avg_len_raw = None
-        whitespace_raw = None
-
-    if supports_text_metrics:
-        avg_len = float(avg_len_raw) if avg_len_raw not in (None, "") else None
-        whitespace_pct = (
-            float(whitespace_raw) * 100.0
-            if whitespace_raw not in (None, "")
-            else None
-        )
-    else:
-        avg_len = None
-        whitespace_pct = None
-
-    try:
-        null_count = int(nulls) if nulls is not None else None
-    except Exception:
-        null_count = None
-    try:
-        distinct_count = int(distincts) if distincts is not None else None
-    except Exception:
-        distinct_count = None
-
-    null_pct = None
-    if total_rows:
-        null_pct = (float(null_count) / float(total_rows) * 100.0) if null_count is not None else None
-        distinct_pct = (
-            (float(distinct_count) / float(total_rows) * 100.0)
-            if distinct_count is not None
-            else None
-        )
-    else:
-        distinct_pct = None
-
-    top_rows: List[Dict[str, Any]] = []
-    if top_n > 0 and total_rows:
-        top_sql = f"""
-            SELECT {quoted_col} AS value, COUNT(*) AS cnt
-            FROM {_q(temp_table)}
-            GROUP BY 1
-            ORDER BY cnt DESC
-            LIMIT {top_n}
-        """
-        try:
-            top_data = session.sql(top_sql).collect()
-        except Exception:  # pragma: no cover - Snowflake specific
-            top_data = []
-        for item in top_data:
-            if hasattr(item, "asDict"):
-                data = item.asDict()
-                value = data.get("VALUE") if "VALUE" in data else data.get("value")
-                count = data.get("CNT") if "CNT" in data else data.get("cnt")
-            else:
-                value, count = item[0], item[1]
-            top_rows.append({"value": value, "count": count})
-
-    return ColumnProfile(
-        name=column_name,
-        data_type=data_type,
-        nulls=null_count,
-        null_pct=null_pct,
-        distincts=distinct_count,
-        distinct_pct=distinct_pct,
-        min_val=min_val,
-        max_val=max_val,
-        avg_len=avg_len,
-        whitespace_pct=whitespace_pct,
-        top_values=top_rows,
-        error=error,
-    )
 
 
 def _profiles_to_frame(profiles: Iterable[ColumnProfile]) -> pd.DataFrame:
@@ -306,36 +135,40 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
             with st.spinner("Profiling table..."):
                 start = time.time()
                 try:
-                    temp_table, row_count = _create_sample_table(session, selected_fqn, sample_pct)
+                    summary_raw, column_rows = run_table_profile(
+                        session=session,
+                        fqn=selected_fqn,
+                        sample_pct=sample_pct,
+                        top_n=int(min(top_n, MAX_TOP_N)),
+                    )
                 except Exception as exc:  # pragma: no cover - Snowflake specific
-                    st.error(f"Failed to sample table: {exc}")
-                    temp_table = ""
-                    row_count = 0
-                columns = _fetch_columns(session, selected_fqn) if temp_table else []
-                profiles: List[ColumnProfile] = []
-                if temp_table and columns:
-                    for name, dtype in columns:
-                        profiles.append(
-                            _profile_column(
-                                session=session,
-                                temp_table=temp_table,
-                                column_name=name,
-                                data_type=dtype,
-                                total_rows=row_count,
-                                top_n=int(min(top_n, MAX_TOP_N)),
-                            )
-                        )
-                if temp_table:
-                    try:
-                        session.sql(f"DROP TABLE IF EXISTS {_q(temp_table)}").collect()
-                    except Exception:
-                        pass
+                    st.error(f"Failed to profile table: {exc}")
+                    summary_raw, column_rows = {}, []
                 duration = time.time() - start
+                rows_profiled = int(summary_raw.get("rows_profiled") or 0)
+                profiles: List[ColumnProfile] = []
+                for column in column_rows:
+                    profiles.append(
+                        ColumnProfile(
+                            name=str(column.get("column_name") or column.get("name") or ""),
+                            data_type=str(column.get("data_type") or ""),
+                            nulls=column.get("nulls"),
+                            null_pct=column.get("null_pct"),
+                            distincts=column.get("distincts"),
+                            distinct_pct=column.get("distinct_pct"),
+                            min_val=column.get("min_val"),
+                            max_val=column.get("max_val"),
+                            avg_len=column.get("avg_len"),
+                            whitespace_pct=column.get("whitespace_pct"),
+                            top_values=column.get("top_values") or [],
+                            error=column.get("error"),
+                        )
+                    )
                 profile_result = {
                     "target_table": selected_fqn,
                     "summary": {
-                        "rows_profiled": row_count,
-                        "sample_pct": float(sample_pct) if sample_pct is not None else None,
+                        "rows_profiled": rows_profiled,
+                        "sample_pct": summary_raw.get("sample_pct"),
                         "duration_sec": duration,
                         "columns": len(profiles),
                     },
