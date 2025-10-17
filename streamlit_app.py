@@ -1198,6 +1198,101 @@ def render_monitor():
     st.dataframe(table, use_container_width=True, hide_index=True)
     st.caption("Row checks have views; aggregates do not.")
 
+
+def render_docs() -> None:
+    st.title("📘 Documentation")
+    st.markdown(
+        """
+        Use these notes to understand how Zeus Data Quality orchestrates checks in Snowflake,
+        what each component is responsible for, and how automated runs stay in sync with your
+        configurations.
+        """
+    )
+
+    overview_tab, lifecycle_tab, automation_tab = st.tabs(
+        ["Overview", "Check lifecycle", "Automation & roles"]
+    )
+
+    with overview_tab:
+        st.subheader("System overview")
+        st.markdown(
+            """
+            The Streamlit interface writes configuration metadata to Snowflake, keeps an eye on
+            the stored procedures that evaluate checks, and surfaces recent run results back in the
+            monitor view.
+            """
+        )
+        st.graphviz_chart(
+            """
+            digraph {
+                rankdir=LR;
+                node [shape=rectangle, style="rounded,filled", fillcolor="#E5F6FD", color="#055e86", fontname="Helvetica"];
+                edge [color="#6b7280", fontname="Helvetica"];
+
+                app [label="Streamlit app"];
+                cfg [label="DQ_CONFIG_TBL"];
+                proc [label="SP_DQ_MANAGE_TASK / PROC"];
+                task [label="Snowflake Task"];
+                results [label="DQ_RUN_RESULTS"];
+
+                app -> cfg [label="Save configurations"];
+                cfg -> proc [label="Create / sync procedures"];
+                proc -> task [label="Ensure schedule"];
+                task -> results [label="Write run output"];
+                results -> app [label="Visualise runs"];
+            }
+            """
+        )
+
+    with lifecycle_tab:
+        st.subheader("Check lifecycle")
+        st.markdown(
+            """
+            Every check begins with configuration metadata and ends with persisted results that you
+            can inspect in the monitor tab. The diagram highlights the per-run objects created when
+            a task executes.
+            """
+        )
+        st.graphviz_chart(
+            """
+            digraph {
+                rankdir=TB;
+                node [shape=rectangle, style="rounded,filled", fillcolor="#EAFBF0", color="#0a5c2b", fontname="Helvetica"];
+                edge [color="#6b7280", fontname="Helvetica"];
+
+                config [label="Config row\n(target + checks)"];
+                task_run [label="Scheduled task run"];
+                proc_call [label="Stored procedure"];
+                checks [label="Check evaluation"];
+                artifacts [label="Views / failure samples"];
+                results [label="Run results table"];
+
+                config -> task_run [label="cron"];
+                task_run -> proc_call [label="CALL"];
+                proc_call -> checks [label="Iterate columns"];
+                checks -> artifacts [label="Create failing-row views"];
+                checks -> results [label="Insert status"];
+                artifacts -> results [label="Metadata links"];
+            }
+            """
+        )
+
+    with automation_tab:
+        st.subheader("Automation & roles")
+        st.markdown(
+            """
+            Keep these requirements in mind while deploying:
+
+            - **RUN_AS_ROLE** controls permissions used when running the stored procedures.
+            - **DMF_ROLE** must own the Data Management Framework objects that house the metadata.
+            - The automatic task calls `PROC_NAME` to sync configuration changes and trigger runs.
+
+            When roles or warehouses change, update the sidebar inputs and re-save configurations so
+            the automation task is recreated with the latest context.
+            """
+        )
+
+
 # ---------- Sidebar + routing ----------
 state = get_state()
 if "page" not in st.session_state:
@@ -1231,6 +1326,14 @@ with st.sidebar:
         on_click=navigate_to,
         args=("monitor",),
     )
+    st.button(
+        "📘 Documentation",
+        use_container_width=True,
+        type="primary" if current_page == "docs" else "secondary",
+        key="nav_docs",
+        on_click=navigate_to,
+        args=("docs",),
+    )
     st.divider()
     if current_page == "cfg" and st.session_state.get("cfg_mode", "list") == "list":
         if st.button(
@@ -1256,5 +1359,7 @@ if page == "cfg":
         render_config_editor()
 elif page == "monitor":
     render_monitor()
+elif page == "docs":
+    render_docs()
 else:
     render_home()
