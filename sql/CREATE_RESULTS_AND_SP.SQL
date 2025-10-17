@@ -64,6 +64,8 @@ def run_dq_config(session: Session, CONFIG_ID: str) -> str:
         failures = 0
         error_msg = None
 
+        agg_sql = None
+        failure_sql = None
         try:
             is_agg = rule_expr_upper.startswith(AGG_PREFIX) or check_type.upper().startswith("AGG")
             if is_agg:
@@ -94,7 +96,11 @@ def run_dq_config(session: Session, CONFIG_ID: str) -> str:
         except Exception as exc:
             ok = False
             failures = 0
-            error_msg = str(exc)
+            context_sql = agg_sql or failure_sql
+            if context_sql:
+                error_msg = f"{exc} | SQL: {context_sql}"
+            else:
+                error_msg = str(exc)
 
         session.sql(
             """
