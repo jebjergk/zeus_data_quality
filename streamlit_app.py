@@ -48,6 +48,8 @@ from utils.checkdefs import build_rule_for_column_check, build_rule_for_table_ch
 from utils.configs import get_metadata_namespace, get_proc_name
 from views.profile_view import render_profile
 
+ALLOWED_PAGES = {"home", "cfg", "profile", "monitor", "docs"}
+
 METADATA_DB, METADATA_SCHEMA = get_metadata_namespace()
 PROC_NAME = get_proc_name()
 RUN_RESULTS_TBL = f"{METADATA_DB}.{METADATA_SCHEMA}.DQ_RUN_RESULTS"
@@ -95,7 +97,6 @@ def _normalize_bool(value) -> bool:
 
 
 def _get_page_from_query_params() -> Optional[str]:
-    allowed = {"home", "cfg", "monitor", "docs", "profile"}
     candidate: Optional[str] = None
     try:
         params = dict(st.query_params)  # type: ignore[attr-defined]
@@ -106,8 +107,10 @@ def _get_page_from_query_params() -> Optional[str]:
         candidate = next((item for item in value if isinstance(item, str)), None)
     elif isinstance(value, str):
         candidate = value
-    if candidate and candidate.lower() in allowed:
-        return candidate.lower()
+    if candidate:
+        candidate_lower = candidate.lower()
+        if candidate_lower in ALLOWED_PAGES:
+            return candidate_lower
     return None
 
 
