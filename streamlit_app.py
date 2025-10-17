@@ -1247,6 +1247,7 @@ def render_docs() -> None:
     meta_db, meta_schema = METADATA_DB, METADATA_SCHEMA
     proc_name = PROC_NAME
     cfg_tbl = CONFIGS_TBL
+    chk_tbl = CHECKS_TBL
     run_tbl = RUN_RESULTS_TBL
 
     # ``_q`` from ``utils.meta`` quotes identifiers for use in SQL. When
@@ -1263,11 +1264,11 @@ def render_docs() -> None:
     cfg_tbl_label = cfg_tbl_display.replace('"', '\\"')
 
     try:
-        checks_tbl_display = _q(CHECKS_TBL)
+        chk_tbl_display = _q(chk_tbl)
     except Exception:
-        checks_tbl_display = CHECKS_TBL
-    checks_tbl_node = CHECKS_TBL.replace('"', '')
-    checks_tbl_label = checks_tbl_display.replace('"', '\\"')
+        chk_tbl_display = chk_tbl
+    chk_tbl_node = chk_tbl.replace('"', '')
+    chk_tbl_label = chk_tbl_display.replace('"', '\\"')
 
     with tabs[0]:
         st.subheader("User Guide")
@@ -1295,7 +1296,7 @@ def render_docs() -> None:
 
 **Metadata & Results**
 - Configs: `{cfg_tbl_display}`
-- Checks:  `{checks_tbl_display}`
+- Checks:  `{chk_tbl_display}`
 - Results: `{run_tbl}`
 
 **Procedures**
@@ -1392,7 +1393,7 @@ digraph G {{
     label = "Metadata Schema: {meta_db}.{meta_schema}";
     color="#E7EDF8";
     "{cfg_tbl_node}" [label="{cfg_tbl_label}\n(configs)"];
-    "{checks_tbl_node}"  [label="{checks_tbl_label}\n(check definitions)"];
+    "{chk_tbl_node}"  [label="{chk_tbl_label}\n(check definitions)"];
     "{run_tbl}"           [label="DQ_RUN_RESULTS\n(execution logs)"];
     "SP_DQ_MANAGE_TASK"   [label="SP_DQ_MANAGE_TASK\n(task manager SP)"];
     "{proc_name}"         [label="{proc_name}\n(check runner SP)"];
@@ -1402,12 +1403,12 @@ digraph G {{
   "DMF Views"     [shape=folder, fillcolor="#FFF7ED", color="#F3D0A6", label="Failing-row Views\nDQ_<CONFIG>_<CHECK>_FAILS"];
   "Tasks"         [shape=component, fillcolor="#F3F7FF", color="#D1DBF0", label="DQ_TASK_<CONFIG_ID>"];
 
-  "Source Tables" -> "{checks_tbl_node}" [label="table_fqn"];
-  "{cfg_tbl_node}" -> "{checks_tbl_node}" [label="1..* checks"];
-  "{checks_tbl_node}" -> "DMF Views" [label="row-level only"];
+  "Source Tables" -> "{chk_tbl_node}" [label="table_fqn"];
+  "{cfg_tbl_node}" -> "{chk_tbl_node}" [label="1..* checks"];
+  "{chk_tbl_node}" -> "DMF Views" [label="row-level only"];
   "Tasks" -> "{proc_name}" [label="CALL (<CONFIG_ID>)"];
   "{proc_name}" -> "{run_tbl}" [label="INSERT results"];
-  "{checks_tbl_node}" -> "{proc_name}" [label="rules (row + AGG)"];
+  "{chk_tbl_node}" -> "{proc_name}" [label="rules (row + AGG)"];
 }}
 '''
         st.graphviz_chart(dot_entities)
