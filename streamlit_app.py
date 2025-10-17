@@ -46,6 +46,7 @@ from services.configs import save_config_and_checks, delete_config_full
 from services.state import get_state, set_state
 from utils.checkdefs import build_rule_for_column_check, build_rule_for_table_check
 from utils.configs import get_metadata_namespace, get_proc_name
+from views.profile_view import render_profile
 
 METADATA_DB, METADATA_SCHEMA = get_metadata_namespace()
 PROC_NAME = get_proc_name()
@@ -94,7 +95,7 @@ def _normalize_bool(value) -> bool:
 
 
 def _get_page_from_query_params() -> Optional[str]:
-    allowed = {"home", "cfg", "monitor", "docs"}
+    allowed = {"home", "cfg", "monitor", "docs", "profile"}
     candidate: Optional[str] = None
     try:
         params = dict(st.query_params)  # type: ignore[attr-defined]
@@ -301,6 +302,46 @@ def render_config_editor():
     cfg = get_config(session, sel_id) if sel_id else None
     existing_checks = get_checks(session, sel_id) if sel_id else []
 
+    suggestion_payload = st.session_state.pop("profile_suggestion", None)
+    suggestion_summary = suggestion_payload.get("summary") if suggestion_payload else None
+    if suggestion_payload:
+        target = suggestion_payload.get("target_table")
+        if target:
+            st.session_state["editor_target_fqn"] = target
+        suggested_columns = suggestion_payload.get("columns") or {}
+        if suggested_columns:
+            st.session_state["dq_cols_ms"] = list(suggested_columns.keys())
+        for col_name, col_cfg in suggested_columns.items():
+            sk = _keyify(col_name)
+            st.session_state[f"samp_{sk}"] = int(col_cfg.get("sample_rows", 25))
+            checks_cfg = col_cfg.get("checks") or {}
+            for check_name, check_conf in checks_cfg.items():
+                check_upper = (check_name or "").upper()
+                params = check_conf.get("params", {})
+                severity = check_conf.get("severity", "ERROR")
+                if check_upper == "UNIQUE":
+                    st.session_state[f"{sk}_chk_unique"] = True
+                    st.session_state[f"{sk}_p_un_ignore"] = bool(params.get("ignore_nulls", True))
+                    st.session_state[f"{sk}_sev_unique"] = severity
+                elif check_upper == "NULL_COUNT":
+                    st.session_state[f"{sk}_chk_nullcount"] = True
+                    st.session_state[f"{sk}_p_nc_max"] = int(params.get("max_nulls", 0))
+                    st.session_state[f"{sk}_sev_null"] = severity
+                elif check_upper == "MIN_MAX":
+                    st.session_state[f"{sk}_chk_minmax"] = True
+                    st.session_state[f"{sk}_p_mm_min"] = str(params.get("min", ""))
+                    st.session_state[f"{sk}_p_mm_max"] = str(params.get("max", ""))
+                    st.session_state[f"{sk}_sev_mm"] = severity
+                elif check_upper == "WHITESPACE":
+                    st.session_state[f"{sk}_chk_ws"] = True
+                    st.session_state[f"{sk}_p_ws_mode"] = params.get("mode", "NO_LEADING_TRAILING")
+                    st.session_state[f"{sk}_sev_ws"] = severity
+                elif check_upper == "VALUE_DISTRIBUTION":
+                    st.session_state[f"{sk}_chk_val"] = True
+                    st.session_state[f"{sk}_p_val_csv"] = params.get("allowed_values_csv", "")
+                    st.session_state[f"{sk}_p_val_ratio"] = float(params.get("min_match_ratio", 0.8))
+                    st.session_state[f"{sk}_sev_val"] = severity
+
     # Header
     back, title = st.columns([1, 8])
     with back:
@@ -309,6 +350,17 @@ def render_config_editor():
             st.rerun()
     with title:
         st.header("Edit Configuration" if cfg else "Create Configuration")
+    if suggestion_payload:
+        summary_parts = []
+        if suggestion_summary:
+            rows = suggestion_summary.get("rows_profiled")
+            sample_pct = suggestion_summary.get("sample_pct")
+            if rows is not None:
+                summary_parts.append(f"rows profiled: {rows:,}")
+            if sample_pct is not None:
+                summary_parts.append(f"sample: {float(sample_pct):.1f}%")
+        details = f" ({', '.join(summary_parts)})" if summary_parts else ""
+        st.success(f"Applied profile suggestion{details}. Review the recommended checks below.")
 
     # Target (picker is stateless, we persist a single FQN)
     st.subheader("Target")
@@ -1464,6 +1516,14 @@ with st.sidebar:
         args=("cfg",),
     )
     st.button(
+        "🧪 Profile Table",
+        use_container_width=True,
+        type="primary" if current_page == "profile" else "secondary",
+        key="nav_profile",
+        on_click=navigate_to,
+        args=("profile",),
+    )
+    st.button(
         "📊 Monitor",
         use_container_width=True,
         type="primary" if current_page == "monitor" else "secondary",
@@ -1502,6 +1562,8 @@ if page == "cfg":
         render_config_list()
     else:
         render_config_editor()
+elif page == "profile":
+    render_profile(session, METADATA_DB, METADATA_SCHEMA)
 elif page == "monitor":
     render_monitor()
 elif page == "docs":
