@@ -472,15 +472,27 @@ def create_or_update_task(
         raise ValueError(message)
 
 
-def run_task_now(session, db: Any, schema: Any, config_id: Any):
-    """Force-run the Snowflake task for the given configuration."""
+def run_task_now(
+    session,
+    db: Any,
+    schema: Any,
+    config_id: Any,
+    *,
+    proc_name: Optional[str] = None,
+):
+    """Execute the stored procedure for the given configuration immediately."""
 
     db_name = "" if db is None else str(db).strip()
     schema_name = "" if schema is None else str(schema).strip()
     if not db_name or not schema_name:
-        raise ValueError("Database and schema are required to trigger a task run")
+        raise ValueError("Database and schema are required to trigger a config run")
 
-    fqn = _q(db_name, schema_name, task_name_for_config(config_id))
+    procedure = (proc_name or PROC_NAME or "").strip()
+    if not procedure:
+        raise ValueError("Stored procedure name is required to trigger a config run")
+
+    proc_fqn = _q(db_name, schema_name, procedure)
     return session.sql(
-        f"SELECT SYSTEM$TASK_FORCE_RUN({_ql(fqn)}) AS REQUEST_ID"
+        f"CALL {proc_fqn}(?)",
+        params=[str(config_id)],
     ).to_pandas()

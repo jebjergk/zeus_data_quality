@@ -696,27 +696,31 @@ def render_config_editor():
                     st.warning(warn_msg)
                     remember("warning", warn_msg)
                 else:
-                    task_name = task_name_for_config(dq_cfg.config_id)
                     try:
                         result_df = run_task_now(
                             session,
                             METADATA_DB,
                             METADATA_SCHEMA,
                             dq_cfg.config_id,
+                            proc_name=PROC_NAME,
                         )
                     except Exception as exc:
                         err_msg = f"Failed to trigger task run: {exc}"
                         st.error(err_msg)
                         remember("error", err_msg)
                     else:
-                        request_id = None
-                        if not result_df.empty and "REQUEST_ID" in result_df.columns:
-                            request_id = result_df.iloc[0]["REQUEST_ID"]
-                        success_msg = f"Triggered `{task_name}` task run."
-                        if request_id:
-                            success_msg = (
-                                f"Triggered `{task_name}` task run (request `{request_id}`)."
-                            )
+                        result_details = None
+                        if result_df is not None and not result_df.empty:
+                            first_row = result_df.iloc[0]
+                            for value in first_row.tolist():
+                                if value:
+                                    result_details = str(value)
+                                    break
+                        success_msg = (
+                            f"Ran `{PROC_NAME}` for config `{dq_cfg.config_id}`."
+                        )
+                        if result_details:
+                            success_msg = f"{success_msg} Result: {result_details}"
                         st.success(success_msg)
                         remember("success", success_msg)
 
