@@ -117,9 +117,18 @@ except Exception:
     session = None
 
 # --- App imports (our modules) ---
+from utils.dmfs import (
+    run_task_now,
+    task_name_for_config,
+    ensure_session_context,
+    session_snapshot,
+    preflight_requirements,
+    DEFAULT_WAREHOUSE,
+    _q as _q_task,
+)
 from utils.meta import (
     DQConfig, DQCheck,
-    DQ_CONFIG_TBL, _q,
+    _q, _parse_relation_name,
     list_configs, get_config, get_checks,
     list_databases, list_schemas, list_tables, list_columns,
     fq_table,
@@ -128,8 +137,15 @@ from utils import schedules
 from services.configs import save_config_and_checks, delete_config_full
 from services.state import get_state, set_state
 from utils.checkdefs import build_rule_for_column_check, build_rule_for_table_check
+from utils.configs import get_metadata_namespace, get_proc_name
 
-RUN_RESULTS_TBL = "DQ_RUN_RESULTS"
+METADATA_DB, METADATA_SCHEMA = get_metadata_namespace()
+PROC_NAME = get_proc_name()
+RUN_RESULTS_TBL = f"{METADATA_DB}.{METADATA_SCHEMA}.DQ_RUN_RESULTS"
+# Derive metadata table FQNs locally to avoid NameError
+CONFIGS_TBL = f"{METADATA_DB}.{METADATA_SCHEMA}.DQ_CONFIG"
+CHECKS_TBL = f"{METADATA_DB}.{METADATA_SCHEMA}.DQ_CHECK"
+# RUN_RESULTS_TBL already defined above
 
 st.set_page_config(page_title="Zeus Data Quality", layout="wide")
 
