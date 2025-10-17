@@ -344,6 +344,7 @@ def render_config_editor():
         st.session_state["_dq_table_max_age"] = max_age_default
 
     preview_counts = False
+    table_check_error: Optional[str] = None
 
     with st.form("cfg_form", clear_on_submit=False):
         st.subheader("Configuration")
@@ -566,31 +567,39 @@ def render_config_editor():
 
         if target_table:
             fr_params = {"timestamp_column": ts_col, "max_age_minutes": int(fr_max_age)}
-            fr_rule, fr_is_agg = build_rule_for_table_check(target_table, "FRESHNESS", fr_params)
-            check_rows.append(DQCheck(
-                config_id=(cfg.config_id if cfg else "temp"),
-                check_id="TABLE_FRESHNESS",
-                table_fqn=target_table, column_name=None,
-                rule_expr=(f"AGG: {fr_rule}" if fr_is_agg else fr_rule), severity="ERROR",
-                sample_rows=0, check_type="FRESHNESS",
-                params_json=json.dumps(fr_params)
-            ))
+            try:
+                fr_rule, fr_is_agg = build_rule_for_table_check(target_table, "FRESHNESS", fr_params)
+            except ValueError as exc:
+                table_check_error = f"Invalid freshness configuration: {exc}"
+            else:
+                check_rows.append(DQCheck(
+                    config_id=(cfg.config_id if cfg else "temp"),
+                    check_id="TABLE_FRESHNESS",
+                    table_fqn=target_table, column_name=None,
+                    rule_expr=(f"AGG: {fr_rule}" if fr_is_agg else fr_rule), severity="ERROR",
+                    sample_rows=0, check_type="FRESHNESS",
+                    params_json=json.dumps(fr_params)
+                ))
 
-            anomaly_params = {
-                "timestamp_column": ts_col,
-                "lookback_days": 28,
-                "sensitivity": 3.0,
-                "min_history_days": 7,
-            }
-            anomaly_rule, anomaly_is_agg = build_rule_for_table_check(target_table, "ROW_COUNT_ANOMALY", anomaly_params)
-            check_rows.append(DQCheck(
-                config_id=(cfg.config_id if cfg else "temp"),
-                check_id="TABLE_ROW_COUNT_ANOMALY",
-                table_fqn=target_table, column_name=None,
-                rule_expr=(f"AGG: {anomaly_rule}" if anomaly_is_agg else anomaly_rule), severity="ERROR",
-                sample_rows=0, check_type="ROW_COUNT_ANOMALY",
-                params_json=json.dumps(anomaly_params)
-            ))
+                anomaly_params = {
+                    "timestamp_column": ts_col,
+                    "lookback_days": 28,
+                    "sensitivity": 3.0,
+                    "min_history_days": 7,
+                }
+                try:
+                    anomaly_rule, anomaly_is_agg = build_rule_for_table_check(target_table, "ROW_COUNT_ANOMALY", anomaly_params)
+                except ValueError as exc:
+                    table_check_error = f"Invalid row count anomaly configuration: {exc}"
+                else:
+                    check_rows.append(DQCheck(
+                        config_id=(cfg.config_id if cfg else "temp"),
+                        check_id="TABLE_ROW_COUNT_ANOMALY",
+                        table_fqn=target_table, column_name=None,
+                        rule_expr=(f"AGG: {anomaly_rule}" if anomaly_is_agg else anomaly_rule), severity="ERROR",
+                        sample_rows=0, check_type="ROW_COUNT_ANOMALY",
+                        params_json=json.dumps(anomaly_params)
+                    ))
 
         st.markdown("### Schedule")
         existing_cron = getattr(cfg, "schedule_cron", None) if cfg else None
@@ -617,6 +626,9 @@ def render_config_editor():
         with c2: save_draft = st.form_submit_button("Save as Draft")
         with c3: run_now_btn = st.form_submit_button("Run Now")
         with c4: delete_btn = st.form_submit_button("Delete", type="secondary")
+
+    if table_check_error:
+        st.error(table_check_error)
 
     safe_ts = None
     if preview_counts:
@@ -656,6 +668,9 @@ def render_config_editor():
 
     # After submit
     if apply_now or save_draft or run_now_btn or delete_btn:
+        if (apply_now or save_draft or run_now_btn) and table_check_error:
+            st.error(table_check_error)
+            return
         if not session:
             st.error("No active Snowpark session.")
             return

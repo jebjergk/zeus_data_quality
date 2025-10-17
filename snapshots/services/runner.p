@@ -24,7 +24,10 @@ def run_now(session, cfg: DQConfig, checks: List[DQCheck]) -> Dict[str, Any]:
                 sql = sql.rstrip()
                 while sql and sql[-1] in {'"', "'"}:
                     sql = sql[:-1].rstrip()
-            df = session.sql(sql)
+            try:
+                df = session.sql(sql)
+            except Exception as exc:
+                raise RuntimeError(f"Failed to execute aggregate check SQL: {exc}\nSQL:\n{sql}") from exc
             r = df.collect()[0]
             ok = bool((r[0] if not hasattr(r, 'asDict') else list(r.asDict().values())[0]))
             failures = 0 if ok else 1
@@ -37,13 +40,21 @@ def run_now(session, cfg: DQConfig, checks: List[DQCheck]) -> Dict[str, Any]:
                 "sample": []
             })
         else:
-            df = session.sql(f"SELECT COUNT(*) AS FAILURES FROM {chk.table_fqn} WHERE NOT ({rule})")
+            failure_sql = f"SELECT COUNT(*) AS FAILURES FROM {chk.table_fqn} WHERE NOT ({rule})"
+            try:
+                df = session.sql(failure_sql)
+            except Exception as exc:
+                raise RuntimeError(f"Failed to execute row check SQL: {exc}\nSQL:\n{failure_sql}") from exc
             failures = int(df.collect()[0][0])
             sample = []
             if chk.sample_rows and failures:
-                s_df = session.sql(
+                sample_sql = (
                     f"SELECT * FROM {chk.table_fqn} WHERE NOT ({rule}) LIMIT {int(chk.sample_rows)}"
                 )
+                try:
+                    s_df = session.sql(sample_sql)
+                except Exception as exc:
+                    raise RuntimeError(f"Failed to fetch sample rows using SQL: {exc}\nSQL:\n{sample_sql}") from exc
                 sample = [r.asDict() if hasattr(r, 'asDict') else dict(r) for r in s_df.collect()]
             results["checks"].append({
                 "check_id": chk.check_id,
