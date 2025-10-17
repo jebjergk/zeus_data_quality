@@ -60,7 +60,7 @@ def run_dq_config(session: Session, CONFIG_ID: str) -> str:
         rule_expr_upper = rule_expr_raw.upper()
 
         ok = False
-        failures = None
+        failures = 0
         error_msg = None
 
         try:
@@ -83,7 +83,7 @@ def run_dq_config(session: Session, CONFIG_ID: str) -> str:
                 ok = failures == 0
         except Exception as exc:
             ok = False
-            failures = None
+            failures = 0
             error_msg = str(exc)
 
         session.sql(
