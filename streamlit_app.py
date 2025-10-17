@@ -566,12 +566,12 @@ def render_config_editor():
 
         if target_table:
             fr_params = {"timestamp_column": ts_col, "max_age_minutes": int(fr_max_age)}
-            fr_rule = build_rule_for_table_check(target_table, "FRESHNESS", fr_params)
+            fr_rule, fr_is_agg = build_rule_for_table_check(target_table, "FRESHNESS", fr_params)
             check_rows.append(DQCheck(
                 config_id=(cfg.config_id if cfg else "temp"),
                 check_id="TABLE_FRESHNESS",
                 table_fqn=target_table, column_name=None,
-                rule_expr=f"AGG: {fr_rule}", severity="ERROR",
+                rule_expr=(f"AGG: {fr_rule}" if fr_is_agg else fr_rule), severity="ERROR",
                 sample_rows=0, check_type="FRESHNESS",
                 params_json=json.dumps(fr_params)
             ))
@@ -582,12 +582,12 @@ def render_config_editor():
                 "sensitivity": 3.0,
                 "min_history_days": 7,
             }
-            anomaly_rule = build_rule_for_table_check(target_table, "ROW_COUNT_ANOMALY", anomaly_params)
+            anomaly_rule, anomaly_is_agg = build_rule_for_table_check(target_table, "ROW_COUNT_ANOMALY", anomaly_params)
             check_rows.append(DQCheck(
                 config_id=(cfg.config_id if cfg else "temp"),
                 check_id="TABLE_ROW_COUNT_ANOMALY",
                 table_fqn=target_table, column_name=None,
-                rule_expr=f"AGG: {anomaly_rule}", severity="ERROR",
+                rule_expr=(f"AGG: {anomaly_rule}" if anomaly_is_agg else anomaly_rule), severity="ERROR",
                 sample_rows=0, check_type="ROW_COUNT_ANOMALY",
                 params_json=json.dumps(anomaly_params)
             ))
