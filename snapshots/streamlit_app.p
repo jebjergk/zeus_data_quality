@@ -88,9 +88,44 @@ def _normalize_bool(value) -> bool:
     text = str(value).strip().upper()
     return text in {"TRUE", "T", "YES", "Y", "1"}
 
+
+def _get_page_from_query_params() -> Optional[str]:
+    allowed = {"home", "cfg", "monitor", "docs"}
+    candidate: Optional[str] = None
+    try:
+        params = st.experimental_get_query_params()
+    except AttributeError:
+        try:
+            params = dict(st.query_params)  # type: ignore[attr-defined]
+        except Exception:
+            params = {}
+    value = params.get("page") if isinstance(params, dict) else None
+    if isinstance(value, list):
+        candidate = next((item for item in value if isinstance(item, str)), None)
+    elif isinstance(value, str):
+        candidate = value
+    if candidate and candidate.lower() in allowed:
+        return candidate.lower()
+    return None
+
+
 def navigate_to(page: str) -> None:
     """Update the current page selection in session state."""
     st.session_state["page"] = page
+    try:
+        # Streamlit < 1.32
+        st.experimental_set_query_params(page=page)
+    except AttributeError:
+        # Streamlit >= 1.32 exposes ``st.query_params``
+        try:
+            current = dict(st.query_params)  # type: ignore[attr-defined]
+        except Exception:
+            current = {}
+        current["page"] = page
+        try:
+            st.query_params = current  # type: ignore[attr-defined]
+        except Exception:
+            pass
     if page == "home":
         st.session_state["cfg_mode"] = "list"
 
@@ -1380,8 +1415,11 @@ digraph W {{
 
 # ---------- Sidebar + routing ----------
 state = get_state()
+query_page = _get_page_from_query_params()
 if "page" not in st.session_state:
-    st.session_state["page"] = "home"
+    st.session_state["page"] = query_page or "home"
+elif query_page and query_page != st.session_state["page"]:
+    st.session_state["page"] = query_page
 if "cfg_mode" not in st.session_state:
     st.session_state["cfg_mode"] = "list"
 current_page = st.session_state.get("page", "home")
