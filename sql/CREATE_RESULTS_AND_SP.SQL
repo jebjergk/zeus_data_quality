@@ -68,6 +68,15 @@ def run_dq_config(session: Session, CONFIG_ID: str) -> str:
             is_agg = rule_expr_upper.startswith(AGG_PREFIX) or check_type.upper().startswith("AGG")
             if is_agg:
                 agg_sql = rule_expr_raw[len(AGG_PREFIX):].strip() if rule_expr_upper.startswith(AGG_PREFIX) else rule_expr_raw
+                if agg_sql:
+                    while len(agg_sql) >= 2 and agg_sql[0] == agg_sql[-1] and agg_sql[0] in {'"', "'"}:
+                        agg_sql = agg_sql[1:-1].strip()
+                    agg_sql = agg_sql.lstrip()
+                    while agg_sql and agg_sql[0] in {'"', "'"}:
+                        agg_sql = agg_sql[1:].lstrip()
+                    agg_sql = agg_sql.rstrip()
+                    while agg_sql and agg_sql[-1] in {'"', "'"}:
+                        agg_sql = agg_sql[:-1].rstrip()
                 result_rows = session.sql(agg_sql).collect()
                 first_value = result_rows[0][0] if result_rows else False
                 ok = _normalize_bool(first_value)
