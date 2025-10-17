@@ -36,7 +36,7 @@ from utils.dmfs import (
 )
 from utils.meta import (
     DQConfig, DQCheck,
-    DQ_CONFIG_TBL, _q, _parse_relation_name,
+    _q, _parse_relation_name,
     list_configs, get_config, get_checks,
     list_databases, list_schemas, list_tables, list_columns,
     fq_table,
@@ -50,6 +50,10 @@ from utils.configs import get_metadata_namespace, get_proc_name
 METADATA_DB, METADATA_SCHEMA = get_metadata_namespace()
 PROC_NAME = get_proc_name()
 RUN_RESULTS_TBL = f"{METADATA_DB}.{METADATA_SCHEMA}.DQ_RUN_RESULTS"
+# Derive metadata table FQNs locally to avoid NameError
+CONFIGS_TBL = f"{METADATA_DB}.{METADATA_SCHEMA}.DQ_CONFIG"
+CHECKS_TBL = f"{METADATA_DB}.{METADATA_SCHEMA}.DQ_CHECK"
+# RUN_RESULTS_TBL already defined above
 
 st.set_page_config(page_title="Zeus Data Quality", layout="wide")
 
@@ -1050,7 +1054,7 @@ def render_monitor():
     selected_config_ids = [config_map[label] for label in selected_labels if label in config_map]
 
     results_table = _q(RUN_RESULTS_TBL)
-    config_table = _q(DQ_CONFIG_TBL)
+    config_table = _q(CONFIGS_TBL)
     where_clauses = [f"r.RUN_TS >= DATEADD('day', -{int(days)}, CURRENT_TIMESTAMP())"]
     params: List[object] = []
 
@@ -1242,7 +1246,7 @@ def render_docs() -> None:
     # Pull dynamic names
     meta_db, meta_schema = METADATA_DB, METADATA_SCHEMA
     proc_name = PROC_NAME
-    cfg_tbl = DQ_CONFIG_TBL
+    cfg_tbl = CONFIGS_TBL
     run_tbl = RUN_RESULTS_TBL
 
     # ``_q`` from ``utils.meta`` quotes identifiers for use in SQL. When
@@ -1259,10 +1263,10 @@ def render_docs() -> None:
     cfg_tbl_label = cfg_tbl_display.replace('"', '\\"')
 
     try:
-        checks_tbl_display = _q(DQ_CHECK_TBL)
+        checks_tbl_display = _q(CHECKS_TBL)
     except Exception:
-        checks_tbl_display = DQ_CHECK_TBL
-    checks_tbl_node = DQ_CHECK_TBL.replace('"', '')
+        checks_tbl_display = CHECKS_TBL
+    checks_tbl_node = CHECKS_TBL.replace('"', '')
     checks_tbl_label = checks_tbl_display.replace('"', '\\"')
 
     with tabs[0]:
