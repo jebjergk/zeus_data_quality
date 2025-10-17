@@ -346,9 +346,14 @@ def render_config_editor():
     preview_counts = False
     table_check_error: Optional[str] = None
 
+    derived_name = target_table or ""
+    if not derived_name and cfg:
+        derived_name = cfg.target_table_fqn or cfg.name or ""
+
     with st.form("cfg_form", clear_on_submit=False):
         st.subheader("Configuration")
-        name = st.text_input("Name", value=(cfg.name if cfg else ""))
+        name = derived_name
+        st.text_input("Name", value=name, disabled=True, help="Automatically derived from the selected database, schema, and table.")
         desc = st.text_area("Description", value=(cfg.description if cfg else ""))
 
         check_rows: List[DQCheck] = []
@@ -691,13 +696,39 @@ def render_config_editor():
         status = 'ACTIVE' if apply_now else 'DRAFT'
         state = get_state()
         dq_cfg = DQConfig(
-            config_id=new_id, name=name, description=(desc or None),
+            config_id=new_id, name=name or None, description=(desc or None),
             target_table_fqn=target_table, run_as_role=(state.get('run_as_role') or None),
             dmf_role=(state.get('dmf_role') or None), status=status, owner=None,
             schedule_cron=(cron_expr.strip() if cron_expr else "0 8 * * *"),
             schedule_timezone=(timezone_expr.strip() if timezone_expr else "Europe/Berlin"),
             schedule_enabled=bool(schedule_enabled)
         )
+        if not dq_cfg.name:
+            err_msg = "Select a database, schema, and table to generate a configuration name before saving."
+            st.error(err_msg)
+            remember("error", err_msg)
+            return
+
+        normalized_target = (dq_cfg.target_table_fqn or "").strip().lower()
+        if normalized_target:
+            existing_cfgs = list_configs(session)
+            conflict = next(
+                (
+                    existing
+                    for existing in existing_cfgs
+                    if (existing.target_table_fqn or "").strip().lower() == normalized_target
+                    and existing.config_id != dq_cfg.config_id
+                ),
+                None,
+            )
+            if conflict:
+                err_msg = (
+                    f"A configuration for `{dq_cfg.target_table_fqn}` already exists "
+                    f"(ID: {conflict.config_id}). Edit the existing configuration or choose a different table."
+                )
+                st.error(err_msg)
+                remember("error", err_msg)
+                return
         # rebind ids
         checks_rebound: List[DQCheck] = []
         for cr in check_rows:
