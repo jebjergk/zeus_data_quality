@@ -12,14 +12,16 @@ def run_now(session, cfg: DQConfig, checks: List[DQCheck]) -> Dict[str, Any]:
             sql = rule[len(AGG_PREFIX):].strip()
             if sql:
                 # Remove any wrapping quotes that may surround the SQL text.
-                if sql[0] == sql[-1] and sql[0] in {'"', "'"}:
+                while len(sql) >= 2 and sql[0] == sql[-1] and sql[0] in {'"', "'"}:
                     sql = sql[1:-1].strip()
                 # Snowflake can surface statements such as `'SELECT ...''` when
                 # values were stored with escaped quotes. Strip any leading or
                 # trailing quote characters that remain so we execute the raw
                 # SQL statement.
+                sql = sql.lstrip()
                 while sql and sql[0] in {'"', "'"}:
                     sql = sql[1:].lstrip()
+                sql = sql.rstrip()
                 while sql and sql[-1] in {'"', "'"}:
                     sql = sql[:-1].rstrip()
             df = session.sql(sql)

@@ -55,7 +55,7 @@ def build_rule_for_table_check(fqn: str, ttype: str, params: dict):
         max_age = int(params.get("max_age_minutes", 1920))
         return "\n".join([
             f"SELECT (COUNT(*) > 0 AND COUNT(\"{ts_col}\") > 0 AND",
-            f"        TIMESTAMPDIFF(MINUTE, MAX(\"{ts_col}\"), CURRENT_TIMESTAMP()) <= {max_age}) AS OK",
+            f"        TIMESTAMPDIFF('minute', MAX(\"{ts_col}\"), CURRENT_TIMESTAMP()) <= {max_age}) AS OK",
             f"FROM {_q(fqn)}",
         ]), True
     if ttype == "ROW_COUNT":

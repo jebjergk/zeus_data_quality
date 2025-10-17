@@ -314,6 +314,10 @@ def render_config_editor():
         or legacy_row_count_params.get("timestamp_column")
         or "LOAD_TIMESTAMP"
     )
+    try:
+        max_age_default = int(freshness_defaults.get("max_age_minutes", 1920))
+    except (TypeError, ValueError):
+        max_age_default = 1920
 
     if "ROW_COUNT_ANOMALY" not in existing_table_params:
         existing_table_params["ROW_COUNT_ANOMALY"] = {
@@ -323,13 +327,21 @@ def render_config_editor():
             "min_history_days": 7,
         }
 
+    current_cfg_id = getattr(cfg, "config_id", None)
+    if st.session_state.get("_dq_table_cfg_id") != current_cfg_id:
+        st.session_state["_dq_table_max_age"] = max_age_default
+        st.session_state["_dq_table_cfg_id"] = current_cfg_id
+
     if target_table:
         last_target = st.session_state.get("_dq_table_ts_target")
         if last_target != target_table:
             st.session_state["_dq_table_ts_col"] = ts_default
+            st.session_state["_dq_table_max_age"] = max_age_default
             st.session_state["_dq_table_ts_target"] = target_table
     if "_dq_table_ts_col" not in st.session_state:
         st.session_state["_dq_table_ts_col"] = ts_default
+    if "_dq_table_max_age" not in st.session_state:
+        st.session_state["_dq_table_max_age"] = max_age_default
 
     preview_counts = False
 
@@ -535,7 +547,16 @@ def render_config_editor():
             key="_dq_table_ts_col",
             value=st.session_state.get("_dq_table_ts_col", ts_default),
         )
-        st.caption("Table will FAIL if no data in 30h or if today's volume is a statistical outlier.")
+        st.caption("Table will FAIL if no data arrives within the configured max age or if today's volume is a statistical outlier.")
+
+        fr_max_age = st.number_input(
+            "Freshness max age (minutes)",
+            min_value=1,
+            max_value=10080,
+            value=int(st.session_state.get("_dq_table_max_age", max_age_default)),
+            step=30,
+        )
+        st.session_state["_dq_table_max_age"] = int(fr_max_age)
 
         preview_counts = st.form_submit_button(
             "Preview last 60 days row counts",
@@ -544,7 +565,7 @@ def render_config_editor():
         )
 
         if target_table:
-            fr_params = {"timestamp_column": ts_col, "max_age_minutes": 1800}
+            fr_params = {"timestamp_column": ts_col, "max_age_minutes": int(fr_max_age)}
             fr_rule = build_rule_for_table_check(target_table, "FRESHNESS", fr_params)
             check_rows.append(DQCheck(
                 config_id=(cfg.config_id if cfg else "temp"),
