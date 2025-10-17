@@ -181,6 +181,8 @@ BEGIN
         '  COMMENT   = ' || '''' || REPLACE(v_comment, '''', '''''') || '''' || CHR(10) ||
         'AS CALL ' || v_proc_fqn || '(''' || REPLACE(v_config, '''', '''''') || ''')';
 
+    EXECUTE IMMEDIATE 'ALTER TASK ' || v_task_fqn || ' SUSPEND';
+
     EXECUTE IMMEDIATE
         'ALTER TASK ' || v_task_fqn || ' SET ' ||
         'WAREHOUSE = ' || v_wh_ident || ', ' ||
