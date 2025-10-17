@@ -15,6 +15,10 @@ from services.profiling import save_profile_results
 from utils.meta import _q
 
 
+FULL_SCAN_WARNING_THRESHOLD = 1_000_000
+MAX_TOP_N = 10
+
+
 @dataclass
 class ColumnProfile:
     name: str
@@ -38,32 +42,61 @@ def _table_picker(preselect_fqn: Optional[str]):
     return stateless_table_picker(preselect_fqn)
 
 
+def _session_cache_token(session) -> str:
+    for attr in ("session_id", "_session_id"):
+        token = getattr(session, attr, None)
+        if token:
+            return str(token)
+    getter = getattr(session, "get_session_id", None)
+    if callable(getter):
+        try:
+            token = getter()
+            if token:
+                return str(token)
+        except Exception:
+            pass
+    return str(id(session))
+
+
 def _fetch_columns(session, fqn: str) -> List[Tuple[str, str]]:
     """Return column metadata as (name, data_type)."""
-    try:
-        rows = session.sql(f"DESC TABLE {fqn}").collect()
-    except Exception as exc:  # pragma: no cover - Snowflake specific
-        st.error(f"Failed to describe table {fqn}: {exc}")
-        return []
-    columns: List[Tuple[str, str]] = []
-    for row in rows:
+
+    @st.cache_data(ttl=300, show_spinner=False)
+    def _load_columns(_session_token: str, table_fqn: str) -> List[Tuple[str, str]]:
         try:
-            name = row[0]
-            dtype = row[1]
-        except Exception:
-            data = getattr(row, "asDict", lambda: {})()
-            name = data.get("name")
-            dtype = data.get("type")
-        if not name:
-            continue
-        columns.append((str(name), str(dtype or "")))
-    return columns
+            rows = session.sql(f"DESC TABLE {table_fqn}").collect()
+        except Exception as exc:  # pragma: no cover - Snowflake specific
+            st.error(f"Failed to describe table {table_fqn}: {exc}")
+            return []
+        columns: List[Tuple[str, str]] = []
+        for row in rows:
+            try:
+                name = row[0]
+                dtype = row[1]
+            except Exception:
+                data = getattr(row, "asDict", lambda: {})()
+                name = data.get("name")
+                dtype = data.get("type")
+            if not name:
+                continue
+            columns.append((str(name), str(dtype or "")))
+        return columns
+
+    session_token = _session_cache_token(session) if session else ""  # pragma: no cover - defensive
+    return _load_columns(session_token, fqn)
 
 
-def _create_sample_table(session, source_fqn: str, sample_pct: float) -> Tuple[str, int]:
-    sample_pct = max(0.0, min(float(sample_pct), 100.0))
+def _create_sample_table(session, source_fqn: str, sample_pct: Optional[float]) -> Tuple[str, int]:
+    pct: Optional[float]
+    if sample_pct is None:
+        pct = None
+    else:
+        pct = max(0.0, min(float(sample_pct), 100.0))
+        if pct <= 0 or math.isclose(pct, 100.0, abs_tol=1e-6):
+            pct = None
+
     temp_name = f"PROFILE_SAMPLE_{uuid4().hex.upper()}"
-    sample_clause = "" if math.isclose(sample_pct, 100.0, abs_tol=1e-6) else f" TABLESAMPLE BERNOULLI ({sample_pct})"
+    sample_clause = "" if pct is None else f" TABLESAMPLE BERNOULLI ({pct})"
     create_sql = f"CREATE OR REPLACE TEMP TABLE {_q(temp_name)} AS SELECT * FROM {source_fqn}{sample_clause}"
     session.sql(create_sql).collect()
     count_row = session.sql(f"SELECT COUNT(*) AS CNT FROM {_q(temp_name)}").collect()[0]
@@ -84,7 +117,7 @@ def _profile_column(
     top_n: int,
 ) -> ColumnProfile:
     quoted_col = f'"{column_name}"'
-    top_n = max(0, int(top_n))
+    top_n = max(0, min(int(top_n), MAX_TOP_N))
     supports_text_metrics = any(key in data_type.upper() for key in ("CHAR", "TEXT", "STRING", "VARCHAR"))
     whitespace_pct: Optional[float] = None
     avg_len: Optional[float] = None
@@ -247,9 +280,24 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
     st.divider()
     controls = st.columns(3)
     with controls[0]:
-        sample_pct = st.number_input("Sample %", min_value=1.0, max_value=100.0, value=10.0, step=1.0)
+        sample_pct_input = st.number_input(
+            "Sample %",
+            min_value=0.0,
+            max_value=100.0,
+            value=10.0,
+            step=1.0,
+            help="Enter 0 for a full table scan.",
+        )
+        sample_pct = None if math.isclose(sample_pct_input, 0.0, abs_tol=1e-6) else sample_pct_input
     with controls[1]:
-        top_n = st.number_input("Top N values", min_value=1, max_value=100, value=10, step=1)
+        top_n = st.number_input(
+            "Top N values",
+            min_value=1,
+            max_value=MAX_TOP_N,
+            value=min(10, MAX_TOP_N),
+            step=1,
+            help=f"Collect up to {MAX_TOP_N} of the most common values per column.",
+        )
     with controls[2]:
         save_profile = st.button("💾 Save Profile", disabled=True, help="Coming soon")
         if save_profile:
@@ -292,7 +340,7 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
                                 column_name=name,
                                 data_type=dtype,
                                 total_rows=row_count,
-                                top_n=int(top_n),
+                                top_n=int(min(top_n, MAX_TOP_N)),
                             )
                         )
                 if temp_table:
@@ -305,7 +353,7 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
                     "target_table": selected_fqn,
                     "summary": {
                         "rows_profiled": row_count,
-                        "sample_pct": float(sample_pct),
+                        "sample_pct": float(sample_pct) if sample_pct is not None else None,
                         "duration_sec": duration,
                         "columns": len(profiles),
                     },
@@ -332,8 +380,17 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
     summary = profile_result.get("summary", {})
     metrics_cols = st.columns(3)
     metrics_cols[0].metric("Rows profiled", f"{summary.get('rows_profiled', 0):,}")
-    metrics_cols[1].metric("Sample %", f"{summary.get('sample_pct', 0):.1f}%")
+    sample_pct_display = summary.get("sample_pct")
+    sample_label = "Full scan" if sample_pct_display is None else f"{float(sample_pct_display):.1f}%"
+    metrics_cols[1].metric("Sampling", sample_label)
     metrics_cols[2].metric("Duration", f"{summary.get('duration_sec', 0.0):.2f}s")
+
+    if summary.get("sample_pct") is None and summary.get("rows_profiled", 0) > FULL_SCAN_WARNING_THRESHOLD:
+        profiled = int(summary.get("rows_profiled", 0))
+        st.warning(
+            f"Full table scan processed {profiled:,} rows. Consider sampling to improve performance.",
+            icon="⚠️",
+        )
 
     profiles_raw = profile_result.get("columns", [])
     profiles = [ColumnProfile(**col) for col in profiles_raw]

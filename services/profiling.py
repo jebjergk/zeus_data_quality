@@ -162,14 +162,15 @@ def run_table_profile(
     if not columns:
         return {}, []
 
-    sample_clause = ""
     pct: Optional[float]
     if sample_pct is None:
         pct = None
     else:
         pct = max(0.0, min(float(sample_pct), 100.0))
-    if pct and not math.isclose(pct, 100.0, abs_tol=1e-6):
-        sample_clause = f" SAMPLE BERNOULLI({pct})"
+        if pct <= 0 or math.isclose(pct, 100.0, abs_tol=1e-6):
+            pct = None
+
+    sample_clause = "" if pct is None else f" SAMPLE BERNOULLI({pct})"
 
     table_ref = f"{_q(db)}.{_q(schema)}.{_q(table)}"
     sampled_ref = table_ref + sample_clause
@@ -190,6 +191,8 @@ def run_table_profile(
 
     per_column: List[Dict[str, Any]] = []
     approx_threshold = 100000
+
+    top_n_clamped = max(0, min(int(top_n), 10))
 
     for meta in columns:
         name = meta.get("column_name")
@@ -257,10 +260,10 @@ def run_table_profile(
 
         top_values: List[Dict[str, Any]] = []
         top_coverage = 0
-        if top_n > 0 and rows_profiled:
+        if top_n_clamped > 0 and rows_profiled:
             top_sql = (
                 f"SELECT {qcol} AS VALUE, COUNT(*) AS CNT FROM {sampled_ref} "
-                f"WHERE {qcol} IS NOT NULL GROUP BY 1 ORDER BY CNT DESC LIMIT {int(top_n)}"
+                f"WHERE {qcol} IS NOT NULL GROUP BY 1 ORDER BY CNT DESC LIMIT {top_n_clamped}"
             )
             try:
                 for item in session.sql(top_sql).collect():
