@@ -60,6 +60,7 @@ st.markdown("""
 .badge { display:inline-block; padding=.15rem .55rem; border-radius:999px; font-size=.75rem; font-weight:600;
  background:#e5f6fd; color:#055e86; border:1px solid #cbeefb; }
 .badge-green { background:#eafaf0; border-color:#d4f2df; color:#0a5c2b; }
+.badge-gray { background:#f3f4f6; border-color:#e5e7eb; color:#374151; }
 .card { border:1px solid #e7ebf3; border-radius:12px; padding=.9rem 1rem; background:#fff; box-shadow:0 1px 2px rgba(12,18,28,.04); }
 .small { font-size:.85rem; color:#6b7280; }
 .kv { color:#111827; font-weight:600; }
@@ -220,6 +221,7 @@ def render_config_list():
             or q in (cfg.status or "").lower()
             or q in (cfg.run_as_role or "").lower()
             or q in (cfg.config_id or "").lower()
+            or q in (("enabled" if _normalize_bool(getattr(cfg, "schedule_enabled", False)) else "disabled"))
         ]
 
         if not cfgs:
@@ -228,11 +230,14 @@ def render_config_list():
 
     for i, cfg in enumerate(cfgs):
         active = (cfg.status or "").upper() == "ACTIVE"
-        badge = f"<span class='badge {'badge-green' if active else ''}'>{cfg.status or '—'}</span>"
+        status_badge = f"<span class='badge {'badge-green' if active else ''}'>{cfg.status or '—'}</span>"
+        enabled = _normalize_bool(getattr(cfg, "schedule_enabled", False))
+        enabled_label = "Enabled" if enabled else "Disabled"
+        enabled_badge = f"<span class='badge {'badge-gray' if not enabled else ''}'>{enabled_label}</span>"
         st.markdown("<div class='card'>", unsafe_allow_html=True)
         c1, c2, c3, c4 = st.columns([5, 3, 2, 2])
         with c1:
-            st.markdown(f"**{cfg.name}** {badge}", unsafe_allow_html=True)
+            st.markdown(f"**{cfg.name}** {status_badge} {enabled_badge}", unsafe_allow_html=True)
             st.markdown(f"<div class='small'>ID: <span class='kv'>{cfg.config_id}</span></div>", unsafe_allow_html=True)
         with c2:
             st.markdown(f"<div class='small'>Table:<br><span class='kv'>{cfg.target_table_fqn}</span></div>", unsafe_allow_html=True)
@@ -693,7 +698,12 @@ def render_config_editor():
                 post_submit_notices.append({"type": kind, "message": message})
 
         new_id = cfg.config_id if cfg else str(uuid4())
-        status = 'ACTIVE' if apply_now else 'DRAFT'
+        if apply_now:
+            status = 'ACTIVE'
+        elif save_draft:
+            status = 'DRAFT'
+        else:
+            status = (cfg.status if cfg and cfg.status else 'DRAFT')
         state = get_state()
         dq_cfg = DQConfig(
             config_id=new_id, name=name or None, description=(desc or None),
