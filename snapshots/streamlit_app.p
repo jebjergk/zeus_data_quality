@@ -1040,7 +1040,7 @@ def render_monitor():
     total_failures = int(failed_df["failures_num"].sum())
     configs_affected = int(failed_df["config_id"].nunique())
 
-    today = pd.Timestamp.utcnow().normalize()
+    today = pd.Timestamp.now(tz="UTC").normalize().tz_localize(None)
     start_date = today - pd.Timedelta(days=int(days) - 1)
     all_dates = pd.date_range(start=start_date, end=today, freq="D")
 
