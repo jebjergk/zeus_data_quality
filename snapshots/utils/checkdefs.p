@@ -104,11 +104,15 @@ def build_rule_for_table_check(fqn: str, ttype: str, params: dict):
         ts_col = _quote_identifier(ts_col_raw)
         max_age = int(params.get("max_age_minutes", 1920))
         table_name = _quote_table_fqn(fqn)
-        return "\n".join([
+        rule_lines = [
             "SELECT (COUNT(*) > 0 AND COUNT({col}) > 0 AND".format(col=ts_col),
             "        TIMESTAMPDIFF('minute', MAX({col}), CURRENT_TIMESTAMP()) <= {max_age}) AS OK".format(col=ts_col, max_age=max_age),
             f"FROM {table_name}",
-        ]), True
+        ]
+        rule_sql = "\n".join(rule_lines).strip()
+        if rule_sql.endswith(';'):
+            rule_sql = rule_sql[:-1].rstrip()
+        return rule_sql, True
     if ttype == "ROW_COUNT":
         min_rows = int(params.get("min_rows", 1))
         table_name = _quote_table_fqn(fqn)

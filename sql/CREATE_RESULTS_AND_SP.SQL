@@ -69,16 +69,16 @@ def run_dq_config(session: Session, CONFIG_ID: str) -> str:
         try:
             is_agg = rule_expr_upper.startswith(AGG_PREFIX) or check_type.upper().startswith("AGG")
             if is_agg:
-                agg_sql = rule_expr_raw[len(AGG_PREFIX):].strip() if rule_expr_upper.startswith(AGG_PREFIX) else rule_expr_raw
-                if agg_sql:
-                    while len(agg_sql) >= 2 and agg_sql[0] == agg_sql[-1] and agg_sql[0] in {'"', "'"}:
-                        agg_sql = agg_sql[1:-1].strip()
-                    agg_sql = agg_sql.lstrip()
-                    while agg_sql and agg_sql[0] in {'"', "'"}:
-                        agg_sql = agg_sql[1:].lstrip()
-                    agg_sql = agg_sql.rstrip()
-                    while agg_sql and agg_sql[-1] in {'"', "'"}:
-                        agg_sql = agg_sql[:-1].rstrip()
+                agg_raw = rule_expr_raw[len(AGG_PREFIX):] if rule_expr_upper.startswith(AGG_PREFIX) else rule_expr_raw
+                agg_sql = (agg_raw or "").strip()
+                if agg_sql.endswith(';'):
+                    agg_sql = agg_sql[:-1]
+                agg_sql = agg_sql.strip()
+                upper_sql = agg_sql.upper()
+                if 'FROM ' in upper_sql and agg_sql.strip().upper().endswith('FROM'):
+                    raise ValueError(f"Incomplete SQL (ends after FROM). SQL[:200]={agg_sql[:200]}")
+                if agg_sql.count('"') % 2 != 0:
+                    raise ValueError(f"Unbalanced double quotes in AGG SQL. SQL[:200]={agg_sql[:200]}")
                 result_rows = session.sql(agg_sql).collect()
                 first_value = result_rows[0][0] if result_rows else False
                 ok = _normalize_bool(first_value)
@@ -98,7 +98,7 @@ def run_dq_config(session: Session, CONFIG_ID: str) -> str:
             failures = 0
             context_sql = agg_sql or failure_sql
             if context_sql:
-                error_msg = f"{exc} | SQL: {context_sql}"
+                error_msg = f"{exc} | SQL[:200]={context_sql[:200]}"
             else:
                 error_msg = str(exc)
 
