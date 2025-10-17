@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 import time
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 from uuid import uuid4
 
@@ -10,6 +11,7 @@ import pandas as pd
 import streamlit as st
 
 from services.profile import build_profile_suggestion
+from services.profiling import save_profile_results
 from utils.meta import _q
 
 
@@ -345,6 +347,61 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
         unique_candidates = filter_cols[1].toggle("Unique candidates", value=False)
         low_cardinality = filter_cols[2].toggle("Low cardinality", value=False)
         whitespace_risk = filter_cols[3].toggle("Whitespace risk", value=False)
+
+    save_enabled = bool(session and meta_db and meta_schema)
+    if not save_enabled:
+        st.session_state.pop("profile_save_toggle", None)
+        st.session_state.pop("_profile_save_prev", None)
+        st.session_state.pop("profile_saved_run_id", None)
+
+    save_help = (
+        "Persist the current profile results to metadata tables."
+        if save_enabled
+        else "Connect to Snowflake and select metadata targets to enable saving."
+    )
+    save_toggle = st.toggle(
+        "💾 Save Profile",
+        key="profile_save_toggle",
+        value=False,
+        disabled=not save_enabled,
+        help=save_help,
+    )
+
+    prev_toggle = st.session_state.get("_profile_save_prev", False)
+    st.session_state["_profile_save_prev"] = save_toggle
+
+    if save_toggle and save_enabled and not prev_toggle:
+        run_info = {**(profile_result.get("summary") or {})}
+        run_info.update(
+            {
+                "target_table": profile_result.get("target_table"),
+                "top_n": profile_result.get("top_n"),
+                "saved_at": datetime.utcnow().isoformat() + "Z",
+            }
+        )
+        rows_payload: List[Dict[str, Any]] = []
+        for column_profile in profile_result.get("columns", []):
+            column_name = column_profile.get("column_name") or column_profile.get("name")
+            if not column_name:
+                continue
+            rows_payload.append({**column_profile, "column_name": column_name})
+
+        try:
+            run_id = save_profile_results(
+                session=session,
+                meta_db=meta_db,
+                meta_schema=meta_schema,
+                run_info=run_info,
+                rows=rows_payload,
+            )
+        except Exception as exc:  # pragma: no cover - Snowflake specific
+            st.error(f"Failed to save profile: {exc}")
+        else:
+            st.session_state["profile_saved_run_id"] = run_id
+            st.success(f"Saved profile run {run_id} to metadata.")
+
+    if not save_toggle:
+        st.session_state.pop("profile_saved_run_id", None)
 
     filtered_df = df.copy()
     if high_null:
