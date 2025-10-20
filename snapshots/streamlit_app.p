@@ -939,7 +939,14 @@ def render_config_editor():
         existing_enabled = getattr(cfg, "schedule_enabled", True) if cfg else True
         default_cron = existing_cron or "0 8 * * *"
         default_timezone = existing_timezone or "Europe/Berlin"
-        schedule_enabled = st.checkbox("Enable daily task", value=bool(existing_enabled))
+        schedule_enabled = st.checkbox(
+            "Enable daily task",
+            value=bool(existing_enabled),
+            help=(
+                "When saving as Draft, scheduling is always disabled and any existing task is "
+                "suspended. Enable daily task only applies when you Save & Apply."
+            ),
+        )
         cron_expr = st.text_input(
             "Cron expression",
             value=default_cron,
@@ -1033,7 +1040,7 @@ def render_config_editor():
             dmf_role=(state.get('dmf_role') or None), status=status, owner=None,
             schedule_cron=(cron_expr.strip() if cron_expr else "0 8 * * *"),
             schedule_timezone=(timezone_expr.strip() if timezone_expr else "Europe/Berlin"),
-            schedule_enabled=bool(schedule_enabled)
+            schedule_enabled=(False if save_draft else bool(schedule_enabled))
         )
         if not dq_cfg.name:
             err_msg = "Select a database, schema, and table to generate a configuration name before saving."
@@ -1071,6 +1078,22 @@ def render_config_editor():
         base_msg = f"Saved config {new_id} ({status})."
         st.success(base_msg)
         remember("success", base_msg)
+        if save_draft:
+            suspend_result = schedules.suspend_task_for_config(session, dq_cfg.config_id)
+            suspend_status = suspend_result.get("status")
+            if suspend_status == "FALLBACK":
+                warn_msg = (
+                    f"Failed to suspend task {suspend_result.get('task') or task_name_for_config(dq_cfg.config_id)}: "
+                    f"{suspend_result.get('reason')}"
+                )
+                st.warning(warn_msg)
+                remember("warning", warn_msg)
+            else:
+                info_msg = (
+                    "Saved as Draft. Scheduling is disabled and any existing task has been suspended."
+                )
+                st.info(info_msg)
+                remember("info", info_msg)
         if apply_now:
             dmfs_attached = out.get("dmfs_attached") or []
             if dmfs_attached:
@@ -1124,175 +1147,196 @@ def render_config_editor():
                         remember("success", success_msg)
 
         if apply_now and status == 'ACTIVE':
-            st.caption(f"Namespace: {METADATA_DB}.{METADATA_SCHEMA}, Proc: {PROC_NAME}")
-            dbg_df = None
-            snapshot_error: Optional[Exception] = None
-            try:
-                dbg_df = session_snapshot(session)
-            except Exception as exc:  # pragma: no cover - Snowflake specific
-                snapshot_error = exc
-
-            meta_db, meta_schema = METADATA_DB, METADATA_SCHEMA
-            metadata_error: Optional[Exception] = None
-            task_fqn: Optional[str] = None
-            proc_fqn: Optional[str] = None
-            if not meta_db or not meta_schema:
-                metadata_error = ValueError("Metadata namespace is not configured")
-            else:
-                task_fqn = _q_task(meta_db, meta_schema, task_name_for_config(dq_cfg.config_id))
-                proc_fqn = _q_task(meta_db, meta_schema, PROC_NAME)
-
-            try:
-                warehouse_name = session.get_current_warehouse()
-            except Exception:  # pragma: no cover - Snowflake specific
-                warehouse_name = None
-            warehouse_name = (warehouse_name or "").strip()
-            run_role_name = (dq_cfg.run_as_role or "").strip()
-
-            task_failure_reported = False
-            task_sql_recorded = False
-            task_manage_sql: Optional[str] = None
-
-            if meta_db and meta_schema:
-                def _quote_ident(value: Optional[str]) -> str:
-                    text = "" if value is None else str(value)
-                    return '"' + text.replace('"', '""') + '"'
-
-                def _quote_literal(value: Optional[str]) -> str:
-                    if value is None:
-                        return "NULL"
-                    text = str(value)
-                    return "'" + text.replace("'", "''") + "'"
-
-                cron_expression = (dq_cfg.schedule_cron or "0 8 * * *").strip() or "0 8 * * *"
-                timezone_name = (dq_cfg.schedule_timezone or "Europe/Berlin").strip() or "Europe/Berlin"
-                task_manage_sql = (
-                    f"CALL {_quote_ident(meta_db)}.{_quote_ident(meta_schema)}.\"SP_DQ_MANAGE_TASK\"("
-                    f"{_quote_literal(meta_db)}, {_quote_literal(meta_schema)}, {_quote_literal(DEFAULT_WAREHOUSE)}, "
-                    f"{_quote_literal(dq_cfg.config_id)}, {_quote_literal(PROC_NAME)}, "
-                    f"{_quote_literal(cron_expression)}, {_quote_literal(timezone_name)}, TRUE)"
-                )
-
-            def show_task_failure(message: str) -> None:
-                nonlocal task_failure_reported, task_sql_recorded
-                task_failure_reported = True
-                st.error(message)
-                remember("error", message)
-                inferred_task_fqn = task_fqn
-                inferred_proc_fqn = proc_fqn
-                if not inferred_task_fqn:
-                    if meta_db and meta_schema:
-                        inferred_task_fqn = _q_task(meta_db, meta_schema, task_name_for_config(dq_cfg.config_id))
-                    else:
-                        inferred_task_fqn = task_name_for_config(dq_cfg.config_id)
-                if not inferred_proc_fqn:
-                    if meta_db and meta_schema:
-                        inferred_proc_fqn = _q_task(meta_db, meta_schema, PROC_NAME)
-                    else:
-                        inferred_proc_fqn = PROC_NAME
-                st.markdown(
-                    f"**Task FQN:** `{inferred_task_fqn}`  \\\n+**Procedure FQN:** `{inferred_proc_fqn}`"
-                )
-                if task_manage_sql:
-                    st.caption("Task creation call (for debugging):")
-                    st.code(task_manage_sql, language="sql")
-                    if not task_sql_recorded:
-                        post_submit_notices.append(
-                            {
-                                "type": "sql",
-                                "message": "Task creation call (for debugging):",
-                                "code": task_manage_sql,
-                                "language": "sql",
-                            }
-                        )
-                        task_sql_recorded = True
-                if dbg_df is not None:
-                    st.caption("Session snapshot at failure:")
-                    st.dataframe(dbg_df, use_container_width=True, hide_index=True)
-                elif snapshot_error is not None:
-                    st.caption(f"Session snapshot unavailable: {snapshot_error}")
-
-            sched: Dict[str, Any] = {}
-            if metadata_error is not None:
-                show_task_failure(f"Unable to determine metadata schema: {metadata_error}")
-                sched = {
-                    "status": "FALLBACK",
-                    "reason": str(metadata_error),
-                    "task": task_name_for_config(dq_cfg.config_id),
-                }
-            else:
-                preflight_failed = False
-                try:
-                    ensure_session_context(
-                        session,
-                        run_role_name,
-                        warehouse_name,
-                        meta_db or "",
-                        meta_schema or "",
+            if not dq_cfg.schedule_enabled:
+                suspend_result = schedules.suspend_task_for_config(session, dq_cfg.config_id)
+                suspend_status = suspend_result.get("status")
+                if suspend_status == "FALLBACK":
+                    warn_msg = (
+                        f"Failed to suspend task {suspend_result.get('task') or task_name_for_config(dq_cfg.config_id)}: "
+                        f"{suspend_result.get('reason')}"
                     )
-                    if meta_db and meta_schema:
-                        preflight_requirements(
-                            session,
-                            meta_db,
-                            meta_schema,
-                            proc_name=PROC_NAME,
-                            arg_sig="(VARCHAR)",
+                    st.warning(warn_msg)
+                    remember("warning", warn_msg)
+                else:
+                    task_label = suspend_result.get("task") or task_name_for_config(dq_cfg.config_id)
+                    if suspend_status == "NOT_FOUND":
+                        success_msg = (
+                            "Task scheduling disabled. No existing task was found, so nothing was suspended."
                         )
-                        preflight_requirements(
-                            session,
-                            meta_db,
-                            meta_schema,
-                            proc_name="SP_DQ_MANAGE_TASK",
-                            arg_sig="(STRING, STRING, STRING, STRING, STRING, STRING, STRING, BOOLEAN)",
-                        )
+                    else:
+                        success_msg = f"Task scheduling disabled. Suspended **{task_label}**."
+                    st.success(success_msg)
+                    remember("success", success_msg)
+            else:
+                st.caption(f"Namespace: {METADATA_DB}.{METADATA_SCHEMA}, Proc: {PROC_NAME}")
+                dbg_df = None
+                snapshot_error: Optional[Exception] = None
+                try:
+                    dbg_df = session_snapshot(session)
                 except Exception as exc:  # pragma: no cover - Snowflake specific
-                    show_task_failure(f"Task preflight failed: {exc}")
+                    snapshot_error = exc
+
+                meta_db, meta_schema = METADATA_DB, METADATA_SCHEMA
+                metadata_error: Optional[Exception] = None
+                task_fqn: Optional[str] = None
+                proc_fqn: Optional[str] = None
+                if not meta_db or not meta_schema:
+                    metadata_error = ValueError("Metadata namespace is not configured")
+                else:
+                    task_fqn = _q_task(meta_db, meta_schema, task_name_for_config(dq_cfg.config_id))
+                    proc_fqn = _q_task(meta_db, meta_schema, PROC_NAME)
+
+                try:
+                    warehouse_name = session.get_current_warehouse()
+                except Exception:  # pragma: no cover - Snowflake specific
+                    warehouse_name = None
+                warehouse_name = (warehouse_name or "").strip()
+                run_role_name = (dq_cfg.run_as_role or "").strip()
+
+                task_failure_reported = False
+                task_sql_recorded = False
+                task_manage_sql: Optional[str] = None
+
+                if meta_db and meta_schema:
+                    def _quote_ident(value: Optional[str]) -> str:
+                        text = "" if value is None else str(value)
+                        return '"' + text.replace('"', '""') + '"'
+
+                    def _quote_literal(value: Optional[str]) -> str:
+                        if value is None:
+                            return "NULL"
+                        text = str(value)
+                        return "'" + text.replace("'", "''") + "'"
+
+                    cron_expression = (dq_cfg.schedule_cron or "0 8 * * *").strip() or "0 8 * * *"
+                    timezone_name = (dq_cfg.schedule_timezone or "Europe/Berlin").strip() or "Europe/Berlin"
+                    task_manage_sql = (
+                        f"CALL {_quote_ident(meta_db)}.{_quote_ident(meta_schema)}.\"SP_DQ_MANAGE_TASK\"("
+                        f"{_quote_literal(meta_db)}, {_quote_literal(meta_schema)}, {_quote_literal(DEFAULT_WAREHOUSE)}, "
+                        f"{_quote_literal(dq_cfg.config_id)}, {_quote_literal(PROC_NAME)}, "
+                        f"{_quote_literal(cron_expression)}, {_quote_literal(timezone_name)}, TRUE)"
+                    )
+
+                def show_task_failure(message: str) -> None:
+                    nonlocal task_failure_reported, task_sql_recorded
+                    task_failure_reported = True
+                    st.error(message)
+                    remember("error", message)
+                    inferred_task_fqn = task_fqn
+                    inferred_proc_fqn = proc_fqn
+                    if not inferred_task_fqn:
+                        if meta_db and meta_schema:
+                            inferred_task_fqn = _q_task(meta_db, meta_schema, task_name_for_config(dq_cfg.config_id))
+                        else:
+                            inferred_task_fqn = task_name_for_config(dq_cfg.config_id)
+                    if not inferred_proc_fqn:
+                        if meta_db and meta_schema:
+                            inferred_proc_fqn = _q_task(meta_db, meta_schema, PROC_NAME)
+                        else:
+                            inferred_proc_fqn = PROC_NAME
+                    st.markdown(
+                        f"**Task FQN:** `{inferred_task_fqn}`  \\\n+**Procedure FQN:** `{inferred_proc_fqn}`"
+                    )
+                    if task_manage_sql:
+                        st.caption("Task creation call (for debugging):")
+                        st.code(task_manage_sql, language="sql")
+                        if not task_sql_recorded:
+                            post_submit_notices.append(
+                                {
+                                    "type": "sql",
+                                    "message": "Task creation call (for debugging):",
+                                    "code": task_manage_sql,
+                                    "language": "sql",
+                                }
+                            )
+                            task_sql_recorded = True
+                    if dbg_df is not None:
+                        st.caption("Session snapshot at failure:")
+                        st.dataframe(dbg_df, use_container_width=True, hide_index=True)
+                    elif snapshot_error is not None:
+                        st.caption(f"Session snapshot unavailable: {snapshot_error}")
+
+                sched: Dict[str, Any] = {}
+                if metadata_error is not None:
+                    show_task_failure(f"Unable to determine metadata schema: {metadata_error}")
                     sched = {
                         "status": "FALLBACK",
-                        "reason": str(exc),
-                        "task": task_fqn or task_name_for_config(dq_cfg.config_id),
+                        "reason": str(metadata_error),
+                        "task": task_name_for_config(dq_cfg.config_id),
                     }
-                    preflight_failed = True
-                if not preflight_failed:
-                    sched = schedules.ensure_task_for_config(session, dq_cfg)
-                    if sched.get("status") == "FALLBACK" and sched.get("reason"):
-                        show_task_failure(f"Task creation failed: {sched['reason']}")
-
-            sched_status = sched.get("status")
-            if sched_status == "TASK_CREATED":
-                cron_disp = dq_cfg.schedule_cron or "0 8 * * *"
-                tz_disp = dq_cfg.schedule_timezone or "Europe/Berlin"
-                sched_msg = f"Scheduled **{sched['task']}** (`{cron_disp}` {tz_disp})."
-                st.success(sched_msg)
-                remember("success", sched_msg)
-            elif sched_status == "SCHEDULE_DISABLED":
-                info_msg = "Schedule disabled — skipped automatic task creation."
-                st.info(info_msg)
-                remember("info", info_msg)
-            elif sched_status == "INVALID_SCHEDULE":
-                warn_msg = sched.get("reason") or "Schedule settings were invalid; task not created."
-                st.warning(warn_msg)
-                remember("warning", warn_msg)
-            elif sched_status == "NO_WAREHOUSE":
-                warn_msg = (
-                    "No active warehouse is set for this session. "
-                    "Select a warehouse in Snowflake or configure a default before saving again."
-                )
-                st.warning(warn_msg)
-                remember("warning", warn_msg)
-            elif sched_status == "FALLBACK" and task_failure_reported:
-                pass
-            else:
-                reason = sched.get("reason")
-                if reason:
-                    warn_msg = (
-                        f"Could not create task {sched.get('task') or ''}: {reason}. "
-                        "Task intent was stored for manual follow-up."
-                    )
                 else:
-                    warn_msg = "Could not create task automatically; stored fallback intent."
-                st.warning(warn_msg)
-                remember("warning", warn_msg)
+                    preflight_failed = False
+                    try:
+                        ensure_session_context(
+                            session,
+                            run_role_name,
+                            warehouse_name,
+                            meta_db or "",
+                            meta_schema or "",
+                        )
+                        if meta_db and meta_schema:
+                            preflight_requirements(
+                                session,
+                                meta_db,
+                                meta_schema,
+                                proc_name=PROC_NAME,
+                                arg_sig="(VARCHAR)",
+                            )
+                            preflight_requirements(
+                                session,
+                                meta_db,
+                                meta_schema,
+                                proc_name="SP_DQ_MANAGE_TASK",
+                                arg_sig="(STRING, STRING, STRING, STRING, STRING, STRING, STRING, BOOLEAN)",
+                            )
+                    except Exception as exc:  # pragma: no cover - Snowflake specific
+                        show_task_failure(f"Task preflight failed: {exc}")
+                        sched = {
+                            "status": "FALLBACK",
+                            "reason": str(exc),
+                            "task": task_fqn or task_name_for_config(dq_cfg.config_id),
+                        }
+                        preflight_failed = True
+                    if not preflight_failed:
+                        sched = schedules.ensure_task_for_config(session, dq_cfg)
+                        if sched.get("status") == "FALLBACK" and sched.get("reason"):
+                            show_task_failure(f"Task creation failed: {sched['reason']}")
+
+                sched_status = sched.get("status")
+                if sched_status == "TASK_CREATED":
+                    cron_disp = dq_cfg.schedule_cron or "0 8 * * *"
+                    tz_disp = dq_cfg.schedule_timezone or "Europe/Berlin"
+                    sched_msg = f"Scheduled **{sched['task']}** (`{cron_disp}` {tz_disp})."
+                    st.success(sched_msg)
+                    remember("success", sched_msg)
+                elif sched_status == "SCHEDULE_DISABLED":
+                    info_msg = "Schedule disabled — skipped automatic task creation."
+                    st.info(info_msg)
+                    remember("info", info_msg)
+                elif sched_status == "INVALID_SCHEDULE":
+                    warn_msg = sched.get("reason") or "Schedule settings were invalid; task not created."
+                    st.warning(warn_msg)
+                    remember("warning", warn_msg)
+                elif sched_status == "NO_WAREHOUSE":
+                    warn_msg = (
+                        "No active warehouse is set for this session. "
+                        "Select a warehouse in Snowflake or configure a default before saving again."
+                    )
+                    st.warning(warn_msg)
+                    remember("warning", warn_msg)
+                elif sched_status == "FALLBACK" and task_failure_reported:
+                    pass
+                else:
+                    reason = sched.get("reason")
+                    if reason:
+                        warn_msg = (
+                            f"Could not create task {sched.get('task') or ''}: {reason}. "
+                            "Task intent was stored for manual follow-up."
+                        )
+                    else:
+                        warn_msg = "Could not create task automatically; stored fallback intent."
+                    st.warning(warn_msg)
+                    remember("warning", warn_msg)
 
         st.session_state["last_notices"] = post_submit_notices
         st.session_state["cfg_mode"] = "list"; st.rerun()
