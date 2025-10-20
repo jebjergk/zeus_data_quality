@@ -1,4 +1,5 @@
 import json
+from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 from uuid import uuid4
 
@@ -69,9 +70,16 @@ st.markdown("""
  background:#e5f6fd; color:#055e86; border:1px solid #cbeefb; }
 .badge-green { background:#eafaf0; border-color:#d4f2df; color:#0a5c2b; }
 .badge-gray { background:#f3f4f6; border-color:#e5e7eb; color:#374151; }
+.badge-red { background:#fef2f2; border-color:#fee2e2; color:#7f1d1d; }
+.badge-blue { background:#e0f2fe; border-color:#bae6fd; color:#1d4ed8; }
 .card { border:1px solid #e7ebf3; border-radius:12px; padding=.9rem 1rem; background:#fff; box-shadow:0 1px 2px rgba(12,18,28,.04); }
 .small { font-size:.85rem; color:#6b7280; }
 .kv { color:#111827; font-weight:600; }
+.metrics-grid { display:flex; flex-wrap:wrap; gap:.6rem 1.2rem; margin-top:.65rem; }
+.metric { font-size:.85rem; color:#6b7280; }
+.metric-label { font-weight:500; text-transform:uppercase; letter-spacing:.02em; font-size:.7rem; margin-bottom:.15rem; display:block; }
+.metric-value { color:#111827; font-weight:600; }
+.metric-value .badge { margin-right:.4rem; }
 section[data-testid="stSidebar"] .stButton>button {
  width:100%;
  border-radius:10px;
@@ -95,6 +103,30 @@ def _normalize_bool(value) -> bool:
         return value != 0
     text = str(value).strip().upper()
     return text in {"TRUE", "T", "YES", "Y", "1"}
+
+
+def _row_to_dict(row: Any) -> Dict[str, Any]:
+    if hasattr(row, "asDict"):
+        return {str(k).lower(): v for k, v in row.asDict().items()}
+    try:
+        return {str(i): row[i] for i in range(len(row))}  # type: ignore[index]
+    except Exception:
+        return {}
+
+
+def _format_timestamp(value: Any) -> str:
+    if value is None:
+        return "—"
+    if hasattr(value, "to_pydatetime"):
+        try:
+            value = value.to_pydatetime()
+        except Exception:
+            pass
+    if isinstance(value, datetime):
+        fmt = "%Y-%m-%d %H:%M %Z" if value.tzinfo else "%Y-%m-%d %H:%M"
+        formatted = value.strftime(fmt).strip()
+        return formatted or value.strftime("%Y-%m-%d %H:%M")
+    return str(value)
 
 
 def _get_page_from_query_params() -> Optional[str]:
@@ -234,6 +266,78 @@ def render_config_list():
     )
 
     cfgs = list_configs(session)
+    results_table = _q(RUN_RESULTS_TBL)
+    checks_table = _q(CHECKS_TBL)
+
+    last_run_by_config: Dict[str, Dict[str, Any]] = {}
+    last_run_available = True
+    recent_failures_by_config: Dict[str, int] = {}
+    recent_failures_available = True
+    column_checks_by_config: Dict[str, int] = {}
+    checks_available = True
+
+    if session:
+        try:
+            df = session.sql(
+                f"""
+                SELECT CONFIG_ID, RUN_TS, OK
+                FROM {results_table}
+                QUALIFY ROW_NUMBER() OVER (PARTITION BY CONFIG_ID ORDER BY RUN_TS DESC) = 1
+                """
+            )
+            for row in df.collect():
+                data = _row_to_dict(row)
+                config_id = data.get("config_id")
+                if not config_id:
+                    continue
+                last_run_by_config[config_id] = {
+                    "run_ts": data.get("run_ts"),
+                    "ok": data.get("ok"),
+                }
+        except Exception:
+            last_run_available = False
+
+        try:
+            df = session.sql(
+                f"""
+                SELECT CONFIG_ID, COUNT(*) AS FAILURE_COUNT
+                FROM {results_table}
+                WHERE COALESCE(OK, FALSE) = FALSE
+                  AND RUN_TS >= DATEADD(day, -7, CURRENT_TIMESTAMP())
+                GROUP BY CONFIG_ID
+                """
+            )
+            for row in df.collect():
+                data = _row_to_dict(row)
+                config_id = data.get("config_id")
+                if not config_id:
+                    continue
+                count = data.get("failure_count")
+                if isinstance(count, (int, float)):
+                    recent_failures_by_config[config_id] = int(count)
+        except Exception:
+            recent_failures_available = False
+
+        try:
+            df = session.sql(
+                f"""
+                SELECT CONFIG_ID, COUNT(*) AS COLUMN_CHECKS
+                FROM {checks_table}
+                WHERE COLUMN_NAME IS NOT NULL
+                GROUP BY CONFIG_ID
+                """
+            )
+            for row in df.collect():
+                data = _row_to_dict(row)
+                config_id = data.get("config_id")
+                if not config_id:
+                    continue
+                count = data.get("column_checks")
+                if isinstance(count, (int, float)):
+                    column_checks_by_config[config_id] = int(count)
+        except Exception:
+            checks_available = False
+
     if not cfgs:
         st.info("No configurations yet. Use the sidebar to create one via **Create configuration**.")
         return
@@ -256,26 +360,101 @@ def render_config_list():
             return
 
     for i, cfg in enumerate(cfgs):
-        active = (cfg.status or "").upper() == "ACTIVE"
-        status_badge = f"<span class='badge {'badge-green' if active else ''}'>{cfg.status or '—'}</span>"
+        status_value = (cfg.status or "").upper() or "—"
+        active = status_value == "ACTIVE"
+        status_badge_class = "badge-green" if active else "badge-gray"
+        status_badge = f"<span class='badge {status_badge_class}'>{status_value}</span>"
         enabled = _normalize_bool(getattr(cfg, "schedule_enabled", False))
-        enabled_label = "Enabled" if enabled else "Disabled"
-        enabled_badge = f"<span class='badge {'badge-gray' if not enabled else ''}'>{enabled_label}</span>"
+        enabled_badge = (
+            "<span class='badge badge-blue'>Enabled</span>"
+            if enabled
+            else "<span class='badge badge-gray'>Disabled</span>"
+        )
+
+        last_run_info = last_run_by_config.get(cfg.config_id) if last_run_available else None
+        if last_run_info:
+            ts_display = _format_timestamp(last_run_info.get("run_ts"))
+            ok_value = last_run_info.get("ok")
+            if ok_value is True:
+                last_run_badge = "<span class='badge badge-green'>✅ OK</span>"
+            elif ok_value is False:
+                last_run_badge = "<span class='badge badge-red'>❌ Fail</span>"
+            else:
+                last_run_badge = ""
+            if last_run_badge:
+                last_run_value = f"{last_run_badge}<span class='kv'>{ts_display}</span>"
+            else:
+                last_run_value = f"<span class='kv'>{ts_display}</span>"
+        else:
+            last_run_value = "—"
+
+        if recent_failures_available:
+            failure_count = recent_failures_by_config.get(cfg.config_id, 0)
+            recent_failures_value = f"<span class='kv'>{failure_count}</span>"
+        else:
+            recent_failures_value = "—"
+
+        if checks_available:
+            column_checks = column_checks_by_config.get(cfg.config_id, 0)
+            total_checks = column_checks + 2
+            checks_value = f"<span class='kv'>{total_checks}</span>"
+        else:
+            checks_value = "—"
+
+        cron_text = cfg.schedule_cron or "—"
+        tz_text = cfg.schedule_timezone or "—"
+        if cron_text == "—" and tz_text == "—":
+            schedule_text = "—"
+        else:
+            schedule_text = f"{cron_text} ({tz_text})"
+        if schedule_text != "—":
+            schedule_value = f"<span class='kv'>{schedule_text}</span> {enabled_badge}"
+        else:
+            schedule_value = f"— {enabled_badge}"
+
+        run_as_role_value = cfg.run_as_role or "—"
+        run_as_role_display = (
+            f"<span class='kv'>{run_as_role_value}</span>"
+            if run_as_role_value != "—"
+            else "—"
+        )
+
+        metrics = [
+            ("Last run", last_run_value),
+            ("Recent failures (7d)", recent_failures_value),
+            ("Checks", checks_value),
+            ("Schedule", schedule_value),
+            ("Run-as role", run_as_role_display),
+        ]
+
+        metrics_html = "<div class='metrics-grid'>" + "".join(
+            f"<div class='metric'><span class='metric-label'>{label}</span><div class='metric-value'>{value}</div></div>"
+            for label, value in metrics
+        ) + "</div>"
+
         st.markdown("<div class='card'>", unsafe_allow_html=True)
-        c1, c2, c3, c4 = st.columns([5, 3, 2, 2])
-        with c1:
-            st.markdown(f"**{cfg.name}** {status_badge} {enabled_badge}", unsafe_allow_html=True)
-            st.markdown(f"<div class='small'>ID: <span class='kv'>{cfg.config_id}</span></div>", unsafe_allow_html=True)
-        with c2:
-            st.markdown(f"<div class='small'>Table:<br><span class='kv'>{cfg.target_table_fqn}</span></div>", unsafe_allow_html=True)
-        with c3:
-            st.markdown(f"<div class='small'>RUN_AS_ROLE:<br><span class='kv'>{cfg.run_as_role or '—'}</span></div>", unsafe_allow_html=True)
-        with c4:
-            a1, a2 = st.columns(2)
-            with a1:
+        main_col, action_col = st.columns([7, 2])
+        with main_col:
+            display_name = cfg.name or cfg.config_id
+            st.markdown(
+                f"<div class='card-title'><strong>{display_name}</strong> {status_badge}</div>",
+                unsafe_allow_html=True,
+            )
+            st.markdown(
+                f"<div class='small'>ID: <span class='kv'>{cfg.config_id}</span></div>",
+                unsafe_allow_html=True,
+            )
+            st.markdown(
+                f"<div class='small' style='margin-top:.4rem;'>Table:<br><span class='kv'>{cfg.target_table_fqn}</span></div>",
+                unsafe_allow_html=True,
+            )
+            st.markdown(metrics_html, unsafe_allow_html=True)
+        with action_col:
+            edit_col, delete_col = st.columns(2)
+            with edit_col:
                 if st.button("✏️ Edit", key=f"edit_{cfg.config_id}"):
                     open_config_editor(cfg.config_id, cfg.target_table_fqn)
-            with a2:
+            with delete_col:
                 if st.button("🗑️ Delete", key=f"del_{cfg.config_id}"):
                     out = delete_config_full(session, cfg.config_id)
                     msg = f"Deleted `{cfg.name}` — dropped {len(out.get('dmfs_dropped', []))} view(s)."
@@ -283,7 +462,7 @@ def render_config_list():
                     st.session_state["last_notices"] = [{"type": "success", "message": msg}]
                     st.rerun()
         st.markdown("</div>", unsafe_allow_html=True)
-        if i < len(cfgs)-1:
+        if i < len(cfgs) - 1:
             st.markdown("<div class='sf-hr'></div>", unsafe_allow_html=True)
 
 def render_config_editor():
