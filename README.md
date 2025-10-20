@@ -39,3 +39,39 @@ Outputs:
   - snapshots/SOURCE_SNAPSHOT.md
 
 Do not edit files in `/snapshots`; they are generated from the real sources.
+
+## Data governance for EU and German stakeholders
+
+### Regulatory alignment made simple
+- **GDPR**: Customer datasets stay inside Snowflake’s EU region. We only persist configuration metadata, run logs, and profiling statistics—never the underlying personal data values. Metadata is scoped to the minimum necessary fields, fulfilling data minimisation and purpose limitation duties.
+- **BaFin circulars & supervisory expectations**: Governance controls (roles, approvals, audit trail) remain embedded in the Snowflake security model so financial institutions can evidence proportional safeguards without re-platforming.
+- **MiFID II record-keeping**: Historical task runs, check definitions, and remediation notes are retained to demonstrate monitoring of data feeding regulated reporting.
+- **EU AI Act (draft principles)**: Optional AI-assisted features observe transparency and human-in-the-loop principles, working exclusively on metadata and retaining prompt/response fingerprints for traceability.
+
+### What the platform stores—and what it avoids
+- **Configurations**: Check definitions, scheduling metadata, and Snowflake object references only.
+- **Task and run results**: Status flags, row counts, exception summaries, timestamps, and operator notes. Profiling and AI helper features log statistics (e.g., min/max, distinct counts) but never surface raw values.
+- **No PII export**: Profiling outputs, semantic checks, and AI recommendations rely on metadata. Sample rows or customer-identifying values never leave the secure Snowflake tenancy.
+- **EU-only processing**: All computation and storage sit in the customer’s Snowflake EU account; the Streamlit front-end reuses the active Snowsight session without rerouting traffic abroad.
+
+### Access control and operational safety nets
+- **Roles-first access**: Streamlit executes `EXECUTE AS CALLER`, inheriting the signed-in user’s Snowflake role. Only authorised roles can view configurations or results; sensitive views remain masked downstream.
+- **Role-gated advanced features**: AI-assisted prompts can be toggled per configuration and are visible only to users with the `DQ_AI_REVIEWER` role (or the customer-defined equivalent).
+- **Audit trail clarity**: Every run records the triggering task, execution timestamps, Snowflake role, and outcome. When AI assistance is enabled, the prompt hash, anonymised prompt payload, and model identifier are stored alongside the run metadata for traceability.
+
+### Data quality dimensions and enforcing checks
+- **Completeness**: Null/blank detection rules and row-count comparisons ensure required attributes are populated.
+- **Accuracy**: Range validations, referential checks, and semantic rules compare metadata against trusted reference sources.
+- **Consistency**: Cross-table reconciliations and format validations catch mismatches between related datasets.
+- **Timeliness**: Task schedules monitor late-arriving data by comparing expected and actual refresh timestamps.
+- **Uniqueness**: Key integrity checks flag duplicate business identifiers or unexpected cardinality changes.
+
+Each dimension maps to explicit check templates stored in the configuration metadata and executed within Snowpark; failed checks land in metadata tables for remediation without exposing raw customer data.
+
+### Customer data protection messaging
+- **No raw data to language models**: Optional AI helpers summarise profiling metadata only. Raw customer data never enters model prompts or responses.
+- **Metadata-only insights**: Statistical summaries, schema drift indicators, and anomaly scores drive recommendations while keeping PII shielded.
+- **Feature toggles for comfort**: Organisations can disable AI helpers globally or per configuration; defaults favour manual review in regulated environments.
+- **Transparent operator experience**: Users see when AI assistance is active, which model provided guidance, and can review prompt hashes before accepting suggestions.
+
+This governance layer gives compliance, risk, and business teams a shared language for understanding how Zeus Data Quality protects customer information while maintaining the rigor expected by EU and German regulators.
