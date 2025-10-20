@@ -118,19 +118,14 @@ def navigate_to(page: str) -> None:
     """Update the current page selection in session state."""
     st.session_state["page"] = page
     try:
-        # Streamlit < 1.32
-        st.experimental_set_query_params(page=page)
-    except AttributeError:
-        # Streamlit >= 1.32 exposes ``st.query_params``
-        try:
-            current = dict(st.query_params)  # type: ignore[attr-defined]
-        except Exception:
-            current = {}
-        current["page"] = page
-        try:
-            st.query_params = current  # type: ignore[attr-defined]
-        except Exception:
-            pass
+        current = dict(st.query_params)  # type: ignore[attr-defined]
+    except Exception:
+        current = {}
+    current["page"] = page
+    try:
+        st.query_params = current  # type: ignore[attr-defined]
+    except Exception:
+        pass
     if page == "home":
         st.session_state["cfg_mode"] = "list"
 
