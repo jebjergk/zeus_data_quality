@@ -94,7 +94,39 @@ def render_docs(
 
     with tabs[1]:
         st.subheader("Profiling")
-        st.info("Profiling documentation coming soon – this tab will cover profiling workflows and examples.")
+        st.markdown(
+            """
+### Why profile first?
+Profiling runs lightweight column statistics so you understand shape, completeness, and content **before** locking a data quality policy. It highlights high-risk fields, confirms business keys, and surfaces unexpected formats that deserve a rule.
+
+### Metrics collected per column
+- **Null % / Null count** – identify missing data hotspots.
+- **Distinct % / Distinct count** – confirm uniqueness or spot categorical fields.
+- **Min / Max** – verify ranges for numbers and timestamps.
+- **Average length** – catch truncated strings or atypical ID lengths.
+- **Whitespace %** – flags leading/trailing spaces that break joins.
+- **Top values** – show the most common values (configurable Top N) to reveal dominant categories or odd outliers.
+
+### Guessed content & confidence
+- Each column receives semantic badges such as **IBAN**, **ISIN**, **EMAIL**, **ACCOUNT_ID**, **ORDER_ID**, **PRICE**, **CURRENCY**, **COUNTRY**, **TIMESTAMP**, **ENUM**, and more depending on detected patterns.
+- Confidence badges are colour coded: **High** (green), **Medium** (amber), **Low** (grey), and **Unknown** (neutral) when the profiler has insufficient evidence.
+- Hover the *Confidence Rationale* tooltip in the grid for a short explanation (e.g., "Regex match on 92% of rows" or "Length variance too high").
+
+### Filters that guide DQ design
+- Toggle filters for **High null %**, **Unique candidates**, **Low cardinality**, and **Whitespace risk** to find columns that deserve specific checks.
+- Use semantic tag filters (Identifiers, Financial, Instrument, Geo, Contact) to focus on IBAN/ISIN/email style fields when planning format, uniqueness, or reference validations.
+- Combine the insights to decide which fields need **uniqueness**, **null bounds**, **pattern** or **distribution** checks inside the Configurations editor.
+
+### Performance & accuracy notes
+- Sampling defaults to the recommended percentage (typically 10%) based on table size. Set the input to **0** for a full scan when accuracy matters more than speed.
+- Distinct counts switch to Snowflake `APPROX_COUNT_DISTINCT` automatically when the profiler touches large row volumes, trading tiny error (<1%) for faster feedback.
+- The summary banner reports rows profiled, sampling choice, and runtime so you can judge cost before rerunning.
+
+### Persisting and using results
+- Enable **💾 Save Profile** (once a Snowflake session and metadata targets are configured) to store the run in metadata for auditing or to compare over time.
+- Click **✨ Suggest DQ Config** after a run to pre-fill the configuration editor with recommended column checks based on the discovered metrics, speeding up the creation of a new monitoring setup.
+            """
+        )
 
     with tabs[2]:
         st.subheader("Snowflake Data Quality Framework (DMF) usage")
