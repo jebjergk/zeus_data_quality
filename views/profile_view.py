@@ -9,7 +9,7 @@ import pandas as pd
 import streamlit as st
 
 from services.profile import build_profile_suggestion
-from services.profiling import run_table_profile, save_profile_results
+from services.profiling import normalize_profile_row, run_table_profile, save_profile_results
 from utils.meta import get_table_row_count
 from views.table_picker import session_cache_token, stateless_table_picker
 
@@ -35,6 +35,32 @@ class ColumnProfile:
     semantic_type: Optional[str] = None
     confidence: Optional[float] = None
     rationale: Optional[str] = None
+
+
+def _column_profile_from_payload(column: Dict[str, Any]) -> ColumnProfile:
+    normalized = normalize_profile_row(column)
+    top_values = normalized.get("top_values") or []
+    if isinstance(top_values, list):
+        top_values_list = [dict(entry) for entry in top_values if isinstance(entry, dict)]
+    else:
+        top_values_list = []
+    return ColumnProfile(
+        name=str(normalized.get("column_name") or normalized.get("name") or ""),
+        data_type=str(normalized.get("data_type") or ""),
+        nulls=normalized.get("nulls"),
+        null_pct=normalized.get("null_pct"),
+        distincts=normalized.get("distincts"),
+        distinct_pct=normalized.get("distinct_pct"),
+        min_val=normalized.get("min_val"),
+        max_val=normalized.get("max_val"),
+        avg_len=normalized.get("avg_len"),
+        whitespace_pct=normalized.get("whitespace_pct"),
+        top_values=top_values_list,
+        error=normalized.get("error"),
+        semantic_type=normalized.get("semantic_type"),
+        confidence=normalized.get("confidence"),
+        rationale=normalized.get("rationale"),
+    )
 
 
 def _split_fqn(fqn: str) -> Tuple[Optional[str], Optional[str], Optional[str]]:
@@ -329,26 +355,11 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
                 duration = time.time() - start
                 rows_profiled = int(summary_raw.get("rows_profiled") or 0)
                 profiles: List[ColumnProfile] = []
+                columns_payload: List[Dict[str, Any]] = []
                 for column in column_rows:
-                    profiles.append(
-                        ColumnProfile(
-                            name=str(column.get("column_name") or column.get("name") or ""),
-                            data_type=str(column.get("data_type") or ""),
-                            nulls=column.get("nulls"),
-                            null_pct=column.get("null_pct"),
-                            distincts=column.get("distincts"),
-                            distinct_pct=column.get("distinct_pct"),
-                            min_val=column.get("min_val"),
-                            max_val=column.get("max_val"),
-                            avg_len=column.get("avg_len"),
-                            whitespace_pct=column.get("whitespace_pct"),
-                            top_values=column.get("top_values") or [],
-                            error=column.get("error"),
-                            semantic_type=column.get("semantic_type"),
-                            confidence=column.get("confidence"),
-                            rationale=column.get("rationale"),
-                        )
-                    )
+                    normalized_column = normalize_profile_row(column)
+                    columns_payload.append(normalized_column)
+                    profiles.append(_column_profile_from_payload(normalized_column))
                 profile_result = {
                     "target_table": selected_fqn,
                     "summary": {
@@ -357,7 +368,7 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
                         "duration_sec": duration,
                         "columns": len(profiles),
                     },
-                    "columns": [profile.__dict__ for profile in profiles],
+                    "columns": columns_payload,
                     "top_n": int(top_n),
                 }
                 st.session_state["profile_results"] = profile_result
@@ -404,7 +415,7 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
         )
 
     profiles_raw = profile_result.get("columns", [])
-    profiles = [ColumnProfile(**col) for col in profiles_raw]
+    profiles = [_column_profile_from_payload(col) for col in profiles_raw]
     df = _profiles_to_frame(profiles)
 
     filter_box = st.container()
@@ -456,10 +467,11 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
         )
         rows_payload: List[Dict[str, Any]] = []
         for column_profile in profile_result.get("columns", []):
-            column_name = column_profile.get("column_name") or column_profile.get("name")
+            normalized_column = normalize_profile_row(column_profile)
+            column_name = normalized_column.get("column_name")
             if not column_name:
                 continue
-            rows_payload.append({**column_profile, "column_name": column_name})
+            rows_payload.append(normalized_column)
 
         try:
             run_id = save_profile_results(

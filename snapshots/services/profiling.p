@@ -16,6 +16,7 @@ __all__ = [
     "run_table_profile",
     "suggest_checks_from_profile",
     "save_profile_results",
+    "normalize_profile_row",
 ]
 
 
@@ -503,6 +504,31 @@ def _infer_semantic_type(column_entry: Dict[str, Any]) -> Tuple[str, float, str]
     rationale = "; ".join(explanations[:3])
 
     return best_type, confidence, rationale
+
+
+def normalize_profile_row(row: Dict[str, Any]) -> Dict[str, Any]:
+    """Return a normalized copy of a per-column profile row."""
+
+    payload = dict(row or {})
+    name_value = payload.get("column_name") or payload.get("name") or ""
+    name_text = str(name_value)
+    payload["column_name"] = name_text
+    payload["name"] = name_text
+    payload["data_type"] = str(payload.get("data_type") or "")
+
+    top_values_raw = payload.get("top_values") or []
+    if isinstance(top_values_raw, list):
+        normalized_top_values: List[Dict[str, Any]] = []
+        for entry in top_values_raw:
+            if isinstance(entry, dict):
+                normalized_top_values.append(dict(entry))
+            else:
+                normalized_top_values.append({"value": entry})
+        payload["top_values"] = normalized_top_values
+    else:
+        payload["top_values"] = []
+
+    return payload
 
 
 def list_columns(session, db: str, schema: str, table: str) -> List[Dict[str, Any]]:
@@ -1161,15 +1187,33 @@ def save_profile_results(
     ).collect()
 
     for row_data in rows:
-        column_name = row_data.get("column_name") or row_data.get("name")
+        normalized_row = normalize_profile_row(row_data)
+        column_name = normalized_row.get("column_name")
         if not column_name:
             continue
-        serialized = json.dumps({**row_data, "column_name": column_name})
-        semantic_type = row_data.get("semantic_type")
-        confidence_raw = row_data.get("confidence")
-        rationale = row_data.get("rationale")
-        signals_value = row_data.get("signals")
-        suggested_checks_value = row_data.get("suggested_checks")
+        serialized = json.dumps(normalized_row)
+        semantic_type = normalized_row.get("semantic_type")
+        confidence_raw = normalized_row.get("confidence")
+        rationale = normalized_row.get("rationale")
+        signals_value = normalized_row.get("signals")
+        suggested_checks_value = normalized_row.get("suggested_checks")
+
+        if (
+            semantic_type is None
+            or confidence_raw is None
+            or (isinstance(rationale, str) and not rationale.strip())
+        ):
+            try:
+                inferred_type, inferred_conf, inferred_rationale = _infer_semantic_type(normalized_row)
+            except Exception:
+                inferred_type = inferred_conf = inferred_rationale = None
+            else:
+                if semantic_type is None:
+                    semantic_type = inferred_type
+                if confidence_raw is None:
+                    confidence_raw = inferred_conf
+                if (isinstance(rationale, str) and not rationale.strip()) or rationale is None:
+                    rationale = inferred_rationale
 
         try:
             confidence = float(confidence_raw) if confidence_raw is not None else None
