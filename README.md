@@ -13,6 +13,11 @@ Interim data quality solution for Zeus until a governance-native alternative is 
 
 ## Technical overview
 
+> **Platform & Tools used**
+> - Design iterations pair **ChatGPT (GPT-5 Thinking)** with the **Codex execution container** for controlled code changes.
+> - **GitHub Actions** orchestrate CI and mirror repository sources into Snowflake-friendly `.p` snapshots.
+> - This toolchain balances rapid delivery with auditable, reproducible change management.
+
 ### Architecture
 - **Streamlit-in-Snowflake (SiS)** hosts the primary UI (`streamlit_app.py`). The app runs with the current Snowflake session context and never issues `USE` statements; role, warehouse, and database selection stay inherited from Snowsight.
 - **Snowpark** powers data processing inside stored procedures and Dynamic Table Function (DMF) evaluations. Snowpark sessions are bound to the Streamlit session’s context and respect the `EXECUTE AS CALLER` pattern to avoid privilege elevation surprises.
