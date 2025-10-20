@@ -58,19 +58,37 @@ def render_docs(
         st.subheader("User Guide")
         st.markdown(
             """
-**What you can do**
-1. **Create/Edit Configs**: pick a table, choose columns, enable checks.
-2. **Save & Apply**: attaches failing-row views (DMF) and creates a daily task (08:00 Europe/Berlin).
-3. **Run Now**: ad-hoc evaluate all checks; results appear on **Monitor**.
-4. **Monitor**: filter, trend, inspect failures and anomalies.
+### What this app does
+- **Purpose**: Keeps critical tables under watch so data issues are caught before they reach reporting.
+- **Audience**: Data owners, analysts, and ops leads who need a quick health summary without writing SQL.
 
-**Checks**
-- **Column**: UNIQUE, NULL_COUNT, MIN_MAX, WHITESPACE, FORMAT_DISTRIBUTION, VALUE_DISTRIBUTION
-- **Table** (always included): FRESHNESS, ROW_COUNT_ANOMALY
+### Create a configuration
+1. **Select a source** – choose the database, schema, and table you care about.
+2. **Name the setup** – give the configuration a business-friendly name so others recognise it.
+3. **Pick columns** – for each column decide which checks should guard it.
+4. **Review table-level options** – confirm the timestamp used for freshness and volume tracking.
+5. **Save & Apply** – the app stores the rules and schedules the daily run (08:00 Europe/Berlin by default).
 
-**Tips**
-- Use a stable timestamp column (e.g., `LOAD_TIMESTAMP`) for table checks.
-- Start with sensitivity=3.0; adjust if you see false positives.
+### Checks in plain language
+- **Uniqueness**: Flags duplicate values where every row should be distinct (for example, order IDs).
+- **Null Count**: Watches how many blanks appear so missing information is caught quickly.
+- **Minimum / Maximum**: Ensures numbers stay within an acceptable range, highlighting outliers.
+- **Whitespace**: Spots accidental leading or trailing spaces that can break joins or filters.
+- **Format Distribution**: Monitors standard patterns such as IBAN, ISIN, or email formats and alerts when the mix changes.
+- **Value Distribution**: Tracks the share of categories (e.g., product types) and calls out unusual shifts.
+- **Freshness**: Confirms new records keep arriving on time based on the chosen timestamp column.
+- **Row Count Anomaly**: Detects sudden spikes or drops in total rows compared with recent history.
+- **Aggregate (AGG) Checks**: Custom business rules that summarise data (for example, totals or ratios) to confirm aggregated results still look right.
+
+### Run & monitor results
+- **Run Now** triggers an immediate evaluation when you want to double-check a change.
+- **Daily task** executes automatically using the saved schedule so you get continuous coverage.
+- **Results** appear on the Monitor page where you can filter by table, check type, or status and download issue details.
+
+### Troubleshooting basics
+- **Warehouse**: Make sure the designated compute warehouse is running and has capacity.
+- **Role**: Use the business role granted access to the monitored tables and metadata schema.
+- **Procedure**: If runs fail, review the latest procedure message in the Monitor tab or rerun the stored procedure from Snowflake with the configuration name.
             """
         )
 
