@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import math
+import random
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 from uuid import uuid4
 
@@ -170,7 +171,16 @@ def run_table_profile(
         if pct <= 0 or math.isclose(pct, 100.0, abs_tol=1e-6):
             pct = None
 
-    sample_clause = "" if pct is None else f" SAMPLE BERNOULLI({pct})"
+    sample_seed: Optional[int] = None
+    if pct is not None:
+        # Use a deterministic seed across all queries in this profiling run so that
+        # row counts and per-column metrics reference the same sampled subset.
+        sample_seed = random.randrange(0, 2**31)
+
+    sample_clause = ""
+    if pct is not None:
+        seed_clause = f" SEED ({sample_seed})" if sample_seed is not None else ""
+        sample_clause = f" SAMPLE BERNOULLI({pct}){seed_clause}"
 
     table_ref = f"{_q(db)}.{_q(schema)}.{_q(table)}"
     sampled_ref = table_ref + sample_clause
