@@ -1,5 +1,4 @@
 from __future__ import annotations
-
 import math
 import time
 from dataclasses import dataclass
@@ -11,7 +10,8 @@ import streamlit as st
 
 from services.profile import build_profile_suggestion
 from services.profiling import run_table_profile, save_profile_results
-from views.table_picker import stateless_table_picker
+from utils.meta import get_table_row_count
+from views.table_picker import session_cache_token, stateless_table_picker
 
 
 FULL_SCAN_WARNING_THRESHOLD = 1_000_000
@@ -32,6 +32,66 @@ class ColumnProfile:
     whitespace_pct: Optional[float]
     top_values: List[Dict[str, Any]]
     error: Optional[str] = None
+
+
+def _split_fqn(fqn: str) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+    if not fqn:
+        return None, None, None
+    parts = [p.strip('"') for p in fqn.split(".") if p]
+    if len(parts) != 3:
+        return None, None, None
+    return parts[0], parts[1], parts[2]
+
+
+def _recommend_sample_pct(row_count: Optional[int]) -> Tuple[float, str]:
+    if row_count is None:
+        return 10.0, (
+            "Defaulting to a 10% sample because row count metadata was unavailable. "
+            "Sampling avoids scanning the full table by default."
+        )
+
+    if row_count <= 100_000:
+        return 0.0, (
+            "Full scan recommended because the table has 100k rows or fewer. "
+            "Scanning all rows keeps runtime low while ensuring precise metrics."
+        )
+
+    if row_count <= 1_000_000:
+        return 10.0, (
+            "Sampling 10% keeps the scan under roughly 100k rows while providing representative metrics."
+        )
+
+    if row_count <= 10_000_000:
+        return 5.0, (
+            "Sampling 5% targets at most about 500k rows to balance coverage and cost."
+        )
+
+    if row_count <= 100_000_000:
+        return 1.0, (
+            "Sampling 1% limits the profile to around one million rows on large tables."
+        )
+
+    return 0.5, (
+        "Sampling 0.5% keeps the profile under roughly 500k rows even on very large tables."
+    )
+
+
+def _load_table_row_count(session_obj, fqn: str) -> Optional[int]:
+    if not session_obj or not fqn:
+        return None
+
+    @st.cache_data(ttl=600, show_spinner=False)
+    def _load_row_count(cache_key: Tuple[str, str]) -> Optional[int]:
+        _, fqn_key = cache_key
+        db, schema, table = _split_fqn(fqn_key)
+        if not (db and schema and table):
+            return None
+        try:
+            return get_table_row_count(session_obj, db, schema, table)
+        except Exception:
+            return None
+
+    return _load_row_count((session_cache_token(session_obj), fqn))
 
 
 def _table_picker(session_obj, preselect_fqn: Optional[str]):
@@ -90,14 +150,46 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
 
     st.divider()
     controls = st.columns(3)
+    suggested_pct = 10.0
+    row_count: Optional[int] = None
+    selected_reason = (
+        "Defaulting to a 10% sample. Enter 0 for a full table scan."
+    )
+    if selected_fqn:
+        row_count = _load_table_row_count(session, selected_fqn)
+        suggested_pct, selected_reason = _recommend_sample_pct(row_count)
+
+    sample_pct_state_key = "profile_sample_pct"
+    sample_target_key = "profile_sample_target"
+    if st.session_state.get(sample_target_key) != selected_fqn:
+        st.session_state[sample_target_key] = selected_fqn
+        st.session_state[sample_pct_state_key] = float(suggested_pct)
+    elif sample_pct_state_key not in st.session_state:
+        st.session_state[sample_pct_state_key] = float(suggested_pct)
+
+    approx_rows = None
+    if row_count is not None and suggested_pct > 0:
+        approx_rows = int(round(row_count * suggested_pct / 100.0))
+
+    reason_parts = [selected_reason]
+    if row_count is not None:
+        reason_parts.append(f"Table metadata reports approximately {row_count:,} rows.")
+    if approx_rows:
+        reason_parts.append(f"This sample size profiles about {approx_rows:,} rows.")
+    reason_parts.append(
+        "The suggested value relies on Snowflake metadata only, so it doesn't trigger an extra table scan."
+    )
+    reason_parts.append("Enter 0 for a full table scan.")
+    sample_help_text = "\n".join(reason_parts)
+
     with controls[0]:
         sample_pct_input = st.number_input(
             "Sample %",
             min_value=0.0,
             max_value=100.0,
-            value=10.0,
             step=1.0,
-            help="Enter 0 for a full table scan.",
+            help=sample_help_text,
+            key=sample_pct_state_key,
         )
         sample_pct = None if math.isclose(sample_pct_input, 0.0, abs_tol=1e-6) else sample_pct_input
     with controls[1]:
