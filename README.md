@@ -2,6 +2,15 @@
 
 Interim data quality solution for Zeus until a governance-native alternative is available.
 
+## Version history
+
+| Version | Highlights |
+|---------|------------|
+| v1.3    | Added profiling feature and support for guessed content recommendations. |
+| v1.2    | Incremental usability and stability refinements. |
+| v1.1    | Streamlined configuration flows and scheduling defaults. |
+| v1.0    | Base application release. |
+
 ## Technical overview
 
 ### Architecture
