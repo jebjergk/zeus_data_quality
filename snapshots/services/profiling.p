@@ -212,11 +212,297 @@ def _derive_name_hints(column_name: str) -> Dict[str, bool]:
         "country": {"country", "nation"},
         "currency": {"currency", "ccy"},
         "exchange": {"exchange", "venue", "market"},
+        "account": {"account", "acct"},
+        "order": {"order"},
+        "trade": {"trade"},
+        "ticker": {"ticker", "symbol"},
+        "status": {"status", "state"},
+        "enum": {"type", "class", "category"},
+        "amount": {"amount", "amt", "value"},
+        "price": {"price", "rate"},
+        "quantity": {"qty", "quantity", "volume"},
+        "timestamp": {"timestamp", "datetime", "created", "updated"},
+        "boolean": {"flag"},
     }
     hints: Dict[str, bool] = {}
     for key, keywords in tokens.items():
         hints[key] = any(token in lowered for token in keywords)
+    hints["boolean"] = hints.get("boolean", False) or lowered.startswith("is_") or lowered.startswith("has_")
+    hints["id"] = "id" in lowered or lowered.endswith("_id")
     return hints
+
+
+SEMANTIC_TYPE_CANDIDATES: Tuple[str, ...] = (
+    "EMAIL",
+    "IBAN",
+    "ISIN",
+    "BIC",
+    "ACCOUNT_ID",
+    "ORDER_ID",
+    "TRADE_ID",
+    "TICKER/SYMBOL",
+    "CURRENCY_CODE",
+    "COUNTRY_CODE/NAME",
+    "PRICE/AMOUNT/QUANTITY",
+    "ENUM/STATUS",
+    "BOOLEAN",
+    "TIMESTAMP/DATE",
+    "UUID",
+    "URL",
+    "PHONE",
+)
+
+
+BOOLEAN_TRUE_VALUES = {"1", "Y", "YES", "TRUE", "T"}
+BOOLEAN_FALSE_VALUES = {"0", "N", "NO", "FALSE", "F"}
+
+
+def _is_boolean_type(data_type: str) -> bool:
+    upper = (data_type or "").upper()
+    return "BOOL" in upper or "BOOLEAN" in upper
+
+
+def _infer_semantic_type(column_entry: Dict[str, Any]) -> Tuple[str, float, str]:
+    signals = column_entry.get("signals", {}) or {}
+    regex = signals.get("regex", {}) or {}
+    char_classes = signals.get("character_classes", {}) or {}
+    references = signals.get("reference_matches", {}) or {}
+    hints = signals.get("hints", {}) or {}
+    length = signals.get("length", {}) or {}
+
+    def _as_float(value: Any) -> Optional[float]:
+        try:
+            if value is None:
+                return None
+            return float(value)
+        except Exception:
+            return None
+
+    length_min = _as_float(length.get("min"))
+    length_max = _as_float(length.get("max"))
+    length_avg = _as_float(length.get("avg"))
+
+    distinct_pct_raw = column_entry.get("distinct_pct")
+    distinct_pct = float(distinct_pct_raw) if distinct_pct_raw is not None else None
+    null_pct = float(column_entry.get("null_pct") or 0.0)
+    data_type = column_entry.get("data_type") or ""
+    top_values = column_entry.get("top_values") or []
+    distincts = column_entry.get("distincts")
+    non_nulls = int(column_entry.get("non_nulls") or 0)
+    rows_profiled = int(column_entry.get("rows_profiled") or 0)
+
+    def _ratio(mapping: Dict[str, Any], key: str) -> float:
+        value = mapping.get(key)
+        try:
+            return float(value)
+        except Exception:
+            return 0.0
+
+    def _boost(target: str, amount: float, reason: Optional[str] = None) -> None:
+        if amount <= 0:
+            return
+        scores[target] = scores.get(target, 0.0) + amount
+        if reason:
+            rationales.setdefault(target, []).append(reason)
+
+    scores: Dict[str, float] = {candidate: 0.0 for candidate in SEMANTIC_TYPE_CANDIDATES}
+    rationales: Dict[str, List[str]] = {candidate: [] for candidate in SEMANTIC_TYPE_CANDIDATES}
+
+    email_ratio = _ratio(regex, "email")
+    if email_ratio > 0:
+        _boost("EMAIL", 85.0 * min(email_ratio, 1.0), f"{email_ratio:.0%} values match email format")
+    if hints.get("email"):
+        _boost("EMAIL", 20.0, "column name references email")
+
+    iban_ratio = _ratio(regex, "iban")
+    if iban_ratio > 0:
+        _boost("IBAN", 90.0 * min(iban_ratio, 1.0), f"{iban_ratio:.0%} values look like IBANs")
+    if hints.get("iban"):
+        _boost("IBAN", 20.0, "column name references IBAN")
+    if length_min is not None and length_max is not None and 15 <= length_min <= 34 and length_max <= 34:
+        _boost("IBAN", 10.0, "length range matches IBAN expectation")
+
+    isin_ratio = _ratio(regex, "isin")
+    if isin_ratio > 0:
+        _boost("ISIN", 88.0 * min(isin_ratio, 1.0), f"{isin_ratio:.0%} values match ISIN structure")
+    if hints.get("isin"):
+        _boost("ISIN", 18.0, "column name references ISIN")
+    if length_min is not None and length_max is not None and abs(length_min - 12.0) <= 1 and abs(length_max - 12.0) <= 1:
+        _boost("ISIN", 8.0, "length aligns with ISIN standard")
+
+    bic_ratio = _ratio(regex, "bic")
+    if bic_ratio > 0:
+        _boost("BIC", 80.0 * min(bic_ratio, 1.0), f"{bic_ratio:.0%} values match BIC/SWIFT format")
+    if hints.get("bic"):
+        _boost("BIC", 18.0, "column name references BIC/SWIFT")
+    if length_min is not None and length_max is not None and 8 <= length_min <= length_max <= 11:
+        _boost("BIC", 6.0, "length aligns with BIC expectation")
+
+    uuid_ratio = _ratio(regex, "uuid")
+    if uuid_ratio > 0:
+        _boost("UUID", 85.0 * min(uuid_ratio, 1.0), f"{uuid_ratio:.0%} values match UUID format")
+
+    url_ratio = _ratio(regex, "url")
+    if url_ratio > 0:
+        _boost("URL", 75.0 * min(url_ratio, 1.0), f"{url_ratio:.0%} values look like URLs")
+    if hints.get("url"):
+        _boost("URL", 15.0, "column name references URL/URI")
+
+    phone_ratio = _ratio(regex, "phone_e164")
+    if phone_ratio > 0:
+        _boost("PHONE", 70.0 * min(phone_ratio, 1.0), f"{phone_ratio:.0%} values match phone pattern")
+    if hints.get("phone"):
+        _boost("PHONE", 12.0, "column name references phone")
+
+    currency_ref = _ratio(references, "reference_currency_code")
+    if currency_ref > 0:
+        _boost("CURRENCY_CODE", 90.0 * min(currency_ref, 1.0), f"{currency_ref:.0%} values match known currency codes")
+    if hints.get("currency"):
+        _boost("CURRENCY_CODE", 20.0, "column name references currency")
+    if length_min is not None and length_max is not None and 2 <= length_min <= 3 <= length_max <= 4:
+        _boost("CURRENCY_CODE", 6.0, "length compatible with currency codes")
+
+    country_code_ref = _ratio(references, "reference_country_code")
+    if country_code_ref > 0:
+        _boost("COUNTRY_CODE/NAME", 80.0 * min(country_code_ref, 1.0), f"{country_code_ref:.0%} values match ISO country codes")
+    country_name_ref = _ratio(references, "reference_country_name")
+    if country_name_ref > 0:
+        _boost("COUNTRY_CODE/NAME", 70.0 * min(country_name_ref, 1.0), f"{country_name_ref:.0%} values match known country names")
+    if hints.get("country"):
+        _boost("COUNTRY_CODE/NAME", 15.0, "column name references country")
+
+    exchange_ref = _ratio(references, "reference_exchange_code")
+    if exchange_ref > 0:
+        _boost("TICKER/SYMBOL", 40.0 * min(exchange_ref, 1.0), "values overlap with known exchange codes")
+
+    char_alpha = _ratio(char_classes, "alpha")
+    char_digit = _ratio(char_classes, "digit")
+    char_alnum = _ratio(char_classes, "alnum")
+
+    uppercase_matches = 0
+    total_matches = 0
+    boolean_candidates: Set[str] = set()
+    for entry in top_values:
+        value = entry.get("value")
+        if value is None:
+            continue
+        text = str(value).strip()
+        count = entry.get("count") or 0
+        try:
+            count_int = int(count)
+        except Exception:
+            count_int = 0
+        if count_int <= 0:
+            count_int = 1
+        if text:
+            total_matches += count_int
+            if text.upper() == text and any(c.isalpha() for c in text):
+                uppercase_matches += count_int
+            boolean_candidates.add(text.upper())
+
+    uppercase_ratio = (float(uppercase_matches) / float(total_matches)) if total_matches else 0.0
+
+    if hints.get("ticker"):
+        _boost("TICKER/SYMBOL", 30.0, "column name references ticker/symbol")
+    if uppercase_ratio >= 0.6 and (length_max is None or length_max <= 6):
+        _boost("TICKER/SYMBOL", 45.0 * uppercase_ratio, "top values predominantly uppercase and short")
+    if char_alpha >= 0.6 and (length_avg is None or length_avg <= 6.5):
+        _boost("TICKER/SYMBOL", 10.0, "values mainly alphabetic with short length")
+    if distinct_pct is not None and distinct_pct >= 60.0:
+        _boost("TICKER/SYMBOL", 6.0, "high uniqueness typical for tickers")
+
+    if _is_numeric(data_type):
+        _boost("PRICE/AMOUNT/QUANTITY", 45.0, "numeric data type")
+    if hints.get("amount") or hints.get("price") or hints.get("quantity"):
+        _boost("PRICE/AMOUNT/QUANTITY", 35.0, "column name references financial amounts")
+    if char_digit >= 0.8 and length_avg is not None and length_avg >= 3.0:
+        _boost("PRICE/AMOUNT/QUANTITY", 8.0, "values primarily numeric")
+
+    if hints.get("status") or hints.get("enum"):
+        _boost("ENUM/STATUS", 30.0, "column name references status/type")
+    if distincts is not None and distincts <= 20 and non_nulls:
+        coverage = float(sum(int((entry.get("count") or 0)) for entry in top_values)) / float(non_nulls) if non_nulls else 0.0
+        if distinct_pct is not None and distinct_pct <= 40.0:
+            _boost("ENUM/STATUS", 25.0, "low cardinality suggests enum")
+        if coverage >= 0.8:
+            _boost("ENUM/STATUS", 10.0, "few values cover majority of rows")
+
+    if _is_boolean_type(data_type):
+        _boost("BOOLEAN", 85.0, "boolean data type")
+    if boolean_candidates and boolean_candidates <= (BOOLEAN_TRUE_VALUES | BOOLEAN_FALSE_VALUES):
+        _boost("BOOLEAN", 50.0, "values align with boolean vocabulary")
+    if hints.get("boolean"):
+        _boost("BOOLEAN", 12.0, "column name suggests boolean flag")
+
+    if _is_temporal(data_type):
+        _boost("TIMESTAMP/DATE", 90.0, "temporal data type")
+    if hints.get("timestamp"):
+        _boost("TIMESTAMP/DATE", 15.0, "column name references time/date")
+
+    if hints.get("order"):
+        _boost("ORDER_ID", 35.0, "column name references order")
+    if hints.get("trade"):
+        _boost("TRADE_ID", 35.0, "column name references trade")
+    if hints.get("account"):
+        _boost("ACCOUNT_ID", 35.0, "column name references account")
+    if hints.get("id"):
+        _boost("ACCOUNT_ID", 8.0, "generic identifier naming")
+        _boost("ORDER_ID", 8.0)
+        _boost("TRADE_ID", 8.0)
+
+    if distinct_pct is not None and distinct_pct >= 70.0:
+        _boost("ACCOUNT_ID", 12.0, "high uniqueness typical for identifiers")
+        _boost("ORDER_ID", 12.0)
+        _boost("TRADE_ID", 12.0)
+
+    if char_alnum >= 0.5 and length_avg is not None and length_avg >= 6.0:
+        _boost("ACCOUNT_ID", 8.0, "alphanumeric mix resembles identifiers")
+        if hints.get("order"):
+            _boost("ORDER_ID", 5.0)
+        if hints.get("trade"):
+            _boost("TRADE_ID", 5.0)
+
+    if non_nulls and rows_profiled and (non_nulls / rows_profiled) < 0.5:
+        reduction = 1.0 - ((non_nulls / rows_profiled) * 0.5)
+        for key in scores:
+            scores[key] *= max(0.0, 1.0 - reduction)
+            if reduction > 0.0:
+                rationales.setdefault(key, [])
+
+    best_type = max(scores, key=scores.get)
+    best_score = scores.get(best_type, 0.0)
+
+    if best_score <= 0.0:
+        if _is_temporal(data_type):
+            best_type = "TIMESTAMP/DATE"
+            best_score = 20.0
+            rationales.setdefault(best_type, []).append("temporal data type without stronger signal")
+        elif _is_numeric(data_type):
+            best_type = "PRICE/AMOUNT/QUANTITY"
+            best_score = 15.0
+            rationales.setdefault(best_type, []).append("numeric column with no specific pattern match")
+        elif _is_boolean_type(data_type):
+            best_type = "BOOLEAN"
+            best_score = 15.0
+            rationales.setdefault(best_type, []).append("boolean-like column by data type")
+        else:
+            best_type = "ACCOUNT_ID"
+            best_score = 10.0
+            rationales.setdefault(best_type, []).append("defaulting to generic identifier due to lack of stronger signals")
+
+    confidence = min(1.0, max(best_score, 0.0) / 100.0)
+    confidence = round(confidence, 3)
+
+    explanations = rationales.get(best_type, [])
+    if not explanations:
+        if null_pct >= 50.0:
+            explanations = ["limited matches because column is mostly null"]
+        else:
+            explanations = ["limited heuristic support but selected best available type"]
+
+    rationale = "; ".join(explanations[:3])
+
+    return best_type, confidence, rationale
 
 
 def list_columns(session, db: str, schema: str, table: str) -> List[Dict[str, Any]]:
@@ -625,6 +911,11 @@ def run_table_profile(
             column_entry[f"signal_hint_{key}"] = bool(value)
 
         column_entry["signals"] = signals
+
+        semantic_type, confidence, rationale = _infer_semantic_type(column_entry)
+        column_entry["semantic_type"] = semantic_type
+        column_entry["confidence"] = confidence
+        column_entry["rationale"] = rationale
 
         per_column.append(column_entry)
 
