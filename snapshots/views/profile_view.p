@@ -516,11 +516,19 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
         filtered_df = filtered_df[filtered_df["semantic_type"].isin(allowed_types)]
     display_df = filtered_df.drop(columns=["top_values"], errors="ignore").copy()
     if not display_df.empty:
-        display_df["Confidence"] = display_df["confidence"].apply(lambda val: float(val) if val is not None else None)
-        display_df["Confidence Badge"] = display_df["confidence"].apply(_confidence_badge_label)
+        if "confidence" in display_df.columns:
+            display_df["Confidence"] = display_df["confidence"].apply(
+                lambda val: float(val) if val is not None else None
+            )
+            display_df["Confidence Badge"] = display_df["confidence"].apply(_confidence_badge_label)
+            display_df = display_df.drop(columns=["confidence"], errors="ignore")
+        else:
+            display_df["Confidence"] = None
+            display_df["Confidence Badge"] = "Unknown"
         rationale_series = filtered_df.get("rationale", pd.Series(dtype="object"))
-        display_df = display_df.drop(columns=["confidence"], errors="ignore")
         display_df = display_df.rename(columns={"semantic_type": "Guessed Type"})
+        if "Guessed Type" in display_df.columns:
+            display_df["Guessed Type"] = display_df["Guessed Type"].fillna("Unknown")
         ordered_columns = [
             "column_name",
             "data_type",
@@ -542,14 +550,18 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
             col for col in display_df.columns if col not in ordered_columns
         ]]
         tooltip_df = pd.DataFrame("", index=display_df.index, columns=display_df.columns)
-        tooltip_df["Confidence Badge"] = rationale_series.reindex(display_df.index).fillna("")
-        styler = (
-            display_df.style.format({"Confidence": _format_confidence})
-            .applymap(_badge_css, subset=["Confidence Badge"])
-            .set_tooltips(tooltip_df, css_class="confidence-tooltip")
-            .hide(axis="columns", subset=["rationale"])
-            .set_table_styles(_tooltip_styles(), overwrite=False)
-        )
+        if "Confidence Badge" in tooltip_df.columns:
+            tooltip_df["Confidence Badge"] = rationale_series.reindex(display_df.index).fillna("")
+        styler = display_df.style.format({"Confidence": _format_confidence})
+        if "Confidence Badge" in display_df.columns:
+            styler = styler.applymap(_badge_css, subset=["Confidence Badge"])
+        styler = styler.set_tooltips(tooltip_df, css_class="confidence-tooltip")
+        hide_columns: List[str] = []
+        if "rationale" in display_df.columns:
+            hide_columns.append("rationale")
+        if hide_columns:
+            styler = styler.hide(axis="columns", subset=hide_columns)
+        styler = styler.set_table_styles(_tooltip_styles(), overwrite=False)
         st.dataframe(styler, hide_index=True, use_container_width=True)
     else:
         st.dataframe(display_df, hide_index=True, use_container_width=True)

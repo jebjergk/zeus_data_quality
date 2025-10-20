@@ -1131,10 +1131,26 @@ def save_profile_results(
             RUN_ID STRING,
             COLUMN_NAME STRING,
             PROFILE VARIANT,
+            SEMANTIC_TYPE STRING,
+            CONFIDENCE FLOAT,
+            RATIONALE STRING,
+            SIGNALS VARIANT,
+            SUGGESTED_CHECKS VARIANT,
             PRIMARY KEY (RUN_ID, COLUMN_NAME)
         )
         """
     ).collect()
+
+    for column_name, column_type in (
+        ("SEMANTIC_TYPE", "STRING"),
+        ("CONFIDENCE", "FLOAT"),
+        ("RATIONALE", "STRING"),
+        ("SIGNALS", "VARIANT"),
+        ("SUGGESTED_CHECKS", "VARIANT"),
+    ):
+        session.sql(
+            f"ALTER TABLE {cols_tbl} ADD COLUMN IF NOT EXISTS {column_name} {column_type}"
+        ).collect()
 
     session.sql(f"DELETE FROM {runs_tbl} WHERE RUN_ID = ?", params=[run_id]).collect()
     session.sql(f"DELETE FROM {cols_tbl} WHERE RUN_ID = ?", params=[run_id]).collect()
@@ -1149,9 +1165,52 @@ def save_profile_results(
         if not column_name:
             continue
         serialized = json.dumps({**row_data, "column_name": column_name})
+        semantic_type = row_data.get("semantic_type")
+        confidence_raw = row_data.get("confidence")
+        rationale = row_data.get("rationale")
+        signals_value = row_data.get("signals")
+        suggested_checks_value = row_data.get("suggested_checks")
+
+        try:
+            confidence = float(confidence_raw) if confidence_raw is not None else None
+        except Exception:
+            confidence = None
+
+        def _json_or_null(value: Any) -> str:
+            if value is None:
+                return "null"
+            try:
+                return json.dumps(value)
+            except Exception:
+                return "null"
+
+        signals_json = _json_or_null(signals_value)
+        suggested_checks_json = _json_or_null(suggested_checks_value)
+
         session.sql(
-            f"INSERT INTO {cols_tbl} (RUN_ID, COLUMN_NAME, PROFILE) SELECT ?, ?, PARSE_JSON(?)",
-            params=[run_id, column_name, serialized],
+            f"""
+            INSERT INTO {cols_tbl} (
+                RUN_ID,
+                COLUMN_NAME,
+                PROFILE,
+                SEMANTIC_TYPE,
+                CONFIDENCE,
+                RATIONALE,
+                SIGNALS,
+                SUGGESTED_CHECKS
+            )
+            SELECT ?, ?, PARSE_JSON(?), ?, ?, ?, PARSE_JSON(?), PARSE_JSON(?)
+            """,
+            params=[
+                run_id,
+                column_name,
+                serialized,
+                semantic_type,
+                confidence,
+                rationale,
+                signals_json,
+                suggested_checks_json,
+            ],
         ).collect()
 
     return str(run_id)
