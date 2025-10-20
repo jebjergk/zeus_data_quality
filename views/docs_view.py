@@ -35,7 +35,7 @@ def render_docs(
     run_results_table: str,
 ) -> None:
     """Render the documentation tabs for the Streamlit application."""
-    st.header("📘 Zeus Data Quality – Documentation")
+    st.header("Zeus Data Quality documentation")
 
     tabs = st.tabs(
         [
@@ -79,37 +79,39 @@ def render_docs(
         st.subheader("User Guide")
         st.markdown(
             """
-### What this app does
-- **Purpose**: Keeps critical tables under watch so data issues are caught before they reach reporting.
-- **Audience**: Data owners, analysts, and ops leads who need a quick health summary without writing SQL.
+#### What the app delivers
+- **Purpose**: Monitor critical Snowflake tables so issues surface before reporting deadlines.
+- **Audience**: Data owners, analysts, and operations leads who prefer guided workflows over ad-hoc SQL.
 
-### Create a configuration
-1. **Select a source** – choose the database, schema, and table you care about.
-2. **Name the setup** – give the configuration a business-friendly name so others recognise it.
-3. **Pick columns** – for each column decide which checks should guard it.
-4. **Review table-level options** – confirm the timestamp used for freshness and volume tracking.
-5. **Save & Apply** – the app stores the rules and schedules the daily run (08:00 Europe/Berlin by default).
+#### Create a configuration
+1. **Select a source** – choose the database, schema, and table to protect.
+2. **Name the setup** – use a business-friendly title so teams recognise the coverage.
+3. **Pick columns** – decide which checks apply to each column based on risk.
+4. **Review table options** – confirm the timestamp and warehouse before saving.
+5. **Save and apply** – the configuration is stored and the daily 08:00 (Europe/Berlin) task is scheduled.
 
-### Checks in plain language
-- **Uniqueness**: Flags duplicate values where every row should be distinct (for example, order IDs).
-- **Null Count**: Watches how many blanks appear so missing information is caught quickly.
-- **Minimum / Maximum**: Ensures numbers stay within an acceptable range, highlighting outliers.
-- **Whitespace**: Spots accidental leading or trailing spaces that can break joins or filters.
-- **Format Distribution**: Monitors standard patterns such as IBAN, ISIN, or email formats and alerts when the mix changes.
-- **Value Distribution**: Tracks the share of categories (e.g., product types) and calls out unusual shifts.
-- **Freshness**: Confirms new records keep arriving on time based on the chosen timestamp column.
-- **Row Count Anomaly**: Detects sudden spikes or drops in total rows compared with recent history.
-- **Aggregate (AGG) Checks**: Custom business rules that summarise data (for example, totals or ratios) to confirm aggregated results still look right.
+> **Tip:** Use **Save** to draft changes and **Save and apply** once the table is ready for monitoring.
 
-### Run & monitor results
-- **Run Now** triggers an immediate evaluation when you want to double-check a change.
-- **Daily task** executes automatically using the saved schedule so you get continuous coverage.
-- **Results** appear on the Monitor page where you can filter by table, check type, or status and download issue details.
+#### Checks in plain language
+- **Uniqueness** identifies duplicate business keys.
+- **Null count** tracks missing information.
+- **Minimum/maximum** keeps numeric ranges within agreed limits.
+- **Whitespace** flags leading or trailing spaces that break joins.
+- **Format distribution** watches identifier patterns such as IBAN, ISIN, or email.
+- **Value distribution** monitors the mix of categories and highlights unusual shifts.
+- **Freshness** confirms data arrives on time based on the chosen timestamp column.
+- **Row count anomaly** spots sudden volume changes relative to recent history.
+- **Aggregate checks** support custom totals or ratios when business validation requires them.
 
-### Troubleshooting basics
-- **Warehouse**: Make sure the designated compute warehouse is running and has capacity.
-- **Role**: Use the business role granted access to the monitored tables and metadata schema.
-- **Procedure**: If runs fail, review the latest procedure message in the Monitor tab or rerun the stored procedure from Snowflake with the configuration name.
+#### Run and monitor results
+- **Run now** performs an immediate evaluation for spot checks.
+- **Daily tasks** operate automatically once a schedule is enabled.
+- **Monitor** surfaces outcomes with filters by table, check type, or status; results can be downloaded for follow-up.
+
+#### Troubleshooting essentials
+- Verify the Snowflake warehouse is running and sized for the workload.
+- Confirm the active role has access to the source objects and metadata schema.
+- Review stored procedure messages in the Monitor tab or execute the procedure manually for detailed logs.
             """
         )
 
@@ -117,79 +119,73 @@ def render_docs(
         st.subheader("Profiling")
         st.markdown(
             """
-### Why profile first?
-Profiling runs lightweight column statistics so you understand shape, completeness, and content **before** locking a data quality policy. It highlights high-risk fields, confirms business keys, and surfaces unexpected formats that deserve a rule.
+#### Why profile first
+Profiling runs lightweight column statistics so you understand data shape and completeness before finalising monitoring rules. The output points to high-risk fields, validates business keys, and surfaces unexpected formats.
 
-### Metrics collected per column
-- **Null % / Null count** – identify missing data hotspots.
-- **Distinct % / Distinct count** – confirm uniqueness or spot categorical fields.
-- **Min / Max** – verify ranges for numbers and timestamps.
-- **Average length** – catch truncated strings or atypical ID lengths.
-- **Whitespace %** – flags leading/trailing spaces that break joins.
-- **Top values** – show the most common values (configurable Top N) to reveal dominant categories or odd outliers.
+#### Metrics collected per column
+- **Null percentage and count** highlight missing data hotspots.
+- **Distinct percentage and count** confirm uniqueness or signal categorical fields.
+- **Minimum and maximum** verify numeric and timestamp ranges.
+- **Average length** spots truncated strings or inconsistent identifiers.
+- **Whitespace percentage** exposes formatting issues that can break joins.
+- **Top values** display the most frequent categories or potential outliers.
 
-### Guessed content & confidence
-- Each column receives semantic badges such as **IBAN**, **ISIN**, **EMAIL**, **ACCOUNT_ID**, **ORDER_ID**, **PRICE**, **CURRENCY**, **COUNTRY**, **TIMESTAMP**, **ENUM**, and more depending on detected patterns.
-- Confidence badges are colour coded: **High** (green), **Medium** (amber), **Low** (grey), and **Unknown** (neutral) when the profiler has insufficient evidence.
-- Hover the *Confidence Rationale* tooltip in the grid for a short explanation (e.g., "Regex match on 92% of rows" or "Length variance too high").
+#### Semantic insights and confidence
+- Columns receive semantic suggestions such as IBAN, ISIN, email, account ID, country, or timestamp based on detected patterns.
+- Confidence levels appear as High, Medium, Low, or Unknown with colour coding in the grid.
+- Hover the **Confidence rationale** tooltip to see why a tag was chosen (for example, "Regex match on 92% of rows").
 
-### Filters that guide DQ design
-- Toggle filters for **High null %**, **Unique candidates**, **Low cardinality**, and **Whitespace risk** to find columns that deserve specific checks.
-- Use semantic tag filters (Identifiers, Financial, Instrument, Geo, Contact) to focus on IBAN/ISIN/email style fields when planning format, uniqueness, or reference validations.
-- Combine the insights to decide which fields need **uniqueness**, **null bounds**, **pattern** or **distribution** checks inside the Configurations editor.
+#### Filters that guide design
+- Apply filters for high null percentage, unique candidates, low cardinality, or whitespace risk to shortlist columns.
+- Use semantic tag filters (Identifiers, Financial, Instrument, Geography, Contact) to concentrate on sensitive fields.
+- Combine these insights to select uniqueness, null, pattern, or distribution checks inside the configuration editor.
 
-### Performance & accuracy notes
-- Sampling defaults to the recommended percentage (typically 10%) based on table size. Set the input to **0** for a full scan when accuracy matters more than speed.
-- Distinct counts switch to Snowflake `APPROX_COUNT_DISTINCT` automatically when the profiler touches large row volumes, trading tiny error (<1%) for faster feedback.
+#### Performance and accuracy notes
+- Sampling defaults to a recommended percentage based on table size; set the value to `0` when a full scan is required.
+- Large tables automatically switch distinct counts to `APPROX_COUNT_DISTINCT`, balancing accuracy (within ~1%) and speed.
 - The summary banner reports rows profiled, sampling choice, and runtime so you can judge cost before rerunning.
 
-### Persisting and using results
-- Enable **💾 Save Profile** (once a Snowflake session and metadata targets are configured) to store the run in metadata for auditing or to compare over time.
-- Click **✨ Suggest DQ Config** after a run to pre-fill the configuration editor with recommended column checks based on the discovered metrics, speeding up the creation of a new monitoring setup.
+#### Persisting and reusing results
+- Enable **Save profile** once metadata targets are configured to store runs for auditing or historical comparison.
+- Use **Suggest DQ config** after profiling to pre-populate the configuration editor with recommended checks.
             """
         )
 
     with tabs[2]:
-        st.subheader("Snowflake-native DQ Framework narrative")
+        st.subheader("Snowflake-native data quality framework")
         st.markdown(
             f"""
 ### Data Monitoring Framework (DMF) checks
-* **Purpose**: Every row-level rule becomes a Data Monitoring Framework (DMF) check that Snowflake can execute in-database.
-* **Failing-row views**: For each active check we create `DQ_<CONFIG_ID>_<CHECK_ID>_FAILS` inside `{_safe_quote(metadata_db)}.{_safe_quote(metadata_schema)}`.
-  * View body: `SELECT * FROM <source> WHERE NOT (<rule_predicate>)` so investigators can explore bad rows without copying data.
-  * **Safety**: Names are generated from UUID-style identifiers to avoid collisions, and views are created with `CREATE OR REPLACE` to prevent residual state.
-* **Attach / detach lifecycle**:
-  * On **Save & Apply**, DMF checks are created or refreshed and granted to the application role as needed.
-  * On delete or when a config detaches from a table, the app drops only the unused views (skipping shared tables) to keep the metadata schema clean.
+- Each row-level rule becomes a DMF view that runs inside Snowflake.
+- Failing rows surface in `DQ_<CONFIG_ID>_<CHECK_ID>_FAILS` within `{_safe_quote(metadata_db)}.{_safe_quote(metadata_schema)}`.
+- Views follow the pattern `SELECT * FROM <source> WHERE NOT (<rule_predicate>)`, using generated identifiers to avoid collisions.
+- Save and apply creates or refreshes the views and grants access. Removing a config cleans up unused artefacts.
 
-### Aggregate (AGG) table-level checks
-* Freshness and Row Count Anomaly run as **aggregate SQL queries** directly against the source table.
-* Because they summarise the whole table (no row payload), they do **not** materialise DMF views—results are stored only in `{run_results_table}`.
-* Freshness compares the latest timestamp in the chosen column, while Row Count Anomaly uses robust statistics over recent daily totals to spot spikes or droughts.
+### Aggregate table-level checks
+- Freshness and row-count anomaly checks execute as aggregate SQL directly against the source table.
+- Because they summarise the entire table, they store only results in `{run_results_table}` and do not create DMF views.
+- Freshness compares the latest timestamp in the monitored column; row-count anomaly looks at recent history for spikes or droughts.
 
 ### Stored procedures orchestrating runs
-* `{metadata_db}.{metadata_schema}.DQ_RUN_CONFIG` is a Snowpark Python stored procedure.
-  * Accepts a configuration ID, executes every check (DMF and AGG), captures failure counts, and records outcomes in `{run_results_table}`.
-* `{metadata_db}.{metadata_schema}.SP_DQ_MANAGE_TASK` manages scheduling via **EXECUTE AS CALLER** so Snowflake authorisation stays with the business role.
-  * Handles create/update for tasks, enforces warehouse selection, and flips enablement flags without leaving the platform.
+- `{metadata_db}.{metadata_schema}.DQ_RUN_CONFIG` (Snowpark Python) receives a configuration ID, evaluates every check, and records outcomes in `{run_results_table}`.
+- `{metadata_db}.{metadata_schema}.SP_DQ_MANAGE_TASK` manages task lifecycle with `EXECUTE AS CALLER`, ensuring warehouse and privilege alignment.
 
 ### Tasks per configuration
-* Each config is paired with a dedicated task: `DQ_TASK_<CONFIG_ID>` within `{metadata_db}.{metadata_schema}`.
-* The task body runs `CALL {proc_name}('<CONFIG_ID>')` and inherits the caller’s warehouse (the app defaults to an internal DQ warehouse unless you override it).
-* Scheduling uses Snowflake cron syntax with IANA time zones, so `0 8 * * * Europe/Berlin` means 08:00 local time every day.
-* Enabling/disabling simply toggles the Snowflake task state—no need for external schedulers.
+- Each configuration owns a Snowflake task `DQ_TASK_<CONFIG_ID>` in `{metadata_db}.{metadata_schema}`.
+- The task runs `CALL {proc_name}('<CONFIG_ID>')`, inheriting the caller's warehouse by default.
+- Cron syntax with IANA time zones supports 08:00 Europe/Berlin schedules and any overrides defined by administrators.
 
 ### Roles, context, and required grants
-* Procedures execute **AS CALLER**, ensuring the running role’s data access policies are honoured.
-* The application expects USAGE/MONITOR on the warehouse, USAGE on `{metadata_db}` and `{metadata_db}.{metadata_schema}`, CREATE TASK in the metadata schema, and EXECUTE on both stored procedures.
-* When deployed as a Streamlit-in-Snowflake app, ownership of metadata objects stays with the application role so auditors can trace every change.
+- Procedures execute as caller so data access policies remain intact.
+- The app expects USAGE/MONITOR on the warehouse, USAGE on `{metadata_db}` and `{metadata_db}.{metadata_schema}`, CREATE TASK in the metadata schema, and EXECUTE on both procedures.
+- Streamlit in Snowflake keeps ownership with the application role, simplifying audits and change tracking.
 
-### Why Snowflake for data quality?
-* **In-database compute** keeps checks close to the data—no egress, no shadow copies, just Snowflake warehouses doing the work.
-* **Snowpark Python** powers the runner procedure, letting us blend Python orchestration with native SQL performance.
-* **Streamlit in Snowflake** delivers the UI right where the data lives, eliminating context switching for data stewards.
-* **INFORMATION_SCHEMA & Account Usage** supply rich metadata for monitoring configurations, tasks, and run history.
-* **Governed sharing & roles** ensure DMF views, tasks, and procedures respect enterprise security while still being explorable when incidents occur.
+### Why Snowflake for data quality
+- In-database compute keeps checks near the data—no egress or shadow copies.
+- Snowpark Python combines orchestration logic with native SQL execution.
+- Streamlit in Snowflake provides the UI where teams already work.
+- INFORMATION_SCHEMA and Account Usage power metadata-driven discovery and monitoring.
+- Governed sharing and roles ensure DMF views, tasks, and procedures respect enterprise security boundaries.
             """
         )
 
@@ -268,27 +264,27 @@ digraph W {
         st.subheader("Technical Overview")
         st.markdown(
             f"""
-**Runtime**
-- Streamlit (in Snowflake) using Snowpark Python.
+#### Runtime
+- Streamlit in Snowflake using Snowpark Python.
 
-**Metadata & Results**
+#### Metadata and results
 - Configs: `{cfg_tbl_display}`
-- Checks:  `{chk_tbl_display}`
+- Checks: `{chk_tbl_display}`
 - Results: `{run_results_table}`
 
-**Procedures**
-- Runner: `{metadata_db}.{metadata_schema}.{proc_name}(VARCHAR)` – evaluates checks and logs into results.
-- Task Manager: `{metadata_db}.{metadata_schema}.SP_DQ_MANAGE_TASK(STRING, STRING, STRING, STRING, STRING, STRING, STRING, BOOLEAN)` – creates/updates task. **EXECUTE AS CALLER**.
+#### Procedures
+- Runner: `{metadata_db}.{metadata_schema}.{proc_name}(VARCHAR)` evaluates checks and logs to the results table.
+- Task manager: `{metadata_db}.{metadata_schema}.SP_DQ_MANAGE_TASK(STRING, STRING, STRING, STRING, STRING, STRING, STRING, BOOLEAN)` creates or updates tasks and runs as caller.
 
-**Tasks**
-- One per config: `DQ_TASK_<CONFIG_ID>` in `{metadata_db}.{metadata_schema}`; body: `CALL {proc_name}('<CONFIG_ID>')`.
+#### Tasks
+- One per configuration: `DQ_TASK_<CONFIG_ID>` in `{metadata_db}.{metadata_schema}` with body `CALL {proc_name}('<CONFIG_ID>')`.
 
-**Warehouses**
-- Schedules run on default app WH (e.g., `DQ_WH`).
+#### Warehouses
+- Schedules run on the default application warehouse (for example, `DQ_WH`).
             """
         )
 
-        st.markdown("**Required Privileges (caller role)**")
+        st.markdown("#### Required privileges for the caller role")
         st.code(
             f"""
 USAGE ON WAREHOUSE DQ_WH
@@ -301,25 +297,24 @@ EXECUTE ON PROCEDURE {metadata_db}.{metadata_schema}.{proc_name}(VARCHAR)
         )
 
     with tabs[4]:
-        st.subheader("Data Governance & Security")
+        st.subheader("Data Governance and Security")
         st.markdown(
             """
-**Roles & Isolation**
-- App runs with a specific **caller role** and uses **EXECUTE AS CALLER** for task management.
-- Config/results live in a dedicated metadata schema to isolate privileges.
+#### Roles and isolation
+- The application runs with a defined caller role and relies on `EXECUTE AS CALLER` when managing tasks.
+- Configuration and results tables live in a dedicated metadata schema to control privileges.
 
-**Traceability**
-- `DQ_RUN_RESULTS` logs: run timestamp, check id/type, failures, `OK` flag, and error messages if any.
-- Tasks: one per config, auditable in ACCOUNT usage views.
+#### Traceability
+- `DQ_RUN_RESULTS` captures timestamps, check identifiers, failure counts, success flags, and error messages.
+- Each configuration owns a Snowflake task, which is auditable through ACCOUNT USAGE views.
 
-**Access Patterns**
-- Read-only access to source tables for checks.
-- Controlled write access only to metadata objects (config/checks/results).
-- DMF failing-row views live in metadata schema (no writes to source).
+#### Access patterns
+- Source tables are read-only; writes are limited to metadata objects for configs, checks, and results.
+- DMF failing-row views remain in the metadata schema so investigators avoid querying production tables directly.
 
-**PII / Sensitive Data**
-- Prefer checks that don’t materialize sensitive columns in logs. Views expose only what investigators need.
-- If required, add column masking on sensitive attributes in metadata views.
+#### Handling sensitive data
+- Prefer checks that avoid materialising personal data in logs; views expose only what investigators need.
+- Apply column masking to metadata views when sensitive attributes require additional protection.
             """
         )
 
