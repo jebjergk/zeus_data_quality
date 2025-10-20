@@ -176,6 +176,7 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
                     "top_n": int(top_n),
                 }
                 st.session_state["profile_results"] = profile_result
+                st.rerun()
 
     if suggest_cfg and profile_result:
         suggestion = build_profile_suggestion(profile_result)
