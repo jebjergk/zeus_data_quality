@@ -39,6 +39,7 @@ __all__ = [
     "list_databases",
     "list_schemas",
     "list_tables",
+    "get_table_row_count",
     "list_columns",
 ]
 
@@ -305,6 +306,50 @@ def list_tables(session: Session, database: str, schema: str) -> List[str]:
             return [r[1] for r in df.collect()]  # NAME
         except Exception:
             return []
+
+
+def get_table_row_count(session: Session, database: str, schema: str, table: str) -> Optional[int]:
+    """Return the row count reported by Snowflake metadata for a table."""
+
+    if not session or not (database and schema and table):
+        return None
+
+    # Prefer INFORMATION_SCHEMA when available because it exposes a dedicated ROW_COUNT column.
+    try:
+        df = session.sql(
+            f"SELECT ROW_COUNT FROM {_q(database)}.INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?",
+            params=[schema.upper(), table.upper()],
+        )
+        rows = df.collect()
+        if rows:
+            value = rows[0][0]
+            return int(value) if value is not None else None
+    except Exception:
+        pass
+
+    # Fall back to SHOW TABLES which relies on metadata and does not incur table scan costs.
+    try:
+        df = session.sql(
+            f"SHOW TABLES LIKE ? IN SCHEMA {_q(database)}.{_q(schema)}",
+            params=[table],
+        )
+        for row in df.collect():
+            # Rows from SHOW TABLES can be accessed by name via asDict() when available.
+            if hasattr(row, "asDict"):
+                data = row.asDict()
+                value = data.get("rows") or data.get("ROW_COUNT")
+                if value is not None:
+                    return int(value)
+            else:
+                # SHOW TABLES returns: created_on, name, database_name, schema_name, kind, comment, cluster_by, rows, bytes, owner, retention_time, automatic_clustering, change_tracking
+                if len(row) >= 8:
+                    value = row[7]
+                    if value is not None:
+                        return int(value)
+    except Exception:
+        pass
+
+    return None
 
 def list_columns(session: Session, database: str, schema: str, table: str) -> List[str]:
     if not session or not (database and schema and table): return []
