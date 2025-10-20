@@ -1135,9 +1135,18 @@ def render_monitor():
         config_labels.append(label)
         config_map[label] = cfg.config_id
 
-    if "_mon_config_options" not in st.session_state or st.session_state.get("_mon_config_options") != config_labels:
-        st.session_state["mon_configs"] = config_labels.copy()
+    if (
+        "_mon_config_options" not in st.session_state
+        or st.session_state.get("_mon_config_options") != config_labels
+    ):
+        previous_selection = st.session_state.get("mon_configs", [])
+        updated_selection = [label for label in previous_selection if label in config_labels]
+        if not updated_selection:
+            updated_selection = config_labels.copy()
+        st.session_state["mon_configs"] = updated_selection
         st.session_state["_mon_config_options"] = config_labels.copy()
+    elif "mon_configs" not in st.session_state:
+        st.session_state["mon_configs"] = config_labels.copy()
 
     filters = st.columns([1, 1, 3])
     with filters[0]:
@@ -1153,7 +1162,6 @@ def render_monitor():
         selected_labels = st.multiselect(
             "Configurations",
             options=config_labels,
-            default=st.session_state.get("mon_configs", config_labels),
             key="mon_configs",
         )
 
