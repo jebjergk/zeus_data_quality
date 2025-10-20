@@ -19,7 +19,9 @@ def _safe_quote(identifier: str) -> str:
 
 def _sanitize_graph_label(label: str) -> Tuple[str, str]:
     """Sanitize a fully qualified name for use in future graph visuals."""
-    node_name = label.replace('"', "")
+    node_name = "".join(ch if ch.isalnum() else "_" for ch in label)
+    if not node_name:
+        node_name = "node"
     display = _safe_quote(label).replace('"', '\\"')
     return node_name, display
 
@@ -49,10 +51,29 @@ def render_docs(
     cfg_tbl_display = _safe_quote(configs_table)
     chk_tbl_display = _safe_quote(checks_table)
 
-    _, cfg_tbl_label = _sanitize_graph_label(configs_table)
-    _, chk_tbl_label = _sanitize_graph_label(checks_table)
-    _, run_tbl_label = _sanitize_graph_label(run_results_table)
-    _, proc_label = _sanitize_graph_label(proc_name)
+    (
+        cfg_tbl_node,
+        cfg_tbl_label,
+    ) = _sanitize_graph_label(configs_table)
+    (
+        chk_tbl_node,
+        chk_tbl_label,
+    ) = _sanitize_graph_label(checks_table)
+    (
+        run_tbl_node,
+        run_tbl_label,
+    ) = _sanitize_graph_label(run_results_table)
+    (
+        proc_node,
+        proc_label,
+    ) = _sanitize_graph_label(proc_name)
+
+    profile_run_node, profile_run_label = _sanitize_graph_label(
+        f"{metadata_db}.{metadata_schema}.DQ_PROFILE_RUN"
+    )
+    profile_col_node, profile_col_label = _sanitize_graph_label(
+        f"{metadata_db}.{metadata_schema}.DQ_PROFILE_COLUMN"
+    )
 
     with tabs[0]:
         st.subheader("User Guide")
@@ -174,15 +195,74 @@ Profiling runs lightweight column statistics so you understand shape, completene
 
         st.divider()
         st.subheader("Entity Diagram")
-        st.caption(
-            "Entity relationship diagram placeholder – will visualize metadata objects such as "
-            f"{cfg_tbl_label}, {chk_tbl_label}, {run_tbl_label}, and {proc_label}."
-        )
+        entity_graph = f"""
+digraph G {{
+    graph [rankdir=LR, fontname="Helvetica", fontsize=11, bgcolor="white", pad=0.4, nodesep=0.9, ranksep=1.1, splines=true];
+    node [shape=rect, style="rounded,filled", fontname="Helvetica", fontsize=11, fillcolor="#f4f6fb", color="#d5dbed", penwidth=1.2];
+    edge [color="#4f46e5", fontname="Helvetica", fontsize=10, arrowsize=0.8];
+
+    subgraph cluster_metadata {{
+        label="Metadata Schema";
+        fontname="Helvetica";
+        fontsize=11;
+        color="#c7d2fe";
+        style="rounded";
+        {cfg_tbl_node} [label="{cfg_tbl_label}", fillcolor="#eef2ff", color="#c7d2fe"];
+        {chk_tbl_node} [label="{chk_tbl_label}", fillcolor="#eef2ff", color="#c7d2fe"];
+        {run_tbl_node} [label="{run_tbl_label}", fillcolor="#eef2ff", color="#c7d2fe"];
+        {profile_run_node} [label="{profile_run_label}\n(optional)", style="rounded,dashed,filled", fillcolor="#f8fafc", color="#d5dbed"];
+        {profile_col_node} [label="{profile_col_label}\n(optional)", style="rounded,dashed,filled", fillcolor="#f8fafc", color="#d5dbed"];
+        dmfv [label="DMF_FAIL views\n(per active check)", shape=folder, fillcolor="#fdf2f8", color="#fbcfe8", fontcolor="#831843"];
+    }}
+
+    app [label="Streamlit App", shape=rect, fillcolor="#ecfdf5", color="#bbf7d0", fontcolor="#047857"];
+    {proc_node} [label="{proc_label}", shape=rect, fillcolor="#ede9fe", color="#c4b5fd", fontcolor="#5b21b6"];
+    task [label="Snowflake Task\nper config", shape=rect, fillcolor="#fef3c7", color="#fcd34d", fontcolor="#92400e"];
+
+    app -> {cfg_tbl_node} [label="creates / edits"];
+    app -> {chk_tbl_node} [label="creates / edits"];
+    app -> dmfv [label="renders"];
+    app -> {profile_run_node} [label="captures profiles"];
+    app -> {profile_col_node} [label="renders"];
+    {cfg_tbl_node} -> {chk_tbl_node} [label="defines"];
+    {cfg_tbl_node} -> task [label="schedules"];
+    task -> {proc_node} [label="calls"];
+    {proc_node} -> {run_tbl_node} [label="logs to"];
+    {proc_node} -> dmfv [label="populates"];
+    {proc_node} -> {profile_run_node} [label="logs to", style=dashed, color="#6b7280", fontcolor="#6b7280"];
+    {profile_run_node} -> {profile_col_node} [label="summarises"];
+    {run_tbl_node} -> app [label="renders"];
+    dmfv -> app [label="renders", style=dashed, color="#6b7280", fontcolor="#6b7280"];
+}}
+        """
+
+        st.graphviz_chart(entity_graph, use_container_width=True)
 
         st.subheader("Workflow Diagram")
-        st.caption(
-            "Workflow diagram placeholder – will illustrate how configs feed checks, tasks, and the runner procedure."
-        )
+        workflow_graph = """
+digraph W {
+    graph [rankdir=LR, fontname="Helvetica", fontsize=11, bgcolor="white", pad=0.5, nodesep=0.9, ranksep=1.1, splines=ortho];
+    node [shape=rect, style="rounded,filled", fontname="Helvetica", fontsize=11, width=2.2, height=0.8];
+    edge [color="#6366f1", fontname="Helvetica", fontsize=10, arrowsize=0.85];
+
+    step1 [label="User edits\nconfig", fillcolor="#eef2ff", color="#c7d2fe", fontcolor="#312e81"];
+    step2 [label="Save & Apply", fillcolor="#e0f2fe", color="#bae6fd", fontcolor="#0c4a6e"];
+    step3 [label="Attach DMF\nviews", fillcolor="#dcfce7", color="#bbf7d0", fontcolor="#065f46"];
+    step4 [label="Task schedule", fillcolor="#fef3c7", color="#fde68a", fontcolor="#92400e"];
+    step5 [label="Daily run", fillcolor="#fee2e2", color="#fecaca", fontcolor="#991b1b"];
+    step6 [label="Log results", fillcolor="#ede9fe", color="#ddd6fe", fontcolor="#5b21b6"];
+    step7 [label="Monitor", fillcolor="#f5f3ff", color="#c4b5fd", fontcolor="#4c1d95"];
+
+    step1 -> step2 [label="commit changes"];
+    step2 -> step3 [label="provision checks"];
+    step3 -> step4 [label="enable task"];
+    step4 -> step5 [label="cron trigger"];
+    step5 -> step6 [label="stored procedure"];
+    step6 -> step7 [label="Surface in app"];
+}
+        """
+
+        st.graphviz_chart(workflow_graph, use_container_width=True)
 
     with tabs[3]:
         st.subheader("Technical Overview")
