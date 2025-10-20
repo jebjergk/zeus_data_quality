@@ -186,6 +186,7 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
             st.session_state["selected_config_id"] = None
             st.session_state["editor_target_fqn"] = profile_result.get("target_table")
             st.session_state["profile_suggestion"] = suggestion
+            st.session_state["page"] = "cfg"
             st.success("Loaded profile suggestion into the configuration editor.")
             st.rerun()
 
