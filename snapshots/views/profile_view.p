@@ -4,6 +4,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Dict, Iterable, List, Optional, Tuple
+from numbers import Integral, Real
 
 import pandas as pd
 import streamlit as st
@@ -16,6 +17,53 @@ from views.table_picker import session_cache_token, stateless_table_picker
 
 FULL_SCAN_WARNING_THRESHOLD = 1_000_000
 MAX_TOP_N = 10
+
+
+def _safe_int(value: Any) -> Optional[int]:
+    """Convert a numeric-like value to an int when possible."""
+
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, Integral):
+        return int(value)
+    try:
+        if isinstance(value, str):
+            cleaned = value.replace(",", "").strip()
+            if cleaned == "":
+                return None
+            value = cleaned
+        value_float = float(value)
+        if math.isnan(value_float):
+            return None
+        return int(round(value_float))
+    except Exception:
+        return None
+
+
+def _safe_float(value: Any) -> Optional[float]:
+    """Convert a numeric-like value to a float when possible."""
+
+    if value is None:
+        return None
+    if isinstance(value, Real):
+        value_float = float(value)
+        if math.isnan(value_float):
+            return None
+        return value_float
+    try:
+        if isinstance(value, str):
+            cleaned = value.replace(",", "").replace("%", "").strip()
+            if cleaned == "":
+                return None
+            value = cleaned
+        value_float = float(value)
+        if math.isnan(value_float):
+            return None
+        return value_float
+    except Exception:
+        return None
 
 
 @dataclass
@@ -47,18 +95,18 @@ def _column_profile_from_payload(column: Dict[str, Any]) -> ColumnProfile:
     return ColumnProfile(
         name=str(normalized.get("column_name") or normalized.get("name") or ""),
         data_type=str(normalized.get("data_type") or ""),
-        nulls=normalized.get("nulls"),
-        null_pct=normalized.get("null_pct"),
-        distincts=normalized.get("distincts"),
-        distinct_pct=normalized.get("distinct_pct"),
+        nulls=_safe_int(normalized.get("nulls")),
+        null_pct=_safe_float(normalized.get("null_pct")),
+        distincts=_safe_int(normalized.get("distincts")),
+        distinct_pct=_safe_float(normalized.get("distinct_pct")),
         min_val=normalized.get("min_val"),
         max_val=normalized.get("max_val"),
-        avg_len=normalized.get("avg_len"),
-        whitespace_pct=normalized.get("whitespace_pct"),
+        avg_len=_safe_float(normalized.get("avg_len")),
+        whitespace_pct=_safe_float(normalized.get("whitespace_pct")),
         top_values=top_values_list,
         error=normalized.get("error"),
         semantic_type=normalized.get("semantic_type"),
-        confidence=normalized.get("confidence"),
+        confidence=_safe_float(normalized.get("confidence")),
         rationale=normalized.get("rationale"),
     )
 
@@ -190,6 +238,30 @@ def _format_confidence(value: Any) -> str:
         if math.isnan(value_float):
             return ""
         return f"{value_float:.0%}"
+    except Exception:
+        return ""
+
+
+def _format_count(value: Any) -> str:
+    if value is None:
+        return ""
+    try:
+        value_float = float(value)
+        if math.isnan(value_float):
+            return ""
+        return f"{int(round(value_float)):,}"
+    except Exception:
+        return ""
+
+
+def _format_percentage(value: Any) -> str:
+    if value is None:
+        return ""
+    try:
+        value_float = float(value)
+        if math.isnan(value_float):
+            return ""
+        return f"{value_float:.2f}"
     except Exception:
         return ""
 
@@ -525,7 +597,14 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
         display_df = display_df[[col for col in ordered_columns if col in display_df.columns] + [
             col for col in display_df.columns if col not in ordered_columns
         ]]
-        styler = display_df.style.format({"Confidence": _format_confidence})
+        formatters: Dict[str, Any] = {"Confidence": _format_confidence}
+        for count_col in ("nulls", "distincts"):
+            if count_col in display_df.columns:
+                formatters[count_col] = _format_count
+        for pct_col in ("null_pct", "distinct_pct", "whitespace_pct"):
+            if pct_col in display_df.columns:
+                formatters[pct_col] = _format_percentage
+        styler = display_df.style.format(formatters)
         if "Confidence Badge" in display_df.columns:
             styler = styler.applymap(_badge_css, subset=["Confidence Badge"])
         column_config: Dict[str, st.column_config.BaseColumn] = {}
@@ -568,5 +647,13 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
                 tv_df = tv_df.rename(columns=rename_map)
             elif tv_df.shape[1] == 2:
                 tv_df.columns = ["Value", "Count"]
+
+            if "Count" in tv_df.columns:
+                tv_df["Count"] = tv_df["Count"].apply(_format_count)
+            for col in tv_df.columns:
+                if col == "Count":
+                    continue
+                if "pct" in col.lower():
+                    tv_df[col] = tv_df[col].apply(_format_percentage)
 
             st.table(tv_df)
