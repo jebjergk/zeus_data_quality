@@ -210,10 +210,10 @@ def _profiles_to_frame(profiles: Iterable[ColumnProfile]) -> pd.DataFrame:
             "max_val",
             "avg_len",
             "whitespace_pct",
+            "error",
             "semantic_type",
             "confidence",
             "rationale",
-            "error",
         ]
         missing = [c for c in display_cols if c not in df.columns]
         df = df.reindex(columns=[c for c in display_cols if c not in missing] + [c for c in df.columns if c not in display_cols])
@@ -580,9 +580,6 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
         ordered_columns = [
             "column_name",
             "data_type",
-            "Guessed Type",
-            "Confidence Badge",
-            "Confidence",
             "nulls",
             "null_pct",
             "distincts",
@@ -592,6 +589,9 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
             "avg_len",
             "whitespace_pct",
             "error",
+            "Guessed Type",
+            "Confidence Badge",
+            "Confidence",
             "Confidence Rationale",
         ]
         display_df = display_df[[col for col in ordered_columns if col in display_df.columns] + [
