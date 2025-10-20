@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import math
 import random
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 from uuid import uuid4
 
 from services.profile import _is_numeric, _is_temporal, _stringify
@@ -52,6 +52,171 @@ def _quote_identifier(value: str) -> str:
 def _is_string_type(data_type: str) -> bool:
     upper = (data_type or "").upper()
     return any(token in upper for token in ("CHAR", "STRING", "TEXT", "VARCHAR"))
+
+
+SEMANTIC_REGEX_PATTERNS: Dict[str, str] = {
+    "email": r"^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$",
+    "iban": r"^[A-Z]{2}[0-9A-Z]{13,32}$",
+    "isin": r"^[A-Z]{2}[A-Z0-9]{9}[0-9]$",
+    "bic": r"^[A-Z]{4}[A-Z]{2}[A-Z0-9]{2}([A-Z0-9]{3})?$",
+    "uuid": r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+    "url": r"^(https?|ftp)://[^\s/$.?#].[^\s]*$",
+    "ipv4": r"^((25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)(\.(?!$)|$)){4}$",
+    "phone_e164": r"^\+[1-9][0-9]{1,14}$",
+}
+
+
+CHAR_CLASS_PATTERNS: Dict[str, str] = {
+    "digit": r"^[0-9]+$",
+    "alpha": r"^[A-Za-z]+$",
+    "alnum": r"^[0-9A-Za-z]+$",
+    "whitespace": r".*\s.*",
+}
+
+
+FALLBACK_COUNTRY_CODES: Set[str] = {
+    "US",
+    "DE",
+    "FR",
+    "GB",
+    "CA",
+    "CH",
+    "JP",
+}
+
+
+FALLBACK_COUNTRY_NAMES: Set[str] = {
+    "UNITED STATES",
+    "GERMANY",
+    "FRANCE",
+    "UNITED KINGDOM",
+    "CANADA",
+    "SWITZERLAND",
+    "JAPAN",
+}
+
+
+FALLBACK_CURRENCY_CODES: Set[str] = {"USD", "EUR", "GBP", "CHF", "JPY", "CAD"}
+
+
+FALLBACK_EXCHANGE_CODES: Set[str] = {"XETR", "GETTEX", "FWB"}
+
+
+REFERENCE_SIGNAL_NAMES: Dict[str, str] = {
+    "country_codes": "reference_country_code",
+    "country_names": "reference_country_name",
+    "currency_codes": "reference_currency_code",
+    "exchange_codes": "reference_exchange_code",
+}
+
+
+def _escape_sql_literal(value: str) -> str:
+    return value.replace("'", "''")
+
+
+def _build_in_clause(values: Set[str]) -> Optional[str]:
+    if not values:
+        return None
+    parts = [f"'{_escape_sql_literal(val)}'" for val in sorted({v for v in values if v})]
+    if not parts:
+        return None
+    return ", ".join(parts)
+
+
+def _load_reference_sets(session, db: str, schema: str) -> Dict[str, Set[str]]:
+    references: Dict[str, Set[str]] = {
+        "country_codes": set(FALLBACK_COUNTRY_CODES),
+        "country_names": set(FALLBACK_COUNTRY_NAMES),
+        "currency_codes": set(FALLBACK_CURRENCY_CODES),
+        "exchange_codes": set(FALLBACK_EXCHANGE_CODES),
+    }
+    candidates: Dict[str, List[Tuple[str, Tuple[str, ...]]]] = {
+        "country_codes": [
+            ("ISO_COUNTRIES", ("CODE", "ALPHA2", "ALPHA3")),
+            ("COUNTRIES", ("COUNTRY_CODE", "CODE", "ISO_CODE")),
+        ],
+        "country_names": [
+            ("ISO_COUNTRIES", ("NAME", "COUNTRY_NAME")),
+            ("COUNTRIES", ("COUNTRY_NAME", "NAME")),
+        ],
+        "currency_codes": [
+            ("ISO_CURRENCIES", ("CODE", "CURRENCY_CODE")),
+            ("CURRENCIES", ("CURRENCY_CODE", "CODE")),
+        ],
+        "exchange_codes": [
+            ("EXCHANGES", ("EXCHANGE_CODE", "CODE")),
+            ("MARKET_CODES", ("CODE",)),
+        ],
+    }
+
+    for ref_key, table_candidates in candidates.items():
+        loaded = False
+        for table_name, columns in table_candidates:
+            table_ref = f"{_q(db)}.{_q(schema)}.{_q(table_name)}"
+            select_cols = []
+            for col in columns:
+                select_cols.append(_quote_identifier(col))
+            sql = f"SELECT {', '.join(select_cols)} FROM {table_ref}"
+            try:
+                rows = session.sql(sql).collect()
+            except Exception:
+                continue
+            values: Set[str] = set()
+            for row in rows:
+                if hasattr(row, "asDict"):
+                    data = row.asDict()
+                    for col in columns:
+                        candidate = (
+                            data.get(col)
+                            or data.get(col.lower())
+                            or data.get(col.upper())
+                        )
+                        if candidate is None:
+                            continue
+                        text = str(candidate).strip().upper()
+                        if text:
+                            values.add(text)
+                else:
+                    for idx, col in enumerate(columns):
+                        try:
+                            candidate = row[idx]
+                        except Exception:
+                            continue
+                        if candidate is None:
+                            continue
+                        text = str(candidate).strip().upper()
+                        if text:
+                            values.add(text)
+            if values:
+                references[ref_key] = values
+                loaded = True
+                break
+        if not loaded and ref_key in ("country_codes", "country_names"):
+            # ensure consistency between country code/name sets if only one loads
+            references[ref_key] = set(v.upper() for v in references.get(ref_key, set()))
+
+    return references
+
+
+def _derive_name_hints(column_name: str) -> Dict[str, bool]:
+    lowered = (column_name or "").lower()
+    tokens = {
+        "email": {"email"},
+        "iban": {"iban"},
+        "isin": {"isin"},
+        "bic": {"bic", "swift"},
+        "uuid": {"uuid", "guid"},
+        "url": {"url", "uri", "link"},
+        "ipv4": {"ip", "ipv4"},
+        "phone": {"phone", "mobile", "msisdn", "tel"},
+        "country": {"country", "nation"},
+        "currency": {"currency", "ccy"},
+        "exchange": {"exchange", "venue", "market"},
+    }
+    hints: Dict[str, bool] = {}
+    for key, keywords in tokens.items():
+        hints[key] = any(token in lowered for token in keywords)
+    return hints
 
 
 def list_columns(session, db: str, schema: str, table: str) -> List[Dict[str, Any]]:
@@ -204,6 +369,8 @@ def run_table_profile(
 
     top_n_clamped = max(0, min(int(top_n), 10))
 
+    reference_sets = _load_reference_sets(session, db, schema)
+
     for meta in columns:
         name = meta.get("column_name")
         if not name:
@@ -214,6 +381,7 @@ def run_table_profile(
         metrics_sql = [
             f"SUM(CASE WHEN {qcol} IS NULL THEN 1 ELSE 0 END) AS NULLS",
             f"{distinct_expr.format(col=qcol)} AS DISTINCTS",
+            f"SUM(CASE WHEN {qcol} IS NOT NULL THEN 1 ELSE 0 END) AS NON_NULLS_COUNT",
         ]
         if _is_numeric(dtype) or _is_temporal(dtype):
             metrics_sql.extend(
@@ -224,13 +392,60 @@ def run_table_profile(
             )
         else:
             metrics_sql.extend(["NULL AS MIN_VAL", "NULL AS MAX_VAL"])
-        if _is_string_type(dtype):
+        is_string = _is_string_type(dtype)
+        if is_string:
             metrics_sql.append(
                 f"SUM(CASE WHEN {qcol} IS NOT NULL AND REGEXP_LIKE({qcol}::STRING, '^\\s|\\s$|\\s{{2,}}') THEN 1 ELSE 0 END) AS WHITESPACE_ROWS"
             )
         else:
             metrics_sql.append("0 AS WHITESPACE_ROWS")
         metrics_sql.append(f"AVG(LENGTH({qcol}::STRING)) AS AVG_LEN")
+
+        char_pattern_aliases: Dict[str, str] = {}
+        regex_aliases: Dict[str, str] = {}
+        if is_string:
+            metrics_sql.extend(
+                [
+                    f"MIN(LENGTH({qcol}::STRING)) AS LEN_MIN",
+                    f"MAX(LENGTH({qcol}::STRING)) AS LEN_MAX",
+                ]
+            )
+            for key, pattern in SEMANTIC_REGEX_PATTERNS.items():
+                alias = f"REGEX_{key.upper()}_MATCHES"
+                pattern_sql = pattern.replace("\\", "\\\\")
+                metrics_sql.append(
+                    f"SUM(CASE WHEN {qcol} IS NOT NULL AND REGEXP_LIKE({qcol}::STRING, '{pattern_sql}') THEN 1 ELSE 0 END) AS {alias}"
+                )
+                regex_aliases[key] = alias
+            for key, pattern in CHAR_CLASS_PATTERNS.items():
+                alias = f"CHAR_{key.upper()}_MATCHES"
+                pattern_sql = pattern.replace("\\", "\\\\")
+                metrics_sql.append(
+                    f"SUM(CASE WHEN {qcol} IS NOT NULL AND REGEXP_LIKE({qcol}::STRING, '{pattern_sql}') THEN 1 ELSE 0 END) AS {alias}"
+                )
+                char_pattern_aliases[key] = alias
+
+            ref_match_aliases: Dict[str, str] = {}
+            for ref_key, values in (
+                ("country_codes", reference_sets.get("country_codes", set())),
+                ("country_names", reference_sets.get("country_names", set())),
+                ("currency_codes", reference_sets.get("currency_codes", set())),
+                ("exchange_codes", reference_sets.get("exchange_codes", set())),
+            ):
+                clause = _build_in_clause(values)
+                if not clause:
+                    continue
+                alias = f"REF_{ref_key.upper()}_MATCHES"
+                metrics_sql.append(
+                    "SUM(CASE WHEN {col} IS NOT NULL AND UPPER({col}::STRING) IN ({clause}) "
+                    "THEN 1 ELSE 0 END) AS {alias}".format(col=qcol, clause=clause, alias=alias)
+                )
+                signal_key = REFERENCE_SIGNAL_NAMES.get(ref_key, ref_key)
+                ref_match_aliases[signal_key] = alias
+        else:
+            char_pattern_aliases = {}
+            regex_aliases = {}
+            ref_match_aliases = {}
 
         sql = "SELECT " + ", ".join(metrics_sql) + f" FROM {sampled_ref}"
         try:
@@ -243,6 +458,12 @@ def run_table_profile(
             nulls_int = int(nulls)
         except Exception:
             nulls_int = 0
+
+        non_nulls_raw = _extract_row_value(row, "NON_NULLS_COUNT", None)
+        try:
+            non_nulls_count = int(non_nulls_raw) if non_nulls_raw is not None else None
+        except Exception:
+            non_nulls_count = None
 
         distincts = _extract_row_value(row, "DISTINCTS")
         try:
@@ -267,12 +488,62 @@ def run_table_profile(
             whitespace_rows_int = 0
 
         null_pct = (float(nulls_int) / rows_profiled * 100.0) if rows_profiled else 0.0
-        non_nulls = max(rows_profiled - nulls_int, 0)
+        non_nulls = (
+            int(non_nulls_count)
+            if isinstance(non_nulls_count, int)
+            else max(rows_profiled - nulls_int, 0)
+        )
         if distincts_int is not None and non_nulls:
             distinct_pct = float(distincts_int) / float(non_nulls) * 100.0
         else:
             distinct_pct = None
         whitespace_pct = (float(whitespace_rows_int) / rows_profiled * 100.0) if rows_profiled else 0.0
+
+        len_min_val: Optional[float] = None
+        len_max_val: Optional[float] = None
+        if is_string:
+            len_min_raw = _extract_row_value(row, "LEN_MIN")
+            len_max_raw = _extract_row_value(row, "LEN_MAX")
+            try:
+                len_min_val = float(len_min_raw) if len_min_raw is not None else None
+            except Exception:
+                len_min_val = None
+            try:
+                len_max_val = float(len_max_raw) if len_max_raw is not None else None
+            except Exception:
+                len_max_val = None
+
+        regex_ratios: Dict[str, Optional[float]] = {}
+        for key, alias in regex_aliases.items():
+            matches_raw = _extract_row_value(row, alias, 0)
+            try:
+                matches = int(matches_raw)
+            except Exception:
+                matches = 0
+            ratio = (float(matches) / float(non_nulls)) if non_nulls else 0.0
+            regex_ratios[key] = ratio
+
+        char_ratios: Dict[str, Optional[float]] = {}
+        for key, alias in char_pattern_aliases.items():
+            matches_raw = _extract_row_value(row, alias, 0)
+            try:
+                matches = int(matches_raw)
+            except Exception:
+                matches = 0
+            ratio = (float(matches) / float(non_nulls)) if non_nulls else 0.0
+            char_ratios[key] = ratio
+
+        reference_ratios: Dict[str, Optional[float]] = {}
+        for key, alias in ref_match_aliases.items():
+            matches_raw = _extract_row_value(row, alias, 0)
+            try:
+                matches = int(matches_raw)
+            except Exception:
+                matches = 0
+            ratio = (float(matches) / float(non_nulls)) if non_nulls else 0.0
+            reference_ratios[key] = ratio
+
+        hints = _derive_name_hints(name)
 
         top_values: List[Dict[str, Any]] = []
         top_coverage = 0
@@ -302,26 +573,60 @@ def run_table_profile(
                 top_coverage = 0
         coverage_pct = (float(top_coverage) / non_nulls * 100.0) if non_nulls else 0.0
 
-        per_column.append(
-            {
-                "name": name,
-                "column_name": name,
-                "data_type": dtype,
-                "nulls": nulls_int,
-                "null_pct": null_pct,
-                "distincts": distincts_int,
-                "distinct_pct": distinct_pct,
-                "min_val": min_val if (min_val is not None) else None,
-                "max_val": max_val if (max_val is not None) else None,
-                "avg_len": avg_len,
-                "whitespace_pct": whitespace_pct,
-                "top_values": top_values,
-                "top_coverage_pct": coverage_pct,
-                "rows_profiled": rows_profiled,
-                "non_nulls": non_nulls,
-                "error": None,
+        column_entry: Dict[str, Any] = {
+            "name": name,
+            "column_name": name,
+            "data_type": dtype,
+            "nulls": nulls_int,
+            "null_pct": null_pct,
+            "distincts": distincts_int,
+            "distinct_pct": distinct_pct,
+            "min_val": min_val if (min_val is not None) else None,
+            "max_val": max_val if (max_val is not None) else None,
+            "avg_len": avg_len,
+            "whitespace_pct": whitespace_pct,
+            "top_values": top_values,
+            "top_coverage_pct": coverage_pct,
+            "rows_profiled": rows_profiled,
+            "non_nulls": non_nulls,
+            "error": None,
+        }
+
+        signals: Dict[str, Any] = {
+            "null_pct": null_pct,
+            "distinct_pct": distinct_pct,
+            "regex": regex_ratios,
+            "character_classes": char_ratios,
+            "reference_matches": reference_ratios,
+            "hints": hints,
+        }
+        if is_string:
+            signals["length"] = {
+                "min": len_min_val,
+                "max": len_max_val,
+                "avg": avg_len,
             }
-        )
+            if "whitespace" in char_ratios:
+                signals["whitespace_ratio"] = char_ratios.get("whitespace")
+        else:
+            signals["length"] = {"min": None, "max": None, "avg": None}
+
+        for key, ratio in regex_ratios.items():
+            column_entry[f"signal_{key}_ratio"] = ratio
+        for key, ratio in char_ratios.items():
+            suffix = "whitespace_ratio" if key == "whitespace" else f"{key}_ratio"
+            column_entry[f"signal_{suffix}"] = ratio
+        for key, ratio in reference_ratios.items():
+            column_entry[f"signal_{key}_ratio"] = ratio
+        column_entry["signal_len_min"] = len_min_val if is_string else None
+        column_entry["signal_len_max"] = len_max_val if is_string else None
+        column_entry["signal_len_avg"] = avg_len if (is_string and avg_len is not None) else None
+        for key, value in hints.items():
+            column_entry[f"signal_hint_{key}"] = bool(value)
+
+        column_entry["signals"] = signals
+
+        per_column.append(column_entry)
 
     summary = {
         "table": fqn,
