@@ -129,46 +129,46 @@ Profiling runs lightweight column statistics so you understand shape, completene
         )
 
     with tabs[2]:
-        st.subheader("Snowflake Data Quality Framework (DMF) usage")
+        st.subheader("Snowflake-native DQ Framework narrative")
         st.markdown(
-            """
-**Failing-row Views**
-- For row-level checks, the app creates views per check in the **metadata schema**:
-  - `DQ_<CONFIG_ID>_<CHECK_ID>_FAILS`
-- Each view is `SELECT * FROM <source_table> WHERE NOT (<predicate>)`.
+            f"""
+### Data Monitoring Framework (DMF) checks
+* **Purpose**: Every row-level rule becomes a Data Monitoring Framework (DMF) check that Snowflake can execute in-database.
+* **Failing-row views**: For each active check we create `DQ_<CONFIG_ID>_<CHECK_ID>_FAILS` inside `{_safe_quote(metadata_db)}.{_safe_quote(metadata_schema)}`.
+  * View body: `SELECT * FROM <source> WHERE NOT (<rule_predicate>)` so investigators can explore bad rows without copying data.
+  * **Safety**: Names are generated from UUID-style identifiers to avoid collisions, and views are created with `CREATE OR REPLACE` to prevent residual state.
+* **Attach / detach lifecycle**:
+  * On **Save & Apply**, DMF checks are created or refreshed and granted to the application role as needed.
+  * On delete or when a config detaches from a table, the app drops only the unused views (skipping shared tables) to keep the metadata schema clean.
 
-**Attach/Detach**
-- On **Save & Apply**: create/replace the needed FAIL views (skips AGG checks).
-- On delete or when a table is no longer monitored: drop views if no other active config shares that table.
+### Aggregate (AGG) table-level checks
+* Freshness and Row Count Anomaly run as **aggregate SQL queries** directly against the source table.
+* Because they summarise the whole table (no row payload), they do **not** materialise DMF views—results are stored only in `{run_results_table}`.
+* Freshness compares the latest timestamp in the chosen column, while Row Count Anomaly uses robust statistics over recent daily totals to spot spikes or droughts.
 
-**Why DMF-style views?**
-- Zero-copy investigation of bad records
-- Stable, re-usable object per check
-            """
-        )
+### Stored procedures orchestrating runs
+* `{metadata_db}.{metadata_schema}.DQ_RUN_CONFIG` is a Snowpark Python stored procedure.
+  * Accepts a configuration ID, executes every check (DMF and AGG), captures failure counts, and records outcomes in `{run_results_table}`.
+* `{metadata_db}.{metadata_schema}.SP_DQ_MANAGE_TASK` manages scheduling via **EXECUTE AS CALLER** so Snowflake authorisation stays with the business role.
+  * Handles create/update for tasks, enforces warehouse selection, and flips enablement flags without leaving the platform.
 
-        st.divider()
-        st.subheader("Anomaly Detection")
-        st.markdown(
-            """
-**Current Implementation (Robust Z-Score)**
-- Build daily counts from `timestamp_column` over `lookback_days` (default 28).
-- Compute **median** and **MAD** over history (excluding today).
-- Today is **OK** iff:
-  1) `history_days >= min_history_days` (default 7), and
-  2) `|today - median| / (1.4826 * MAD) <= sensitivity` (default 3.0).
+### Tasks per configuration
+* Each config is paired with a dedicated task: `DQ_TASK_<CONFIG_ID>` within `{metadata_db}.{metadata_schema}`.
+* The task body runs `CALL {proc_name}('<CONFIG_ID>')` and inherits the caller’s warehouse (the app defaults to an internal DQ warehouse unless you override it).
+* Scheduling uses Snowflake cron syntax with IANA time zones, so `0 8 * * * Europe/Berlin` means 08:00 local time every day.
+* Enabling/disabling simply toggles the Snowflake task state—no need for external schedulers.
 
-**Why this approach?**
-- Pure SQL, robust to outliers, no external model.
+### Roles, context, and required grants
+* Procedures execute **AS CALLER**, ensuring the running role’s data access policies are honoured.
+* The application expects USAGE/MONITOR on the warehouse, USAGE on `{metadata_db}` and `{metadata_db}.{metadata_schema}`, CREATE TASK in the metadata schema, and EXECUTE on both stored procedures.
+* When deployed as a Streamlit-in-Snowflake app, ownership of metadata objects stays with the application role so auditors can trace every change.
 
-**Planned Cortex Path (optional)**
-- Replace the MAD step with **Snowflake Cortex time-series anomaly** over (day, count).
-- Parameters map roughly as:
-  - `lookback_days` → training window
-  - `sensitivity` → anomaly score threshold
-  - `min_history_days` → gating before scoring
-
-> Note: Your current `RULE_EXPR` for ROW_COUNT_ANOMALY is an `AGG:` SQL using the robust MAD method.
+### Why Snowflake for data quality?
+* **In-database compute** keeps checks close to the data—no egress, no shadow copies, just Snowflake warehouses doing the work.
+* **Snowpark Python** powers the runner procedure, letting us blend Python orchestration with native SQL performance.
+* **Streamlit in Snowflake** delivers the UI right where the data lives, eliminating context switching for data stewards.
+* **INFORMATION_SCHEMA & Account Usage** supply rich metadata for monitoring configurations, tasks, and run history.
+* **Governed sharing & roles** ensure DMF views, tasks, and procedures respect enterprise security while still being explorable when incidents occur.
             """
         )
 
