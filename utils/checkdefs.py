@@ -1,3 +1,6 @@
+import re
+
+
 SUPPORTED_COLUMN_CHECKS = ["UNIQUE","NULL_COUNT","MIN_MAX","WHITESPACE","FORMAT_DISTRIBUTION","VALUE_DISTRIBUTION"]
 SUPPORTED_TABLE_CHECKS  = ["FRESHNESS","ROW_COUNT","ROW_COUNT_ANOMALY"]
 
@@ -56,6 +59,34 @@ def _q(ident: str) -> str:
     return '.'.join(_quote_identifier(part) for part in parts)
 
 
+_NUMERIC_RE = re.compile(r"^[+-]?(?:\d+)(?:\.\d+)?$")
+
+
+def _format_literal(value: object) -> str:
+    if value is None:
+        raise ValueError("Literal value is required")
+
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return str(value)
+
+    text = str(value).strip()
+    if text == "":
+        raise ValueError("Literal value is required")
+
+    if text.upper() == "NULL":
+        return "NULL"
+
+    if _NUMERIC_RE.match(text):
+        return text
+
+    for forbidden in (';', '--', '/*', '*/'):
+        if forbidden in text:
+            raise ValueError("Literal contains invalid characters")
+
+    sanitized = text.replace("'", "''")
+    return f"'{sanitized}'"
+
+
 def build_rule_for_column_check(fqn: str, col: str, ctype: str, params: dict):
     colq = f'"{col}"'
     # return row predicate SQL, is_agg=False
@@ -71,8 +102,10 @@ def build_rule_for_column_check(fqn: str, col: str, ctype: str, params: dict):
     if ctype == "MIN_MAX":
         min_v = params.get("min"); max_v = params.get("max")
         conds = []
-        if min_v not in (None, ""): conds.append(f"{colq} >= {min_v}")
-        if max_v not in (None, ""): conds.append(f"{colq} <= {max_v}")
+        if min_v not in (None, ""):
+            conds.append(f"{colq} >= {_format_literal(min_v)}")
+        if max_v not in (None, ""):
+            conds.append(f"{colq} <= {_format_literal(max_v)}")
         return "(" + " AND ".join(conds or ["TRUE"]) + ")", False
     if ctype == "WHITESPACE":
         mode = params.get("mode", "NO_LEADING_TRAILING")
