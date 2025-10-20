@@ -7,6 +7,7 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import pandas as pd
 import streamlit as st
+from packaging.version import Version
 
 from services.profile import build_profile_suggestion
 from services.profiling import normalize_profile_row, run_table_profile, save_profile_results
@@ -251,6 +252,15 @@ def _tooltip_styles() -> List[Dict[str, Any]]:
             "props": [("visibility", "visible")],
         },
     ]
+
+
+def _supports_styler_tooltips() -> bool:
+    """Return True when Streamlit can render pandas Styler tooltips cleanly."""
+
+    try:
+        return Version(st.__version__) >= Version("1.32.0")
+    except Exception:
+        return False
 
 
 def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: ARG001 - interface matches requirement
@@ -561,20 +571,27 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
         display_df = display_df[[col for col in ordered_columns if col in display_df.columns] + [
             col for col in display_df.columns if col not in ordered_columns
         ]]
-        tooltip_df = pd.DataFrame("", index=display_df.index, columns=display_df.columns)
-        if "Confidence Badge" in tooltip_df.columns:
-            tooltip_df["Confidence Badge"] = rationale_series.reindex(display_df.index).fillna("")
-        styler = display_df.style.format({"Confidence": _format_confidence})
-        if "Confidence Badge" in display_df.columns:
-            styler = styler.applymap(_badge_css, subset=["Confidence Badge"])
-        styler = styler.set_tooltips(tooltip_df, css_class="confidence-tooltip")
-        hide_columns: List[str] = []
-        if "rationale" in display_df.columns:
-            hide_columns.append("rationale")
-        if hide_columns:
-            styler = styler.hide(axis="columns", subset=hide_columns)
-        styler = styler.set_table_styles(_tooltip_styles(), overwrite=False)
-        st.dataframe(styler, hide_index=True, use_container_width=True)
+        if _supports_styler_tooltips():
+            tooltip_df = pd.DataFrame("", index=display_df.index, columns=display_df.columns)
+            if "Confidence Badge" in tooltip_df.columns:
+                tooltip_df["Confidence Badge"] = rationale_series.reindex(display_df.index).fillna("")
+            styler = display_df.style.format({"Confidence": _format_confidence})
+            if "Confidence Badge" in display_df.columns:
+                styler = styler.applymap(_badge_css, subset=["Confidence Badge"])
+            styler = styler.set_tooltips(tooltip_df, css_class="confidence-tooltip")
+            hide_columns: List[str] = []
+            if "rationale" in display_df.columns:
+                hide_columns.append("rationale")
+            if hide_columns:
+                styler = styler.hide(axis="columns", subset=hide_columns)
+            styler = styler.set_table_styles(_tooltip_styles(), overwrite=False)
+            st.dataframe(styler, hide_index=True, use_container_width=True)
+        else:
+            compact_df = display_df.drop(columns=["rationale"], errors="ignore")
+            styler = compact_df.style.format({"Confidence": _format_confidence})
+            if "Confidence Badge" in compact_df.columns:
+                styler = styler.applymap(_badge_css, subset=["Confidence Badge"])
+            st.dataframe(styler, hide_index=True, use_container_width=True)
     else:
         st.dataframe(display_df, hide_index=True, use_container_width=True)
 
