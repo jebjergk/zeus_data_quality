@@ -71,3 +71,34 @@ def ensure_task_for_config(session, cfg) -> Dict[str, Any]:
         return {"status": "FALLBACK", "reason": message, "task": task_fqn}
 
     return {"status": "TASK_CREATED", "task": task_fqn}
+
+
+def suspend_task_for_config(session, config_id: Any) -> Dict[str, Any]:
+    """Suspend the Snowflake task for *config_id* if it exists."""
+
+    base_task_name = task_name_for_config(config_id)
+
+    if not session:
+        return {"status": "FALLBACK", "reason": "Missing session", "task": base_task_name}
+
+    meta_db, meta_schema = get_metadata_namespace()
+
+    if not meta_db or not meta_schema:
+        return {
+            "status": "FALLBACK",
+            "reason": "Metadata namespace is not configured",
+            "task": base_task_name,
+        }
+
+    task_fqn = _q(meta_db, meta_schema, base_task_name)
+
+    try:
+        session.sql(f"ALTER TASK {task_fqn} SUSPEND").collect()
+    except Exception as exc:  # pragma: no cover - Snowflake specific
+        message = str(exc)
+        lowered = message.lower()
+        if "does not exist" in lowered or "not found" in lowered:
+            return {"status": "NOT_FOUND", "task": task_fqn}
+        return {"status": "FALLBACK", "reason": message, "task": task_fqn}
+
+    return {"status": "TASK_SUSPENDED", "task": task_fqn}
