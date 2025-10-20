@@ -7,7 +7,6 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import pandas as pd
 import streamlit as st
-from packaging.version import Version
 
 from services.profile import build_profile_suggestion
 from services.profiling import normalize_profile_row, run_table_profile, save_profile_results
@@ -215,52 +214,6 @@ def _badge_css(value: Any) -> str:
             "min-width: 4rem",
         ]
     )
-
-
-def _tooltip_styles() -> List[Dict[str, Any]]:
-    base_class = "confidence-tooltip"
-    text_class = f"{base_class}-text"
-    return [
-        {
-            "selector": f".{base_class}",
-            "props": [
-                ("position", "relative"),
-                ("display", "inline-block"),
-            ],
-        },
-        {
-            "selector": f".{base_class} .{text_class}",
-            "props": [
-                ("visibility", "hidden"),
-                ("width", "240px"),
-                ("background-color", "#31333F"),
-                ("color", "#ffffff"),
-                ("text-align", "left"),
-                ("border-radius", "4px"),
-                ("padding", "0.4rem"),
-                ("position", "absolute"),
-                ("z-index", "1"),
-                ("bottom", "125%"),
-                ("left", "50%"),
-                ("margin-left", "-120px"),
-                ("box-shadow", "0 2px 6px rgba(0, 0, 0, 0.2)"),
-                ("font-size", "0.75rem"),
-            ],
-        },
-        {
-            "selector": f".{base_class}:hover .{text_class}",
-            "props": [("visibility", "visible")],
-        },
-    ]
-
-
-def _supports_styler_tooltips() -> bool:
-    """Return True when Streamlit can render pandas Styler tooltips cleanly."""
-
-    try:
-        return Version(st.__version__) >= Version("1.32.0")
-    except Exception:
-        return False
 
 
 def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: ARG001 - interface matches requirement
@@ -547,8 +500,9 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
         else:
             display_df["Confidence"] = None
             display_df["Confidence Badge"] = "Unknown"
-        rationale_series = filtered_df.get("rationale", pd.Series(dtype="object"))
         display_df = display_df.rename(columns={"semantic_type": "Guessed Type"})
+        if "rationale" in display_df.columns:
+            display_df = display_df.rename(columns={"rationale": "Confidence Rationale"})
         if "Guessed Type" in display_df.columns:
             display_df["Guessed Type"] = display_df["Guessed Type"].fillna("Unknown")
         ordered_columns = [
@@ -566,32 +520,27 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
             "avg_len",
             "whitespace_pct",
             "error",
-            "rationale",
+            "Confidence Rationale",
         ]
         display_df = display_df[[col for col in ordered_columns if col in display_df.columns] + [
             col for col in display_df.columns if col not in ordered_columns
         ]]
-        if _supports_styler_tooltips():
-            tooltip_df = pd.DataFrame("", index=display_df.index, columns=display_df.columns)
-            if "Confidence Badge" in tooltip_df.columns:
-                tooltip_df["Confidence Badge"] = rationale_series.reindex(display_df.index).fillna("")
-            styler = display_df.style.format({"Confidence": _format_confidence})
-            if "Confidence Badge" in display_df.columns:
-                styler = styler.applymap(_badge_css, subset=["Confidence Badge"])
-            styler = styler.set_tooltips(tooltip_df, css_class="confidence-tooltip")
-            hide_columns: List[str] = []
-            if "rationale" in display_df.columns:
-                hide_columns.append("rationale")
-            if hide_columns:
-                styler = styler.hide(axis="columns", subset=hide_columns)
-            styler = styler.set_table_styles(_tooltip_styles(), overwrite=False)
-            st.dataframe(styler, hide_index=True, use_container_width=True)
-        else:
-            compact_df = display_df.drop(columns=["rationale"], errors="ignore")
-            styler = compact_df.style.format({"Confidence": _format_confidence})
-            if "Confidence Badge" in compact_df.columns:
-                styler = styler.applymap(_badge_css, subset=["Confidence Badge"])
-            st.dataframe(styler, hide_index=True, use_container_width=True)
+        styler = display_df.style.format({"Confidence": _format_confidence})
+        if "Confidence Badge" in display_df.columns:
+            styler = styler.applymap(_badge_css, subset=["Confidence Badge"])
+        column_config: Dict[str, st.column_config.BaseColumn] = {}
+        if "Confidence Rationale" in display_df.columns:
+            column_config["Confidence Rationale"] = st.column_config.TextColumn(
+                "Confidence Rationale",
+                help="Explanation for how the guessed type confidence was determined.",
+                width="medium",
+            )
+        st.dataframe(
+            styler,
+            hide_index=True,
+            use_container_width=True,
+            column_config=column_config or None,
+        )
     else:
         st.dataframe(display_df, hide_index=True, use_container_width=True)
 
