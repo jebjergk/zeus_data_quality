@@ -1,6 +1,7 @@
 from __future__ import annotations
 import html
 import math
+import textwrap
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -473,12 +474,14 @@ def _render_metric_card(
         else:
             value_block = f"<div class=\"metric-value\">{value_html}</div>"
         metric_html.append(
-            """
-            <div class="metric">
-                <div class="metric-label">{label}</div>
-                {value_block}
-            </div>
-            """.format(label=label_html, value_block=value_block)
+            textwrap.dedent(
+                """
+                <div class="metric">
+                    <div class="metric-label">{label}</div>
+                    {value_block}
+                </div>
+                """
+            ).format(label=label_html, value_block=value_block).strip()
         )
 
     subtitle_html = (
@@ -486,17 +489,19 @@ def _render_metric_card(
         if subtitle
         else ""
     )
-    card_html = """
-    <div class="card">
-        <div class="kv">{title}</div>
-        {subtitle}
-        <div class="metrics-grid">
-            {metrics}
+    card_html = textwrap.dedent(
+        """
+        <div class="card">
+            <div class="kv">{title}</div>
+            {subtitle}
+            <div class="metrics-grid">
+                {metrics}
+            </div>
         </div>
-    </div>
-    """.format(
+        """
+    ).format(
         title=html.escape(title), subtitle=subtitle_html, metrics="".join(metric_html)
-    )
+    ).strip()
     st.markdown(card_html, unsafe_allow_html=True)
 
 
