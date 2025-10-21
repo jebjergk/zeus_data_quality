@@ -78,6 +78,23 @@ class ColumnProfile:
     max_val: Optional[Any]
     avg_len: Optional[float]
     whitespace_pct: Optional[float]
+    row_cnt: Optional[int] = None
+    distinct_ratio: Optional[float] = None
+    top1_ratio: Optional[float] = None
+    top3_ratio: Optional[float] = None
+    len_min: Optional[float] = None
+    len_max: Optional[float] = None
+    numeric_like_ratio: Optional[float] = None
+    yyyymmdd_ratio: Optional[float] = None
+    ddmmyyyy_ratio: Optional[float] = None
+    iso_ymd_ratio: Optional[float] = None
+    date_parse_ratio_yyyymmdd: Optional[float] = None
+    date_parse_ratio_ddmmyyyy: Optional[float] = None
+    date_parse_ratio_iso: Optional[float] = None
+    date_parse_ratio_best: Optional[float] = None
+    date_parse_best_format: Optional[str] = None
+    parsed_date_min: Optional[str] = None
+    parsed_date_max: Optional[str] = None
     top_values: List[Dict[str, Any]]
     error: Optional[str] = None
     semantic_type: Optional[str] = None
@@ -92,6 +109,18 @@ def _column_profile_from_payload(column: Dict[str, Any]) -> ColumnProfile:
         top_values_list = [dict(entry) for entry in top_values if isinstance(entry, dict)]
     else:
         top_values_list = []
+    best_format_value = normalized.get("date_parse_best_format")
+    best_format_display: Optional[str]
+    if best_format_value:
+        fmt_key = str(best_format_value).lower()
+        format_map = {
+            "yyyymmdd": "YYYYMMDD",
+            "ddmmyyyy": "DDMMYYYY",
+            "iso": "YYYY-MM-DD",
+        }
+        best_format_display = format_map.get(fmt_key, str(best_format_value))
+    else:
+        best_format_display = None
     return ColumnProfile(
         name=str(normalized.get("column_name") or normalized.get("name") or ""),
         data_type=str(normalized.get("data_type") or ""),
@@ -103,6 +132,23 @@ def _column_profile_from_payload(column: Dict[str, Any]) -> ColumnProfile:
         max_val=normalized.get("max_val"),
         avg_len=_safe_float(normalized.get("avg_len")),
         whitespace_pct=_safe_float(normalized.get("whitespace_pct")),
+        row_cnt=_safe_int(normalized.get("row_cnt")),
+        distinct_ratio=_safe_float(normalized.get("distinct_ratio")),
+        top1_ratio=_safe_float(normalized.get("top1_ratio")),
+        top3_ratio=_safe_float(normalized.get("top3_ratio")),
+        len_min=_safe_float(normalized.get("len_min")),
+        len_max=_safe_float(normalized.get("len_max")),
+        numeric_like_ratio=_safe_float(normalized.get("numeric_like_ratio")),
+        yyyymmdd_ratio=_safe_float(normalized.get("date_pattern_yyyymmdd_ratio")),
+        ddmmyyyy_ratio=_safe_float(normalized.get("date_pattern_ddmmyyyy_ratio")),
+        iso_ymd_ratio=_safe_float(normalized.get("date_pattern_iso_ymd_ratio")),
+        date_parse_ratio_yyyymmdd=_safe_float(normalized.get("date_parse_ratio_yyyymmdd")),
+        date_parse_ratio_ddmmyyyy=_safe_float(normalized.get("date_parse_ratio_ddmmyyyy")),
+        date_parse_ratio_iso=_safe_float(normalized.get("date_parse_ratio_iso")),
+        date_parse_ratio_best=_safe_float(normalized.get("date_parse_ratio_best")),
+        date_parse_best_format=best_format_display,
+        parsed_date_min=str(normalized.get("parsed_date_min")) if normalized.get("parsed_date_min") else None,
+        parsed_date_max=str(normalized.get("parsed_date_max")) if normalized.get("parsed_date_max") else None,
         top_values=top_values_list,
         error=normalized.get("error"),
         semantic_type=normalized.get("semantic_type"),
@@ -178,6 +224,14 @@ def _table_picker(session_obj, preselect_fqn: Optional[str]):
 def _profiles_to_frame(profiles: Iterable[ColumnProfile]) -> pd.DataFrame:
     records = []
     for profile in profiles:
+        def _pct(value: Optional[float]) -> Optional[float]:
+            if value is None:
+                return None
+            try:
+                return round(float(value) * 100.0, 2)
+            except Exception:
+                return None
+
         records.append(
             {
                 "column_name": profile.name,
@@ -190,6 +244,23 @@ def _profiles_to_frame(profiles: Iterable[ColumnProfile]) -> pd.DataFrame:
                 "max_val": profile.max_val,
                 "avg_len": round(profile.avg_len, 2) if profile.avg_len is not None else None,
                 "whitespace_pct": round(profile.whitespace_pct, 2) if profile.whitespace_pct is not None else None,
+                "row_cnt": profile.row_cnt,
+                "len_min": round(profile.len_min, 2) if profile.len_min is not None else None,
+                "len_max": round(profile.len_max, 2) if profile.len_max is not None else None,
+                "distinct_ratio_pct": _pct(profile.distinct_ratio),
+                "top1_ratio_pct": _pct(profile.top1_ratio),
+                "top3_ratio_pct": _pct(profile.top3_ratio),
+                "numeric_like_pct": _pct(profile.numeric_like_ratio),
+                "date_pattern_yyyymmdd_pct": _pct(profile.yyyymmdd_ratio),
+                "date_pattern_ddmmyyyy_pct": _pct(profile.ddmmyyyy_ratio),
+                "date_pattern_iso_ymd_pct": _pct(profile.iso_ymd_ratio),
+                "date_parse_yyyymmdd_pct": _pct(profile.date_parse_ratio_yyyymmdd),
+                "date_parse_ddmmyyyy_pct": _pct(profile.date_parse_ratio_ddmmyyyy),
+                "date_parse_iso_pct": _pct(profile.date_parse_ratio_iso),
+                "date_parse_best_pct": _pct(profile.date_parse_ratio_best),
+                "date_parse_best_format": profile.date_parse_best_format,
+                "parsed_date_min": profile.parsed_date_min,
+                "parsed_date_max": profile.parsed_date_max,
                 "top_values": profile.top_values,
                 "error": profile.error,
                 "semantic_type": profile.semantic_type,
@@ -538,7 +609,7 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
         filtered_df = filtered_df[(filtered_df["whitespace_pct"].fillna(0) > 5)]
 
     semantic_filter_map = {
-        "Identifiers": {"ACCOUNT_ID", "ORDER_ID", "TRADE_ID", "UUID", "IBAN"},
+        "Identifiers": {"ACCOUNT_ID", "ORDER_ID", "TRADE_ID", "UUID", "IBAN", "REFERENCE_CODE"},
         "Financial": {"PRICE/AMOUNT/QUANTITY", "IBAN", "BIC"},
         "Instrument": {"ISIN", "TICKER/SYMBOL"},
         "Geo": {"COUNTRY_CODE/NAME", "CURRENCY_CODE", "BIC"},
@@ -572,22 +643,58 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
         else:
             display_df["Confidence"] = None
             display_df["Confidence Badge"] = "Unknown"
-        display_df = display_df.rename(columns={"semantic_type": "Guessed Type"})
-        if "rationale" in display_df.columns:
-            display_df = display_df.rename(columns={"rationale": "Confidence Rationale"})
+        rename_map = {
+            "semantic_type": "Guessed Type",
+            "rationale": "Confidence Rationale",
+            "row_cnt": "Non-null Rows",
+            "len_min": "Length Min",
+            "len_max": "Length Max",
+            "distinct_ratio_pct": "Distinct Ratio %",
+            "top1_ratio_pct": "Top 1 Ratio %",
+            "top3_ratio_pct": "Top 3 Coverage %",
+            "numeric_like_pct": "Numeric-like %",
+            "date_pattern_yyyymmdd_pct": "YYYYMMDD Pattern %",
+            "date_pattern_ddmmyyyy_pct": "DDMMYYYY Pattern %",
+            "date_pattern_iso_ymd_pct": "ISO Pattern %",
+            "date_parse_yyyymmdd_pct": "YYYYMMDD Parse %",
+            "date_parse_ddmmyyyy_pct": "DDMMYYYY Parse %",
+            "date_parse_iso_pct": "ISO Parse %",
+            "date_parse_best_pct": "Best Parse %",
+            "date_parse_best_format": "Best Parse Format",
+            "parsed_date_min": "Parsed Date Min",
+            "parsed_date_max": "Parsed Date Max",
+        }
+        display_df = display_df.rename(columns={k: v for k, v in rename_map.items() if k in display_df.columns})
         if "Guessed Type" in display_df.columns:
             display_df["Guessed Type"] = display_df["Guessed Type"].fillna("Unknown")
         ordered_columns = [
             "column_name",
             "data_type",
+            "Non-null Rows",
             "nulls",
             "null_pct",
             "distincts",
             "distinct_pct",
+            "Distinct Ratio %",
+            "Top 1 Ratio %",
+            "Top 3 Coverage %",
+            "Numeric-like %",
             "min_val",
             "max_val",
             "avg_len",
+            "Length Min",
+            "Length Max",
             "whitespace_pct",
+            "YYYYMMDD Pattern %",
+            "DDMMYYYY Pattern %",
+            "ISO Pattern %",
+            "YYYYMMDD Parse %",
+            "DDMMYYYY Parse %",
+            "ISO Parse %",
+            "Best Parse %",
+            "Best Parse Format",
+            "Parsed Date Min",
+            "Parsed Date Max",
             "error",
             "Guessed Type",
             "Confidence Badge",
@@ -598,10 +705,26 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
             col for col in display_df.columns if col not in ordered_columns
         ]]
         formatters: Dict[str, Any] = {"Confidence": _format_confidence}
-        for count_col in ("nulls", "distincts"):
+        for count_col in ("nulls", "distincts", "Non-null Rows"):
             if count_col in display_df.columns:
                 formatters[count_col] = _format_count
-        for pct_col in ("null_pct", "distinct_pct", "whitespace_pct"):
+        percentage_columns = (
+            "null_pct",
+            "distinct_pct",
+            "whitespace_pct",
+            "Distinct Ratio %",
+            "Top 1 Ratio %",
+            "Top 3 Coverage %",
+            "Numeric-like %",
+            "YYYYMMDD Pattern %",
+            "DDMMYYYY Pattern %",
+            "ISO Pattern %",
+            "YYYYMMDD Parse %",
+            "DDMMYYYY Parse %",
+            "ISO Parse %",
+            "Best Parse %",
+        )
+        for pct_col in percentage_columns:
             if pct_col in display_df.columns:
                 formatters[pct_col] = _format_percentage
         styler = display_df.style.format(formatters)
