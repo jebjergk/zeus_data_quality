@@ -695,7 +695,7 @@ def run_table_profile(
             f"{distinct_expr.format(col=qcol)} AS DISTINCTS",
             f"SUM(CASE WHEN {qcol} IS NOT NULL THEN 1 ELSE 0 END) AS NON_NULLS_COUNT",
         ]
-        if _is_numeric(dtype) or _is_temporal(dtype):
+        if _is_numeric(dtype) or _is_temporal(dtype) or _is_string_type(dtype):
             metrics_sql.extend(
                 [
                     f"MIN({qcol}) AS MIN_VAL",
