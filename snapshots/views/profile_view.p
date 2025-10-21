@@ -2,7 +2,7 @@ from __future__ import annotations
 import html
 import math
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from numbers import Integral, Real
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
@@ -98,7 +98,7 @@ class ColumnProfile:
     parsed_date_max: Optional[str] = None
     numeric_min: Optional[Any] = None
     numeric_max: Optional[Any] = None
-    top_values: List[Dict[str, Any]]
+    top_values: List[Dict[str, Any]] = field(default_factory=list)
     error: Optional[str] = None
     semantic_type: Optional[str] = None
     confidence: Optional[float] = None
