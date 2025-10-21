@@ -1040,7 +1040,9 @@ def suggest_checks_from_profile(
         if whitespace_pct >= 5.0 and _is_string_type(data_type):
             checks["WHITESPACE"] = {"severity": "WARN", "params": {"mode": "NO_LEADING_TRAILING"}}
 
-        if (min_val is not None and max_val is not None) and (_is_numeric(data_type) or _is_temporal(data_type)):
+        if (min_val is not None and max_val is not None) and (
+            _is_numeric(data_type) or _is_temporal(data_type) or _is_string_type(data_type)
+        ):
             checks["MIN_MAX"] = {
                 "severity": "WARN",
                 "params": {
