@@ -1,4 +1,5 @@
 from __future__ import annotations
+import html
 import math
 import time
 from dataclasses import dataclass
@@ -95,6 +96,8 @@ class ColumnProfile:
     date_parse_best_format: Optional[str] = None
     parsed_date_min: Optional[str] = None
     parsed_date_max: Optional[str] = None
+    numeric_min: Optional[Any] = None
+    numeric_max: Optional[Any] = None
     top_values: List[Dict[str, Any]]
     error: Optional[str] = None
     semantic_type: Optional[str] = None
@@ -121,6 +124,21 @@ def _column_profile_from_payload(column: Dict[str, Any]) -> ColumnProfile:
         best_format_display = format_map.get(fmt_key, str(best_format_value))
     else:
         best_format_display = None
+
+    numeric_min_raw = normalized.get("numeric_min")
+    numeric_max_raw = normalized.get("numeric_max")
+
+    def _normalize_numeric_bound(raw_value: Any) -> Optional[Any]:
+        numeric_value = _safe_float(raw_value)
+        if numeric_value is not None:
+            return numeric_value
+        if raw_value is None:
+            return None
+        text_value = str(raw_value).strip()
+        return text_value or None
+
+    numeric_min_value = _normalize_numeric_bound(numeric_min_raw)
+    numeric_max_value = _normalize_numeric_bound(numeric_max_raw)
     return ColumnProfile(
         name=str(normalized.get("column_name") or normalized.get("name") or ""),
         data_type=str(normalized.get("data_type") or ""),
@@ -149,6 +167,8 @@ def _column_profile_from_payload(column: Dict[str, Any]) -> ColumnProfile:
         date_parse_best_format=best_format_display,
         parsed_date_min=str(normalized.get("parsed_date_min")) if normalized.get("parsed_date_min") else None,
         parsed_date_max=str(normalized.get("parsed_date_max")) if normalized.get("parsed_date_max") else None,
+        numeric_min=numeric_min_value,
+        numeric_max=numeric_max_value,
         top_values=top_values_list,
         error=normalized.get("error"),
         semantic_type=normalized.get("semantic_type"),
@@ -261,6 +281,8 @@ def _profiles_to_frame(profiles: Iterable[ColumnProfile]) -> pd.DataFrame:
                 "date_parse_best_format": profile.date_parse_best_format,
                 "parsed_date_min": profile.parsed_date_min,
                 "parsed_date_max": profile.parsed_date_max,
+                "numeric_min": profile.numeric_min,
+                "numeric_max": profile.numeric_max,
                 "top_values": profile.top_values,
                 "error": profile.error,
                 "semantic_type": profile.semantic_type,
@@ -357,6 +379,156 @@ def _badge_css(value: Any) -> str:
             "min-width: 4rem",
         ]
     )
+
+
+def _format_ratio_pct(value: Optional[float], decimals: int = 0) -> str:
+    if value is None:
+        return "—"
+    try:
+        ratio = float(value)
+        if math.isnan(ratio):
+            return "—"
+        return f"{ratio * 100:.{decimals}f}%"
+    except Exception:
+        return "—"
+
+
+def _format_card_value(value: Any, *, decimals: int = 2, allow_commas: bool = False) -> str:
+    if value is None:
+        return "—"
+    if isinstance(value, (int, float)):
+        try:
+            number = float(value)
+        except Exception:
+            number = math.nan
+        if math.isnan(number):
+            return "—"
+        if math.isclose(number, round(number), abs_tol=1e-9):
+            integer_value = int(round(number))
+            return f"{integer_value:,}" if allow_commas else f"{integer_value}"
+        fmt = f"{{:,.{decimals}f}}" if allow_commas else f"{{:.{decimals}f}}"
+        return fmt.format(number)
+    text_value = str(value).strip()
+    return text_value or "—"
+
+
+def _render_metric_card(
+    title: str,
+    metrics: List[Tuple[str, str, Optional[str]]],
+    subtitle: Optional[str] = None,
+) -> None:
+    if not metrics:
+        return
+    metric_html: List[str] = []
+    for label, raw_value, tooltip in metrics:
+        label_html = html.escape(label)
+        display_value = raw_value if raw_value else "—"
+        value_html = html.escape(display_value)
+        if tooltip:
+            tooltip_html = html.escape(tooltip)
+            value_block = f"<div class=\"metric-value\" title=\"{tooltip_html}\">{value_html}</div>"
+        else:
+            value_block = f"<div class=\"metric-value\">{value_html}</div>"
+        metric_html.append(
+            """
+            <div class="metric">
+                <div class="metric-label">{label}</div>
+                {value_block}
+            </div>
+            """.format(label=label_html, value_block=value_block)
+        )
+
+    subtitle_html = (
+        f"<div class=\"small\">{html.escape(subtitle)}</div>"
+        if subtitle
+        else ""
+    )
+    card_html = """
+    <div class="card">
+        <div class="kv">{title}</div>
+        {subtitle}
+        <div class="metrics-grid">
+            {metrics}
+        </div>
+    </div>
+    """.format(
+        title=html.escape(title), subtitle=subtitle_html, metrics="".join(metric_html)
+    )
+    st.markdown(card_html, unsafe_allow_html=True)
+
+
+def _render_min_max_assessments(profiles: Iterable[ColumnProfile]) -> None:
+    cards: List[Tuple[str, Optional[str], List[Tuple[str, str, Optional[str]]]]] = []
+
+    for profile in profiles:
+        semantic_type = (profile.semantic_type or "").upper()
+        if semantic_type == "DATE_IN_TEXT":
+            min_date = profile.parsed_date_min
+            max_date = profile.parsed_date_max
+            if not (min_date or max_date):
+                continue
+            success_ratio = profile.date_parse_ratio_best
+            tooltip = "parsed from text"
+            if success_ratio is not None:
+                try:
+                    ratio_float = float(success_ratio)
+                except Exception:
+                    ratio_float = math.nan
+                if not math.isnan(ratio_float):
+                    tooltip = (
+                        f"parsed from text; success ratio = {_format_ratio_pct(ratio_float, 0)}"
+                    )
+            metrics = [
+                ("Min date", _format_card_value(min_date), tooltip),
+                ("Max date", _format_card_value(max_date), tooltip),
+            ]
+            cards.append((profile.name, "DATE_IN_TEXT", metrics))
+            continue
+
+        if semantic_type == "REF_CODE":
+            distinct_display = _format_card_value(
+                profile.distincts, decimals=0, allow_commas=True
+            )
+            top3_display = _format_ratio_pct(profile.top3_ratio, 1)
+            length_min = _format_card_value(profile.len_min, decimals=1)
+            length_max = _format_card_value(profile.len_max, decimals=1)
+            metrics: List[Tuple[str, str, Optional[str]]] = [
+                ("Distinct count", distinct_display, None),
+                ("Top 3 coverage", top3_display, None),
+                ("Length min/max", f"{length_min} / {length_max}", None),
+            ]
+            numeric_ratio = profile.numeric_like_ratio or 0.0
+            if numeric_ratio >= 0.9 and (profile.numeric_min is not None or profile.numeric_max is not None):
+                metrics.append(
+                    (
+                        "Numeric min",
+                        _format_card_value(profile.numeric_min, allow_commas=True),
+                        None,
+                    )
+                )
+                metrics.append(
+                    (
+                        "Numeric max",
+                        _format_card_value(profile.numeric_max, allow_commas=True),
+                        None,
+                    )
+                )
+            cards.append((profile.name, "REF_CODE", metrics))
+
+    if not cards:
+        return
+
+    st.subheader("Min/Max assessments", anchor=False)
+    st.caption("Profiler-derived bounds tailored to semantic type hints.")
+
+    chunk = 2
+    for idx in range(0, len(cards), chunk):
+        row_cards = cards[idx : idx + chunk]
+        cols = st.columns(len(row_cards))
+        for col, card in zip(cols, row_cards):
+            with col:
+                title, subtitle, metrics = card
+                _render_metric_card(title, metrics, subtitle)
 
 
 def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: ARG001 - interface matches requirement
@@ -522,6 +694,7 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
 
     profiles_raw = profile_result.get("columns", [])
     profiles = [_column_profile_from_payload(col) for col in profiles_raw]
+    _render_min_max_assessments(profiles)
     df = _profiles_to_frame(profiles)
 
     filter_box = st.container()
