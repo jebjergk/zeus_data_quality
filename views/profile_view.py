@@ -609,7 +609,7 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
         filtered_df = filtered_df[(filtered_df["whitespace_pct"].fillna(0) > 5)]
 
     semantic_filter_map = {
-        "Identifiers": {"ACCOUNT_ID", "ORDER_ID", "TRADE_ID", "UUID", "IBAN", "REFERENCE_CODE"},
+        "Identifiers": {"ACCOUNT_ID", "ORDER_ID", "TRADE_ID", "UUID", "IBAN", "REF_CODE"},
         "Financial": {"PRICE/AMOUNT/QUANTITY", "IBAN", "BIC"},
         "Instrument": {"ISIN", "TICKER/SYMBOL"},
         "Geo": {"COUNTRY_CODE/NAME", "CURRENCY_CODE", "BIC"},
@@ -653,6 +653,8 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
             "top1_ratio_pct": "Top 1 Ratio %",
             "top3_ratio_pct": "Top 3 Coverage %",
             "numeric_like_pct": "Numeric-like %",
+            "numeric_min": "Numeric Min",
+            "numeric_max": "Numeric Max",
             "date_pattern_yyyymmdd_pct": "YYYYMMDD Pattern %",
             "date_pattern_ddmmyyyy_pct": "DDMMYYYY Pattern %",
             "date_pattern_iso_ymd_pct": "ISO Pattern %",
@@ -681,6 +683,8 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
             "Numeric-like %",
             "min_val",
             "max_val",
+            "Numeric Min",
+            "Numeric Max",
             "avg_len",
             "Length Min",
             "Length Max",

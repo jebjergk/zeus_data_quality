@@ -252,7 +252,7 @@ SEMANTIC_TYPE_CANDIDATES: Tuple[str, ...] = (
     "UUID",
     "URL",
     "PHONE",
-    "REFERENCE_CODE",
+    "REF_CODE",
     "DATE_IN_TEXT",
 )
 
@@ -326,6 +326,23 @@ def _infer_semantic_type(column_entry: Dict[str, Any]) -> Tuple[str, float, str]
 
     scores: Dict[str, float] = {candidate: 0.0 for candidate in SEMANTIC_TYPE_CANDIDATES}
     rationales: Dict[str, List[str]] = {candidate: [] for candidate in SEMANTIC_TYPE_CANDIDATES}
+    forced_type: Optional[str] = None
+    forced_confidence: Optional[float] = None
+    forced_rationale_parts: List[str] = []
+
+    if distinct_ratio_signal is not None:
+        resolved_distinct_ratio = float(distinct_ratio_signal)
+    else:
+        distinct_count = column_entry.get("distincts")
+        non_null_count = column_entry.get("non_nulls")
+        try:
+            resolved_distinct_ratio = (
+                float(distinct_count) / float(non_null_count)
+                if (distinct_count is not None and non_null_count)
+                else 0.0
+            )
+        except Exception:
+            resolved_distinct_ratio = 0.0
 
     email_ratio = _ratio(regex, "email")
     if email_ratio > 0:
@@ -408,6 +425,31 @@ def _infer_semantic_type(column_entry: Dict[str, Any]) -> Tuple[str, float, str]
             )
     if "date" in column_name_lower and not _is_temporal(data_type):
         _boost("DATE_IN_TEXT", 10.0, "column name references date but stored as string")
+
+    date_success_ratio = float(best_date_ratio or 0.0)
+    pattern_combo_sum = float((iso_pattern_ratio or 0.0) + (yyyymmdd_pattern_ratio or 0.0))
+    pattern_combo_ratio = min(pattern_combo_sum, 1.0)
+    distinct_ratio_for_date = float(resolved_distinct_ratio)
+    if date_success_ratio >= 0.9 or (
+        pattern_combo_sum >= 0.9 and distinct_ratio_for_date >= 0.01
+    ):
+        forced_type = "DATE_IN_TEXT"
+        forced_confidence = round(min(max(date_success_ratio, 0.0), 1.0), 3)
+        if date_success_ratio >= 0.9:
+            forced_rationale_parts.append(
+                f"{date_success_ratio:.0%} of values parse successfully"
+            )
+        if pattern_combo_sum >= 0.9:
+            forced_rationale_parts.append(
+                f"YYYYMMDD/ISO patterns cover {pattern_combo_ratio:.0%} of values"
+            )
+        if parsed_date_min or parsed_date_max:
+            forced_rationale_parts.append(
+                "parsed range {start} → {end}".format(
+                    start=parsed_date_min or "?",
+                    end=parsed_date_max or "?",
+                )
+            )
 
     currency_ref = _ratio(references, "reference_currency_code")
     if currency_ref > 0:
@@ -517,15 +559,48 @@ def _infer_semantic_type(column_entry: Dict[str, Any]) -> Tuple[str, float, str]
             reason = (
                 f"{distinct_ratio_signal:.0%} of values unique with low mode dominance"
             )
-            _boost("REFERENCE_CODE", 35.0 + min(distinct_ratio_signal, 1.0) * 40.0, reason)
+            _boost("REF_CODE", 35.0 + min(distinct_ratio_signal, 1.0) * 40.0, reason)
             if hints.get("code") or "code" in column_name_lower or hints.get("reference"):
-                _boost("REFERENCE_CODE", 12.0, "column name implies reference code")
+                _boost("REF_CODE", 12.0, "column name implies reference code")
             if consistent_length and length_min is not None:
-                _boost("REFERENCE_CODE", 8.0, f"values share consistent length ≈ {length_min:.0f}")
+                _boost("REF_CODE", 8.0, f"values share consistent length ≈ {length_min:.0f}")
             if 0.05 <= (numeric_like_ratio_signal or 0.0) <= 0.95:
-                _boost("REFERENCE_CODE", 6.0, "mix of digits suggests coded identifiers")
+                _boost("REF_CODE", 6.0, "mix of digits suggests coded identifiers")
             if char_alnum >= 0.6:
-                _boost("REFERENCE_CODE", 4.0, "alphanumeric composition typical of codes")
+                _boost("REF_CODE", 4.0, "alphanumeric composition typical of codes")
+
+    distinct_ratio_value_raw = float(resolved_distinct_ratio)
+    distinct_ratio_value = max(0.0, min(1.0, distinct_ratio_value_raw))
+    top3_ratio_value = max(0.0, min(1.0, float(top3_ratio_signal or 0.0)))
+    row_count_value = int(column_entry.get("non_nulls") or 0)
+    distinct_count_value = column_entry.get("distincts")
+    cond_low_cardinality = 0.01 <= distinct_ratio_value <= 0.30 and top3_ratio_value >= 0.80
+    cond_limited_unique = (
+        isinstance(distinct_count_value, (int, float))
+        and float(distinct_count_value) <= 200
+        and row_count_value >= 10000
+    )
+    if forced_type is None and (cond_low_cardinality or cond_limited_unique):
+        forced_type = "REF_CODE"
+        uniqueness_component = max(0.0, min(1.0, 1.0 - distinct_ratio_value))
+        coverage_component = max(0.0, min(1.0, top3_ratio_value))
+        name_hint = 0.0
+        if hints.get("code") or "code" in column_name_lower or "xref" in column_name_lower or "land" in column_name_lower:
+            name_hint = 1.0
+            forced_rationale_parts.append("column name suggests reference code")
+        confidence_calc = 0.5 * uniqueness_component + 0.35 * coverage_component + 0.15 * name_hint
+        forced_confidence = round(min(1.0, confidence_calc), 3)
+        if cond_low_cardinality:
+            forced_rationale_parts.append(
+                "low cardinality ({distinct:.0%} distinct) with top 3 covering {top3:.0%}".format(
+                    distinct=distinct_ratio_value,
+                    top3=top3_ratio_value,
+                )
+            )
+        if cond_limited_unique:
+            forced_rationale_parts.append(
+                f"{distinct_count_value} distinct values across {row_count_value} rows"
+            )
 
     if distinct_pct is not None and distinct_pct >= 70.0:
         _boost("ACCOUNT_ID", 12.0, "high uniqueness typical for identifiers")
@@ -566,6 +641,20 @@ def _infer_semantic_type(column_entry: Dict[str, Any]) -> Tuple[str, float, str]
             best_type = "ACCOUNT_ID"
             best_score = 10.0
             rationales.setdefault(best_type, []).append("defaulting to generic identifier due to lack of stronger signals")
+
+    forced_rationale = "; ".join(part for part in forced_rationale_parts if part)
+    if forced_type:
+        best_type = forced_type
+        if forced_confidence is not None:
+            confidence = forced_confidence
+        else:
+            confidence = round(min(1.0, max(best_score, 0.0) / 100.0), 3)
+        if not forced_rationale:
+            if forced_type == "DATE_IN_TEXT" and date_success_ratio >= 0.9:
+                forced_rationale = f"{date_success_ratio:.0%} of values parse successfully"
+            else:
+                forced_rationale = "rule-based semantic classification"
+        return best_type, confidence, forced_rationale
 
     confidence = min(1.0, max(best_score, 0.0) / 100.0)
     confidence = round(confidence, 3)
@@ -1180,6 +1269,47 @@ def run_table_profile(
         column_entry["semantic_type"] = semantic_type
         column_entry["confidence"] = confidence
         column_entry["rationale"] = rationale
+
+        if (
+            semantic_type == "REF_CODE"
+            and is_string
+            and (column_entry.get("signal_numeric_like_ratio") or 0.0) >= 0.9
+        ):
+            try:
+                bounds_row = _collect_single_row(
+                    session,
+                    (
+                        "SELECT MIN(TRY_TO_NUMBER({col}::STRING)) AS NUMERIC_MIN, "
+                        "MAX(TRY_TO_NUMBER({col}::STRING)) AS NUMERIC_MAX FROM {table} "
+                        "WHERE TRY_TO_NUMBER({col}::STRING) IS NOT NULL"
+                    ).format(col=qcol, table=sampled_ref),
+                )
+            except Exception:
+                bounds_row = None
+            numeric_min_raw = _extract_row_value(bounds_row, "NUMERIC_MIN")
+            numeric_max_raw = _extract_row_value(bounds_row, "NUMERIC_MAX")
+
+            def _to_float(value: Any) -> Optional[float]:
+                if value is None:
+                    return None
+                try:
+                    return float(value)
+                except Exception:
+                    try:
+                        return float(str(value))
+                    except Exception:
+                        return None
+
+            numeric_min_val = _to_float(numeric_min_raw)
+            numeric_max_val = _to_float(numeric_max_raw)
+            if numeric_min_val is not None:
+                column_entry["numeric_min"] = numeric_min_val
+            elif numeric_min_raw is not None:
+                column_entry["numeric_min"] = str(numeric_min_raw)
+            if numeric_max_val is not None:
+                column_entry["numeric_max"] = numeric_max_val
+            elif numeric_max_raw is not None:
+                column_entry["numeric_max"] = str(numeric_max_raw)
 
         per_column.append(column_entry)
 
