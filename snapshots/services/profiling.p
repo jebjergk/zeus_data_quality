@@ -222,8 +222,9 @@ def _derive_name_hints(column_name: str) -> Dict[str, bool]:
         "amount": {"amount", "amt", "value"},
         "price": {"price", "rate"},
         "quantity": {"qty", "quantity", "volume"},
-        "timestamp": {"timestamp", "datetime", "created", "updated"},
+        "timestamp": {"timestamp", "datetime", "created", "updated", "date"},
         "boolean": {"flag"},
+        "code": {"code", "lookup"},
     }
     hints: Dict[str, bool] = {}
     for key, keywords in tokens.items():
@@ -251,6 +252,8 @@ SEMANTIC_TYPE_CANDIDATES: Tuple[str, ...] = (
     "UUID",
     "URL",
     "PHONE",
+    "REFERENCE_CODE",
+    "DATE_IN_TEXT",
 )
 
 
@@ -270,6 +273,9 @@ def _infer_semantic_type(column_entry: Dict[str, Any]) -> Tuple[str, float, str]
     references = signals.get("reference_matches", {}) or {}
     hints = signals.get("hints", {}) or {}
     length = signals.get("length", {}) or {}
+    string_stats = signals.get("string_stats", {}) or {}
+    date_patterns = signals.get("date_patterns", {}) or {}
+    date_parse = signals.get("date_parse", {}) or {}
 
     def _as_float(value: Any) -> Optional[float]:
         try:
@@ -282,6 +288,18 @@ def _infer_semantic_type(column_entry: Dict[str, Any]) -> Tuple[str, float, str]
     length_min = _as_float(length.get("min"))
     length_max = _as_float(length.get("max"))
     length_avg = _as_float(length.get("avg"))
+    distinct_ratio_signal = _as_float(string_stats.get("distinct_ratio"))
+    top1_ratio_signal = _as_float(string_stats.get("top1_ratio"))
+    top3_ratio_signal = _as_float(string_stats.get("top3_ratio"))
+    numeric_like_ratio_signal = _as_float(string_stats.get("numeric_like_ratio"))
+    best_date_ratio = _as_float(date_parse.get("best_ratio"))
+    best_date_format = date_parse.get("best_format")
+    parsed_date_min = date_parse.get("parsed_min")
+    parsed_date_max = date_parse.get("parsed_max")
+    yyyymmdd_pattern_ratio = _as_float(date_patterns.get("yyyymmdd_ratio"))
+    ddmmyyyy_pattern_ratio = _as_float(date_patterns.get("ddmmyyyy_ratio"))
+    iso_pattern_ratio = _as_float(date_patterns.get("iso_ymd_ratio"))
+    column_name_lower = (column_entry.get("column_name") or "").lower()
 
     distinct_pct_raw = column_entry.get("distinct_pct")
     distinct_pct = float(distinct_pct_raw) if distinct_pct_raw is not None else None
@@ -354,6 +372,42 @@ def _infer_semantic_type(column_entry: Dict[str, Any]) -> Tuple[str, float, str]
         _boost("PHONE", 70.0 * min(phone_ratio, 1.0), f"{phone_ratio:.0%} values match phone pattern")
     if hints.get("phone"):
         _boost("PHONE", 12.0, "column name references phone")
+
+    if best_date_ratio is not None and best_date_ratio >= 0.6:
+        format_labels = {
+            "yyyymmdd": "YYYYMMDD",
+            "ddmmyyyy": "DDMMYYYY",
+            "iso": "YYYY-MM-DD",
+        }
+        label = format_labels.get(str(best_date_format or "").lower(), str(best_date_format or "text date").upper())
+        _boost(
+            "DATE_IN_TEXT",
+            85.0 * min(best_date_ratio, 1.0),
+            f"{best_date_ratio:.0%} of values parse as {label}",
+        )
+        if parsed_date_min or parsed_date_max:
+            _boost(
+                "DATE_IN_TEXT",
+                8.0,
+                "parsed range {start} → {end}".format(
+                    start=parsed_date_min or "?",
+                    end=parsed_date_max or "?",
+                ),
+            )
+    else:
+        pattern_ratio = max(
+            iso_pattern_ratio or 0.0,
+            yyyymmdd_pattern_ratio or 0.0,
+            ddmmyyyy_pattern_ratio or 0.0,
+        )
+        if pattern_ratio >= 0.7:
+            _boost(
+                "DATE_IN_TEXT",
+                40.0 * pattern_ratio,
+                f"{pattern_ratio:.0%} of values resemble date patterns",
+            )
+    if "date" in column_name_lower and not _is_temporal(data_type):
+        _boost("DATE_IN_TEXT", 10.0, "column name references date but stored as string")
 
     currency_ref = _ratio(references, "reference_currency_code")
     if currency_ref > 0:
@@ -450,6 +504,28 @@ def _infer_semantic_type(column_entry: Dict[str, Any]) -> Tuple[str, float, str]
         _boost("ACCOUNT_ID", 8.0, "generic identifier naming")
         _boost("ORDER_ID", 8.0)
         _boost("TRADE_ID", 8.0)
+
+    consistent_length = False
+    if length_min is not None and length_max is not None:
+        consistent_length = math.isclose(length_min, length_max, rel_tol=0.0, abs_tol=1.0)
+
+    if distinct_ratio_signal is not None and distinct_ratio_signal >= 0.25:
+        dominance_ok = (top1_ratio_signal is None or top1_ratio_signal <= 0.2) and (
+            top3_ratio_signal is None or top3_ratio_signal <= 0.45
+        )
+        if dominance_ok:
+            reason = (
+                f"{distinct_ratio_signal:.0%} of values unique with low mode dominance"
+            )
+            _boost("REFERENCE_CODE", 35.0 + min(distinct_ratio_signal, 1.0) * 40.0, reason)
+            if hints.get("code") or "code" in column_name_lower or hints.get("reference"):
+                _boost("REFERENCE_CODE", 12.0, "column name implies reference code")
+            if consistent_length and length_min is not None:
+                _boost("REFERENCE_CODE", 8.0, f"values share consistent length ≈ {length_min:.0f}")
+            if 0.05 <= (numeric_like_ratio_signal or 0.0) <= 0.95:
+                _boost("REFERENCE_CODE", 6.0, "mix of digits suggests coded identifiers")
+            if char_alnum >= 0.6:
+                _boost("REFERENCE_CODE", 4.0, "alphanumeric composition typical of codes")
 
     if distinct_pct is not None and distinct_pct >= 70.0:
         _boost("ACCOUNT_ID", 12.0, "high uniqueness typical for identifiers")
@@ -715,6 +791,12 @@ def run_table_profile(
 
         char_pattern_aliases: Dict[str, str] = {}
         regex_aliases: Dict[str, str] = {}
+        ref_match_aliases: Dict[str, str] = {}
+        date_pattern_aliases: Dict[str, str] = {}
+        date_parse_aliases: Dict[str, str] = {}
+        date_parse_min_aliases: Dict[str, str] = {}
+        date_parse_max_aliases: Dict[str, str] = {}
+        numeric_like_alias: Optional[str] = None
         if is_string:
             metrics_sql.extend(
                 [
@@ -736,8 +818,6 @@ def run_table_profile(
                     f"SUM(CASE WHEN {qcol} IS NOT NULL AND REGEXP_LIKE({qcol}::STRING, '{pattern_sql}') THEN 1 ELSE 0 END) AS {alias}"
                 )
                 char_pattern_aliases[key] = alias
-
-            ref_match_aliases: Dict[str, str] = {}
             for ref_key, values in (
                 ("country_codes", reference_sets.get("country_codes", set())),
                 ("country_names", reference_sets.get("country_names", set())),
@@ -754,10 +834,57 @@ def run_table_profile(
                 )
                 signal_key = REFERENCE_SIGNAL_NAMES.get(ref_key, ref_key)
                 ref_match_aliases[signal_key] = alias
+
+            numeric_like_alias = "STRING_NUMERIC_LIKE_ROWS"
+            numeric_like_pattern = r"^\d+(\.\d+)?$".replace("\\", "\\\\")
+            metrics_sql.append(
+                f"SUM(CASE WHEN {qcol} IS NOT NULL AND REGEXP_LIKE({qcol}::STRING, '{numeric_like_pattern}') THEN 1 ELSE 0 END) AS {numeric_like_alias}"
+            )
+
+            date_pattern_aliases = {
+                "yyyymmdd_ratio": "STRING_DATE_YYYYMMDD_MATCHES",
+                "ddmmyyyy_ratio": "STRING_DATE_DDMMYYYY_MATCHES",
+                "iso_ymd_ratio": "STRING_DATE_ISO_YMD_MATCHES",
+            }
+            date_pattern_numeric = r"^\d{8}$".replace("\\", "\\\\")
+            date_pattern_iso = r"^\d{4}-\d{2}-\d{2}$".replace("\\", "\\\\")
+            metrics_sql.append(
+                f"SUM(CASE WHEN {qcol} IS NOT NULL AND REGEXP_LIKE({qcol}::STRING, '{date_pattern_numeric}') THEN 1 ELSE 0 END) AS {date_pattern_aliases['yyyymmdd_ratio']}"
+            )
+            metrics_sql.append(
+                f"SUM(CASE WHEN {qcol} IS NOT NULL AND REGEXP_LIKE({qcol}::STRING, '{date_pattern_numeric}') THEN 1 ELSE 0 END) AS {date_pattern_aliases['ddmmyyyy_ratio']}"
+            )
+            metrics_sql.append(
+                f"SUM(CASE WHEN {qcol} IS NOT NULL AND REGEXP_LIKE({qcol}::STRING, '{date_pattern_iso}') THEN 1 ELSE 0 END) AS {date_pattern_aliases['iso_ymd_ratio']}"
+            )
+
+            date_parse_aliases = {
+                "yyyymmdd": "STRING_DATE_PARSE_YYYYMMDD",
+                "ddmmyyyy": "STRING_DATE_PARSE_DDMMYYYY",
+                "iso": "STRING_DATE_PARSE_ISO",
+            }
+            for key, fmt in (("yyyymmdd", "YYYYMMDD"), ("ddmmyyyy", "DDMMYYYY"), ("iso", "YYYY-MM-DD")):
+                alias = date_parse_aliases[key]
+                metrics_sql.append(
+                    f"SUM(CASE WHEN TRY_TO_DATE({qcol}::STRING, '{fmt}') IS NOT NULL THEN 1 ELSE 0 END) AS {alias}"
+                )
+                date_parse_min_aliases[key] = f"STRING_DATE_MIN_{key.upper()}"
+                date_parse_max_aliases[key] = f"STRING_DATE_MAX_{key.upper()}"
+                metrics_sql.append(
+                    f"MIN(TRY_TO_DATE({qcol}::STRING, '{fmt}')) AS {date_parse_min_aliases[key]}"
+                )
+                metrics_sql.append(
+                    f"MAX(TRY_TO_DATE({qcol}::STRING, '{fmt}')) AS {date_parse_max_aliases[key]}"
+                )
         else:
             char_pattern_aliases = {}
             regex_aliases = {}
             ref_match_aliases = {}
+            date_pattern_aliases = {}
+            date_parse_aliases = {}
+            date_parse_min_aliases = {}
+            date_parse_max_aliases = {}
+            numeric_like_alias = None
 
         sql = "SELECT " + ", ".join(metrics_sql) + f" FROM {sampled_ref}"
         try:
@@ -855,6 +982,57 @@ def run_table_profile(
             ratio = (float(matches) / float(non_nulls)) if non_nulls else 0.0
             reference_ratios[key] = ratio
 
+        numeric_like_ratio: Optional[float] = None
+        if numeric_like_alias:
+            matches_raw = _extract_row_value(row, numeric_like_alias, 0)
+            try:
+                matches = int(matches_raw)
+            except Exception:
+                matches = 0
+            numeric_like_ratio = (float(matches) / float(non_nulls)) if non_nulls else 0.0
+
+        date_pattern_ratios: Dict[str, Optional[float]] = {}
+        for key, alias in date_pattern_aliases.items():
+            matches_raw = _extract_row_value(row, alias, 0)
+            try:
+                matches = int(matches_raw)
+            except Exception:
+                matches = 0
+            date_pattern_ratios[key] = (float(matches) / float(non_nulls)) if non_nulls else 0.0
+
+        date_parse_counts: Dict[str, int] = {}
+        date_parse_ratios: Dict[str, Optional[float]] = {}
+        parsed_min_values: Dict[str, Optional[Any]] = {}
+        parsed_max_values: Dict[str, Optional[Any]] = {}
+        for key, alias in date_parse_aliases.items():
+            matches_raw = _extract_row_value(row, alias, 0)
+            try:
+                matches = int(matches_raw)
+            except Exception:
+                matches = 0
+            date_parse_counts[key] = matches
+            date_parse_ratios[key] = (float(matches) / float(non_nulls)) if non_nulls else 0.0
+            parsed_min_values[key] = _extract_row_value(row, date_parse_min_aliases.get(key, ""))
+            parsed_max_values[key] = _extract_row_value(row, date_parse_max_aliases.get(key, ""))
+
+        best_date_key: Optional[str] = None
+        best_date_ratio = 0.0
+        for key, ratio in date_parse_ratios.items():
+            ratio_val = float(ratio or 0.0)
+            if ratio_val >= best_date_ratio and date_parse_counts.get(key, 0) > 0:
+                # prefer earlier key ordering when ratios equal
+                if not math.isclose(ratio_val, best_date_ratio) or best_date_key is None:
+                    best_date_ratio = ratio_val
+                    best_date_key = key
+
+        parsed_date_min: Optional[str] = None
+        parsed_date_max: Optional[str] = None
+        if best_date_key:
+            best_min = parsed_min_values.get(best_date_key)
+            best_max = parsed_max_values.get(best_date_key)
+            parsed_date_min = str(best_min) if best_min is not None else None
+            parsed_date_max = str(best_max) if best_max is not None else None
+
         hints = _derive_name_hints(name)
 
         top_values: List[Dict[str, Any]] = []
@@ -885,6 +1063,15 @@ def run_table_profile(
                 top_coverage = 0
         coverage_pct = (float(top_coverage) / non_nulls * 100.0) if non_nulls else 0.0
 
+        top1_ratio = None
+        top3_ratio = None
+        if top_values and non_nulls:
+            top1_ratio = float(top_values[0].get("count") or 0) / float(non_nulls)
+            top3_ratio = (
+                float(sum((top_values[idx].get("count") or 0) for idx in range(min(3, len(top_values)))))
+                / float(non_nulls)
+            )
+
         column_entry: Dict[str, Any] = {
             "name": name,
             "column_name": name,
@@ -904,6 +1091,29 @@ def run_table_profile(
             "error": None,
         }
 
+        if is_string:
+            column_entry.update(
+                {
+                    "row_cnt": non_nulls,
+                    "distinct_ratio": (float(distincts_int) / float(non_nulls)) if (distincts_int is not None and non_nulls) else None,
+                    "top1_ratio": top1_ratio,
+                    "top3_ratio": top3_ratio,
+                    "len_min": len_min_val,
+                    "len_max": len_max_val,
+                    "numeric_like_ratio": numeric_like_ratio,
+                    "date_pattern_yyyymmdd_ratio": date_pattern_ratios.get("yyyymmdd_ratio"),
+                    "date_pattern_ddmmyyyy_ratio": date_pattern_ratios.get("ddmmyyyy_ratio"),
+                    "date_pattern_iso_ymd_ratio": date_pattern_ratios.get("iso_ymd_ratio"),
+                    "date_parse_ratio_yyyymmdd": date_parse_ratios.get("yyyymmdd"),
+                    "date_parse_ratio_ddmmyyyy": date_parse_ratios.get("ddmmyyyy"),
+                    "date_parse_ratio_iso": date_parse_ratios.get("iso"),
+                    "date_parse_ratio_best": best_date_ratio if best_date_key else None,
+                    "date_parse_best_format": best_date_key,
+                    "parsed_date_min": parsed_date_min,
+                    "parsed_date_max": parsed_date_max,
+                }
+            )
+
         signals: Dict[str, Any] = {
             "null_pct": null_pct,
             "distinct_pct": distinct_pct,
@@ -920,6 +1130,27 @@ def run_table_profile(
             }
             if "whitespace" in char_ratios:
                 signals["whitespace_ratio"] = char_ratios.get("whitespace")
+            signals["string_stats"] = {
+                "row_cnt": non_nulls,
+                "distinct_ratio": column_entry.get("distinct_ratio"),
+                "top1_ratio": top1_ratio,
+                "top3_ratio": top3_ratio,
+                "numeric_like_ratio": numeric_like_ratio,
+            }
+            signals["date_patterns"] = {
+                "yyyymmdd_ratio": date_pattern_ratios.get("yyyymmdd_ratio"),
+                "ddmmyyyy_ratio": date_pattern_ratios.get("ddmmyyyy_ratio"),
+                "iso_ymd_ratio": date_pattern_ratios.get("iso_ymd_ratio"),
+            }
+            signals["date_parse"] = {
+                "yyyymmdd_ratio": date_parse_ratios.get("yyyymmdd"),
+                "ddmmyyyy_ratio": date_parse_ratios.get("ddmmyyyy"),
+                "iso_ratio": date_parse_ratios.get("iso"),
+                "best_ratio": best_date_ratio if best_date_key else None,
+                "best_format": best_date_key,
+                "parsed_min": parsed_date_min,
+                "parsed_max": parsed_date_max,
+            }
         else:
             signals["length"] = {"min": None, "max": None, "avg": None}
 
@@ -935,6 +1166,13 @@ def run_table_profile(
         column_entry["signal_len_avg"] = avg_len if (is_string and avg_len is not None) else None
         for key, value in hints.items():
             column_entry[f"signal_hint_{key}"] = bool(value)
+
+        if is_string:
+            column_entry["signal_numeric_like_ratio"] = numeric_like_ratio
+            column_entry["signal_date_parse_best_ratio"] = best_date_ratio if best_date_key else None
+            column_entry["signal_date_parse_best_format"] = best_date_key
+            column_entry["signal_parsed_date_min"] = parsed_date_min
+            column_entry["signal_parsed_date_max"] = parsed_date_max
 
         column_entry["signals"] = signals
 
