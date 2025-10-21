@@ -5,7 +5,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime
 from numbers import Integral, Real
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 import pandas as pd
 import streamlit as st
@@ -393,6 +393,49 @@ def _format_ratio_pct(value: Optional[float], decimals: int = 0) -> str:
         return "—"
 
 
+def _ratio_badge_status(ratio: Optional[float]) -> str:
+    if ratio is None:
+        return "muted"
+    try:
+        value = float(ratio)
+    except Exception:
+        return "muted"
+    if math.isnan(value):
+        return "muted"
+    if value >= 0.9:
+        return "green"
+    if value >= 0.75:
+        return "amber"
+    return "red"
+
+
+def _badge_display_text(status: str, label: str) -> str:
+    if status == "muted":
+        return ""
+    return label
+
+
+def _status_to_badge_css(status: str) -> str:
+    palette = {
+        "green": "background-color: #0f9960; color: #ffffff;",
+        "amber": "background-color: #f7b731; color: #2b2b2b;",
+        "red": "background-color: #d64541; color: #ffffff;",
+        "muted": "background-color: transparent; color: inherit; border: 1px solid rgba(0, 0, 0, 0.08);",
+    }
+    base = palette.get(status, palette["muted"]).rstrip(";")
+    return "; ".join(
+        [
+            base,
+            "border-radius: 12px",
+            "font-weight: 600",
+            "text-align: center",
+            "padding: 0.15rem 0.4rem",
+            "display: inline-block",
+            "min-width: 4rem",
+        ]
+    )
+
+
 def _format_card_value(value: Any, *, decimals: int = 2, allow_commas: bool = False) -> str:
     if value is None:
         return "—"
@@ -706,12 +749,14 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
         low_cardinality = filter_cols[2].toggle("Low cardinality", value=False)
         whitespace_risk = filter_cols[3].toggle("Whitespace risk", value=False)
         st.markdown("**Semantic tags**")
-        semantic_cols = st.columns(5)
+        semantic_cols = st.columns(7)
         filter_identifiers = semantic_cols[0].checkbox("Identifiers", value=False)
         filter_financial = semantic_cols[1].checkbox("Financial", value=False)
         filter_instrument = semantic_cols[2].checkbox("Instrument", value=False)
         filter_geo = semantic_cols[3].checkbox("Geo", value=False)
         filter_contact = semantic_cols[4].checkbox("Contact", value=False)
+        filter_date_text = semantic_cols[5].checkbox("Date (Text)", value=False)
+        filter_ref_codes = semantic_cols[6].checkbox("Reference Codes", value=False)
 
     save_enabled = bool(session and meta_db and meta_schema)
     if not save_enabled:
@@ -787,6 +832,8 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
         "Instrument": {"ISIN", "TICKER/SYMBOL"},
         "Geo": {"COUNTRY_CODE/NAME", "CURRENCY_CODE", "BIC"},
         "Contact": {"EMAIL", "PHONE"},
+        "Date (Text)": {"DATE_IN_TEXT"},
+        "Reference Codes": {"REF_CODE"},
     }
     active_semantic_filters: List[str] = []
     if filter_identifiers:
@@ -799,6 +846,10 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
         active_semantic_filters.append("Geo")
     if filter_contact:
         active_semantic_filters.append("Contact")
+    if filter_date_text:
+        active_semantic_filters.append("Date (Text)")
+    if filter_ref_codes:
+        active_semantic_filters.append("Reference Codes")
 
     if active_semantic_filters:
         allowed_types = set()
@@ -807,6 +858,22 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
         filtered_df = filtered_df[filtered_df["semantic_type"].isin(allowed_types)]
     display_df = filtered_df.drop(columns=["top_values"], errors="ignore").copy()
     if not display_df.empty:
+        semantic_series = (
+            display_df.get("semantic_type", pd.Series(dtype=str))
+            .fillna("")
+            .astype(str)
+            .str.upper()
+        )
+        has_date_text = semantic_series.eq("DATE_IN_TEXT").any()
+        has_ref_code = semantic_series.eq("REF_CODE").any()
+        has_length_bounds = {"len_min", "len_max"}.issubset(display_df.columns) and (
+            display_df[["len_min", "len_max"]].notna().any().any()
+        )
+        has_numeric_bounds = {"numeric_min", "numeric_max"}.issubset(display_df.columns) and (
+            display_df[["numeric_min", "numeric_max"]].notna().any().any()
+        )
+        badge_styles: Dict[str, List[str]] = {}
+        tooltip_columns: Dict[str, List[str]] = {}
         if "confidence" in display_df.columns:
             display_df["Confidence"] = display_df["confidence"].apply(
                 lambda val: float(val) if val is not None else None
@@ -816,15 +883,118 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
         else:
             display_df["Confidence"] = None
             display_df["Confidence Badge"] = "Unknown"
+        if has_length_bounds:
+            display_df["Len Min/Max"] = display_df.apply(
+                lambda row: (
+                    ""
+                    if pd.isna(row.get("len_min")) and pd.isna(row.get("len_max"))
+                    else f"{_format_card_value(row.get('len_min'), decimals=0)} / {_format_card_value(row.get('len_max'), decimals=0)}"
+                ),
+                axis=1,
+            )
+        display_df = display_df.drop(columns=["len_min", "len_max"], errors="ignore")
+
+        if has_date_text:
+            date_labels: List[str] = []
+            date_tooltips: List[str] = []
+            date_styles: List[str] = []
+            for _, row in display_df.iterrows():
+                is_date = str(row.get("semantic_type") or "").upper() == "DATE_IN_TEXT"
+                if not is_date:
+                    date_labels.append("")
+                    date_tooltips.append("")
+                    date_styles.append(_status_to_badge_css("muted"))
+                    continue
+                ratio_pct = row.get("date_parse_best_pct")
+                ratio_norm: Optional[float] = None
+                if ratio_pct is not None:
+                    try:
+                        ratio_norm = float(ratio_pct) / 100.0
+                        if math.isnan(ratio_norm):
+                            ratio_norm = None
+                    except Exception:
+                        ratio_norm = None
+                status = _ratio_badge_status(ratio_norm)
+                label = _badge_display_text(status, "Date (Text)")
+                fmt = row.get("date_parse_best_format") or "—"
+                ratio_display = _format_ratio_pct(ratio_norm, 0)
+                tooltip = f"Format: {fmt}; Success ratio: {ratio_display}"
+                date_labels.append(label)
+                date_tooltips.append(tooltip)
+                date_styles.append(_status_to_badge_css(status))
+            display_df["Date (Text)"] = date_labels
+            tooltip_columns["Date (Text)"] = date_tooltips
+            badge_styles["Date (Text)"] = date_styles
+        else:
+            display_df = display_df.drop(
+                columns=[
+                    "date_parse_best_pct",
+                    "date_parse_best_format",
+                    "parsed_date_min",
+                    "parsed_date_max",
+                ],
+                errors="ignore",
+            )
+
+        if has_ref_code:
+            ref_labels: List[str] = []
+            ref_tooltips: List[str] = []
+            ref_styles: List[str] = []
+            for _, row in display_df.iterrows():
+                is_ref = str(row.get("semantic_type") or "").upper() == "REF_CODE"
+                if not is_ref:
+                    ref_labels.append("")
+                    ref_tooltips.append("")
+                    ref_styles.append(_status_to_badge_css("muted"))
+                    continue
+                distinct_ratio_pct = row.get("distinct_ratio_pct")
+                distinct_ratio: Optional[float] = None
+                if distinct_ratio_pct is not None:
+                    try:
+                        distinct_ratio = float(distinct_ratio_pct) / 100.0
+                        if math.isnan(distinct_ratio):
+                            distinct_ratio = None
+                    except Exception:
+                        distinct_ratio = None
+                status = _ratio_badge_status(distinct_ratio)
+                label = _badge_display_text(status, "Reference Codes")
+                top3_ratio_pct = row.get("top3_ratio_pct")
+                top3_ratio: Optional[float] = None
+                if top3_ratio_pct is not None:
+                    try:
+                        top3_ratio = float(top3_ratio_pct) / 100.0
+                        if math.isnan(top3_ratio):
+                            top3_ratio = None
+                    except Exception:
+                        top3_ratio = None
+                distinct_display = _format_ratio_pct(distinct_ratio, 0)
+                top3_display = _format_ratio_pct(top3_ratio, 0)
+                tooltip = (
+                    f"Distinct ratio: {distinct_display}; Top-3 coverage: {top3_display}"
+                )
+                ref_labels.append(label)
+                ref_tooltips.append(tooltip)
+                ref_styles.append(_status_to_badge_css(status))
+            display_df["Reference Codes"] = ref_labels
+            tooltip_columns["Reference Codes"] = ref_tooltips
+            badge_styles["Reference Codes"] = ref_styles
+        else:
+            display_df = display_df.drop(columns=["Reference Codes"], errors="ignore")
+
+        if not has_length_bounds:
+            display_df = display_df.drop(columns=["Len Min/Max"], errors="ignore")
+
+        if not has_numeric_bounds:
+            display_df = display_df.drop(columns=["numeric_min", "numeric_max"], errors="ignore")
+
         rename_map = {
             "semantic_type": "Guessed Type",
             "rationale": "Confidence Rationale",
             "row_cnt": "Non-null Rows",
-            "len_min": "Length Min",
-            "len_max": "Length Max",
+            "distincts": "Distinct Count",
             "distinct_ratio_pct": "Distinct Ratio %",
             "top1_ratio_pct": "Top 1 Ratio %",
-            "top3_ratio_pct": "Top 3 Coverage %",
+            "top3_ratio_pct": "Top-3 Coverage %",
             "numeric_like_pct": "Numeric-like %",
             "numeric_min": "Numeric Min",
             "numeric_max": "Numeric Max",
@@ -836,8 +1006,8 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
             "date_parse_iso_pct": "ISO Parse %",
             "date_parse_best_pct": "Best Parse %",
             "date_parse_best_format": "Best Parse Format",
-            "parsed_date_min": "Parsed Date Min",
-            "parsed_date_max": "Parsed Date Max",
+            "parsed_date_min": "Parsed Min Date",
+            "parsed_date_max": "Parsed Max Date",
         }
         display_df = display_df.rename(columns={k: v for k, v in rename_map.items() if k in display_df.columns})
         if "Guessed Type" in display_df.columns:
@@ -848,19 +1018,18 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
             "Non-null Rows",
             "nulls",
             "null_pct",
-            "distincts",
+            "Distinct Count",
             "distinct_pct",
             "Distinct Ratio %",
             "Top 1 Ratio %",
-            "Top 3 Coverage %",
+            "Top-3 Coverage %",
             "Numeric-like %",
             "min_val",
             "max_val",
             "Numeric Min",
             "Numeric Max",
             "avg_len",
-            "Length Min",
-            "Length Max",
+            "Len Min/Max",
             "whitespace_pct",
             "YYYYMMDD Pattern %",
             "DDMMYYYY Pattern %",
@@ -870,8 +1039,10 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
             "ISO Parse %",
             "Best Parse %",
             "Best Parse Format",
-            "Parsed Date Min",
-            "Parsed Date Max",
+            "Parsed Min Date",
+            "Parsed Max Date",
+            "Date (Text)",
+            "Reference Codes",
             "error",
             "Guessed Type",
             "Confidence Badge",
@@ -882,7 +1053,7 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
             col for col in display_df.columns if col not in ordered_columns
         ]]
         formatters: Dict[str, Any] = {"Confidence": _format_confidence}
-        for count_col in ("nulls", "distincts", "Non-null Rows"):
+        for count_col in ("nulls", "Distinct Count", "Non-null Rows"):
             if count_col in display_df.columns:
                 formatters[count_col] = _format_count
         percentage_columns = (
@@ -891,7 +1062,7 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
             "whitespace_pct",
             "Distinct Ratio %",
             "Top 1 Ratio %",
-            "Top 3 Coverage %",
+            "Top-3 Coverage %",
             "Numeric-like %",
             "YYYYMMDD Pattern %",
             "DDMMYYYY Pattern %",
@@ -907,6 +1078,21 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
         styler = display_df.style.format(formatters)
         if "Confidence Badge" in display_df.columns:
             styler = styler.applymap(_badge_css, subset=["Confidence Badge"])
+        if badge_styles:
+            def _style_from_list(styles: List[str]) -> Callable[[pd.Series], List[str]]:
+                def _apply(_: pd.Series) -> List[str]:
+                    return styles
+
+                return _apply
+
+            for column, styles in badge_styles.items():
+                if column in display_df.columns:
+                    styler = styler.apply(_style_from_list(styles), subset=[column])
+        if tooltip_columns:
+            tooltip_df = pd.DataFrame(tooltip_columns, index=display_df.index)
+            existing_cols = [col for col in tooltip_df.columns if col in display_df.columns]
+            if existing_cols:
+                styler = styler.set_tooltips(tooltip_df[existing_cols])
         column_config: Dict[str, st.column_config.BaseColumn] = {}
         if "Confidence Rationale" in display_df.columns:
             column_config["Confidence Rationale"] = st.column_config.TextColumn(
