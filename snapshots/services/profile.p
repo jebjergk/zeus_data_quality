@@ -53,12 +53,37 @@ def build_profile_suggestion(profile_result: Dict[str, Any]) -> Optional[Dict[st
         checks: Dict[str, Dict[str, Any]] = {}
         sample_rows = 25
 
+        semantic_type = str(column.get("semantic_type") or "").upper()
+        best_date_format_raw = column.get("date_parse_best_format") or column.get(
+            "signal_date_parse_best_format"
+        )
+        best_date_format = str(best_date_format_raw or "").lower() or None
+        format_labels = {
+            "yyyymmdd": "YYYYMMDD",
+            "ddmmyyyy": "DDMMYYYY",
+            "iso": "YYYY-MM-DD",
+        }
+        format_regexes = {
+            "yyyymmdd": r"^\\d{8}$",
+            "ddmmyyyy": r"^(?:\\d{2}[\\/\\-]?){2}\\d{4}$",
+            "iso": r"^\\d{4}-\\d{2}-\\d{2}$",
+        }
+
         if rows_profiled > 0:
             if nulls == 0:
                 checks["NULL_COUNT"] = {"severity": "ERROR", "params": {"max_nulls": 0}}
             else:
                 severity = "ERROR" if null_pct >= 5 else "WARN"
                 checks["NULL_COUNT"] = {"severity": severity, "params": {"max_nulls": int(nulls)}}
+
+        if semantic_type == "REF_CODE" and rows_profiled > 0:
+            strict_max_nulls = 0
+            if nulls and nulls > 0:
+                strict_max_nulls = min(int(nulls), max(int(rows_profiled * 0.01), 0))
+            checks["NULL_COUNT"] = {
+                "severity": "ERROR",
+                "params": {"max_nulls": strict_max_nulls},
+            }
 
         if rows_profiled > 0 and distincts is not None:
             if nulls == 0 and distincts >= max(rows_profiled - 1, 1):
@@ -83,6 +108,27 @@ def build_profile_suggestion(profile_result: Dict[str, Any]) -> Optional[Dict[st
                         },
                     }
 
+        if semantic_type == "REF_CODE":
+            allowed: List[str] = []
+            total_top = 0
+            for entry in top_values:
+                value = entry.get("value")
+                count = entry.get("count") or 0
+                if value is None:
+                    continue
+                allowed.append(_stringify(value))
+                total_top += int(count)
+            if allowed:
+                coverage_ratio = (total_top / rows_profiled) if rows_profiled else 0.0
+                min_ratio = 0.9 if coverage_ratio >= 0.9 else max(0.6, round(coverage_ratio, 2))
+                checks["VALUE_DISTRIBUTION"] = {
+                    "severity": "WARN",
+                    "params": {
+                        "allowed_values_csv": ", ".join(allowed[:20]),
+                        "min_match_ratio": min_ratio,
+                    },
+                }
+
         if whitespace_pct >= 5:
             checks["WHITESPACE"] = {"severity": "WARN", "params": {"mode": "NO_LEADING_TRAILING"}}
 
@@ -93,6 +139,26 @@ def build_profile_suggestion(profile_result: Dict[str, Any]) -> Optional[Dict[st
                 "severity": "WARN",
                 "params": {"min": _stringify(min_val), "max": _stringify(max_val)},
             }
+
+        if semantic_type == "DATE_IN_TEXT":
+            parsed_min = column.get("parsed_date_min")
+            parsed_max = column.get("parsed_date_max")
+            format_label = format_labels.get(best_date_format or "")
+            format_regex = format_regexes.get(best_date_format or "")
+            if format_regex:
+                params: Dict[str, Any] = {"regex": format_regex}
+                if format_label:
+                    params["label"] = format_label
+                params["advice"] = "Consider converting the column to a DATE type upstream."
+                checks["FORMAT_DISTRIBUTION"] = {"severity": "WARN", "params": params}
+            if parsed_min or parsed_max:
+                min_max_params: Dict[str, Any] = {
+                    "min": _stringify(parsed_min) if parsed_min is not None else "",
+                    "max": _stringify(parsed_max) if parsed_max is not None else "",
+                }
+                if format_label:
+                    min_max_params["format"] = format_label
+                checks["MIN_MAX"] = {"severity": "WARN", "params": min_max_params}
 
         if not checks:
             continue
