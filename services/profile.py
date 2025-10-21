@@ -21,6 +21,11 @@ def _is_temporal(data_type: str) -> bool:
     return any(token in upper for token in ("DATE", "TIME", "TIMESTAMP"))
 
 
+def _is_string(data_type: str) -> bool:
+    upper = data_type.upper()
+    return any(token in upper for token in ("CHAR", "STRING", "TEXT", "VARCHAR"))
+
+
 def build_profile_suggestion(profile_result: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """Generate heuristic DQ suggestions from a profile result."""
 
@@ -81,7 +86,9 @@ def build_profile_suggestion(profile_result: Dict[str, Any]) -> Optional[Dict[st
         if whitespace_pct >= 5:
             checks["WHITESPACE"] = {"severity": "WARN", "params": {"mode": "NO_LEADING_TRAILING"}}
 
-        if (min_val is not None and max_val is not None) and (_is_numeric(data_type) or _is_temporal(data_type)):
+        if (min_val is not None and max_val is not None) and (
+            _is_numeric(data_type) or _is_temporal(data_type) or _is_string(data_type)
+        ):
             checks["MIN_MAX"] = {
                 "severity": "WARN",
                 "params": {"min": _stringify(min_val), "max": _stringify(max_val)},
