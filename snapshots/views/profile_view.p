@@ -573,6 +573,9 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
         else:
             with st.spinner("Profiling table..."):
                 start = time.time()
+                profile_error: Optional[Exception] = None
+                summary_raw: Dict[str, Any] = {}
+                column_rows: List[Dict[str, Any]] = []
                 try:
                     summary_raw, column_rows = run_table_profile(
                         session=session,
@@ -581,9 +584,12 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
                         top_n=int(min(top_n, MAX_TOP_N)),
                     )
                 except Exception as exc:  # pragma: no cover - Snowflake specific
-                    st.error(f"Failed to profile table: {exc}")
-                    summary_raw, column_rows = {}, []
+                    profile_error = exc
                 duration = time.time() - start
+
+            if profile_error is not None:
+                st.error(f"Failed to profile table: {profile_error}")
+            else:
                 rows_profiled = int(summary_raw.get("rows_profiled") or 0)
                 profiles: List[ColumnProfile] = []
                 columns_payload: List[Dict[str, Any]] = []
