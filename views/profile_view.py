@@ -835,6 +835,104 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
         )
         has_date_text = semantic_series.eq("DATE_IN_TEXT").any()
         has_ref_code = semantic_series.eq("REF_CODE").any()
+
+        def _is_numeric_type_name(type_name: Any) -> bool:
+            upper = str(type_name or "").upper()
+            return any(token in upper for token in ("NUMBER", "INT", "DECIMAL", "FLOAT", "DOUBLE", "REAL"))
+
+        def _is_temporal_type_name(type_name: Any) -> bool:
+            upper = str(type_name or "").upper()
+            return any(token in upper for token in ("DATE", "TIME", "TIMESTAMP"))
+
+        def _displayable_value(*candidates: Any) -> Optional[str]:
+            for candidate in candidates:
+                formatted = _stringify_for_display(candidate)
+                if formatted is None:
+                    continue
+                if isinstance(formatted, float):
+                    if math.isnan(formatted):
+                        continue
+                    if formatted.is_integer():
+                        formatted_text = f"{int(formatted)}"
+                    else:
+                        formatted_text = f"{formatted:.6g}"
+                else:
+                    formatted_text = str(formatted).strip()
+                if not formatted_text or formatted_text.lower() == "nan":
+                    continue
+                return formatted_text
+            return None
+
+        def _format_len_value(value: Any) -> Optional[str]:
+            if value is None:
+                return None
+            try:
+                numeric = float(value)
+            except Exception:
+                text_value = str(value).strip()
+                return text_value or None
+            if math.isnan(numeric):
+                return None
+            if abs(numeric - round(numeric)) < 1e-6:
+                return str(int(round(numeric)))
+            return f"{numeric:.2f}".rstrip("0").rstrip(".")
+
+        def _format_len_range(min_len: Any, max_len: Any) -> Optional[str]:
+            min_text = _format_len_value(min_len)
+            max_text = _format_len_value(max_len)
+            if min_text and max_text:
+                if min_text == max_text:
+                    return f"len {min_text}"
+                return f"len {min_text}–{max_text}"
+            if min_text:
+                return f"len ≥{min_text}"
+            if max_text:
+                return f"len ≤{max_text}"
+            return None
+
+        def _resolve_min_max(row: pd.Series) -> pd.Series:
+            semantic = str(row.get("semantic_type") or "").upper()
+            data_type = row.get("data_type")
+
+            if semantic == "DATE_IN_TEXT":
+                min_display = _displayable_value(row.get("parsed_date_min"), row.get("profile_min"), row.get("min_val"))
+                max_display = _displayable_value(row.get("parsed_date_max"), row.get("profile_max"), row.get("max_val"))
+            else:
+                numeric_min_display = _displayable_value(row.get("numeric_min"))
+                numeric_max_display = _displayable_value(row.get("numeric_max"))
+                numeric_like = numeric_min_display is not None or numeric_max_display is not None
+
+                if not numeric_like:
+                    numeric_like_pct = row.get("numeric_like_pct")
+                    if numeric_like_pct is not None:
+                        try:
+                            numeric_like = float(numeric_like_pct) >= 80.0
+                        except Exception:
+                            numeric_like = False
+
+                if numeric_like or _is_numeric_type_name(data_type):
+                    min_display = numeric_min_display or _displayable_value(row.get("profile_min"), row.get("min_val"))
+                    max_display = numeric_max_display or _displayable_value(row.get("profile_max"), row.get("max_val"))
+                elif _is_temporal_type_name(data_type):
+                    min_display = _displayable_value(row.get("profile_min"), row.get("min_val"))
+                    max_display = _displayable_value(row.get("profile_max"), row.get("max_val"))
+                else:
+                    min_display = None
+                    max_display = None
+
+            if not min_display and not max_display:
+                length_display = _format_len_range(row.get("len_min"), row.get("len_max"))
+                if length_display:
+                    min_display = length_display
+                    max_display = length_display
+                else:
+                    min_display = _displayable_value(row.get("profile_min"), row.get("min_val"))
+                    max_display = _displayable_value(row.get("profile_max"), row.get("max_val"))
+
+            return pd.Series({"min_val": min_display, "max_val": max_display})
+
+        if {"min_val", "max_val"}.issubset(display_df.columns):
+            display_df[["min_val", "max_val"]] = display_df.apply(_resolve_min_max, axis=1)
         if "confidence" in display_df.columns:
             display_df["Confidence"] = display_df["confidence"].apply(
                 lambda val: float(val) if val is not None else None
@@ -962,6 +1060,8 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
                 "date_parse_best_format",
                 "parsed_date_min",
                 "parsed_date_max",
+                "profile_min",
+                "profile_max",
             ],
             errors="ignore",
         )
