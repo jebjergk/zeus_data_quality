@@ -336,7 +336,7 @@ def _profiles_to_frame(profiles: Iterable[ColumnProfile]) -> pd.DataFrame:
                 "distinct_pct": round(profile.distinct_pct, 2) if profile.distinct_pct is not None else None,
                 "min_val": _stringify_for_display(profile.min_val),
                 "max_val": _stringify_for_display(profile.max_val),
-                "avg_len": round(profile.avg_len, 2) if profile.avg_len is not None else None,
+                "avg_len": profile.avg_len if profile.avg_len is not None else None,
                 "whitespace_pct": round(profile.whitespace_pct, 2) if profile.whitespace_pct is not None else None,
                 "row_cnt": profile.row_cnt,
                 "len_min": round(profile.len_min, 2) if profile.len_min is not None else None,
@@ -805,13 +805,11 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
 
         def _format_avg_length_cell(row: pd.Series) -> str:
             if not _is_string_type_name(row.get("data_type")):
-                return ""
+                return "—"
             avg_value = _safe_float(row.get("avg_len"))
             if avg_value is None:
-                return ""
-            if abs(avg_value - round(avg_value)) < 0.05:
-                return str(int(round(avg_value)))
-            return f"{avg_value:.1f}".rstrip("0").rstrip(".")
+                return "—"
+            return f"{avg_value:.1f}"
 
         def _format_value_cell(raw_value: Any) -> str:
             text_value = _stringify_for_display(raw_value)
