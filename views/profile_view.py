@@ -775,102 +775,54 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
     grid_columns = [
         "Column",
         "Physical Type",
-        "Null %",
-        "Distinct (count/%)",
-        "Avg Len",
-        "Profile Min",
-        "Profile Max",
+        "Nulls",
+        "Distinct",
+        "Avg Length",
+        "Min Value",
+        "Max Value",
         "Guessed Type",
         "Confidence",
         "Note",
     ]
     if not display_df.empty:
-        def _is_numeric_type_name(type_name: Any) -> bool:
+        def _is_string_type_name(type_name: Any) -> bool:
             upper = str(type_name or "").upper()
-            return any(token in upper for token in ("NUMBER", "INT", "DECIMAL", "FLOAT", "DOUBLE", "REAL"))
+            return any(token in upper for token in ("CHAR", "STRING", "TEXT", "VARCHAR"))
 
-        def _is_temporal_type_name(type_name: Any) -> bool:
-            upper = str(type_name or "").upper()
-            return any(token in upper for token in ("DATE", "TIME", "TIMESTAMP"))
+        def _format_count_with_pct(count_value: Any, pct_value: Any) -> str:
+            count_int = _safe_int(count_value)
+            pct_float = _safe_float(pct_value)
+            parts: List[str] = []
+            if count_int is not None:
+                parts.append(f"{count_int:,}")
+            if pct_float is not None:
+                if pct_float < 100:
+                    pct_text = f"{pct_float:.1f}%".rstrip("0").rstrip(".")
+                else:
+                    pct_text = f"{pct_float:.0f}%"
+                parts.append(f"({pct_text})")
+            return " ".join(parts) if parts else ""
 
-        def _displayable_value(*candidates: Any) -> str:
-            for candidate in candidates:
-                formatted = _stringify_for_display(candidate)
-                if formatted is None:
-                    continue
-                text_value = str(formatted).strip()
-                if not text_value or text_value.lower() == "nan":
-                    continue
-                return text_value
-            return ""
-
-        def _format_len_number(value: Any) -> Optional[str]:
-            if value is None:
-                return None
-            try:
-                numeric = float(value)
-            except Exception:
-                text_value = str(value).strip()
-                return text_value or None
-            if math.isnan(numeric):
-                return None
-            if abs(numeric - round(numeric)) < 1e-6:
-                return str(int(round(numeric)))
-            return f"{numeric:.2f}".rstrip("0").rstrip(".")
-
-        def _format_len_range(min_len: Any, max_len: Any) -> Optional[str]:
-            min_text = _format_len_number(min_len)
-            max_text = _format_len_number(max_len)
-            if min_text and max_text:
-                if min_text == max_text:
-                    return f"len {min_text}"
-                return f"len {min_text}–{max_text}"
-            if min_text:
-                return f"len ≥{min_text}"
-            if max_text:
-                return f"len ≤{max_text}"
-            return None
-
-        def _format_avg_length(row: pd.Series) -> str:
-            avg_text = _format_len_number(row.get("avg_len"))
-            range_text = _format_len_range(row.get("len_min"), row.get("len_max"))
-            if avg_text and range_text:
-                return f"{avg_text} ({range_text.replace('len ', '')})"
-            if range_text:
-                return range_text.replace("len ", "")
-            if avg_text:
-                return avg_text
-            return ""
-
-        def _format_percentage_str(value: Any, decimals: int = 2) -> str:
-            if value is None:
+        def _format_avg_length_cell(row: pd.Series) -> str:
+            if not _is_string_type_name(row.get("data_type")):
                 return ""
-            try:
-                numeric = float(value)
-            except Exception:
-                text_value = str(value).strip()
-                return text_value or ""
-            if math.isnan(numeric):
+            avg_value = _safe_float(row.get("avg_len"))
+            if avg_value is None:
                 return ""
-            formatted = f"{numeric:.{decimals}f}".rstrip("0").rstrip(".")
-            return f"{formatted}%"
+            if abs(avg_value - round(avg_value)) < 0.05:
+                return str(int(round(avg_value)))
+            return f"{avg_value:.1f}".rstrip("0").rstrip(".")
 
-        def _format_distinct_summary(row: pd.Series) -> str:
-            count = row.get("distincts")
-            pct_text = _format_percentage_str(row.get("distinct_pct"))
-            count_text = ""
-            if count is not None:
-                try:
-                    count_text = f"{int(count):,}"
-                except Exception:
-                    count_text = str(count)
-            if count_text and pct_text:
-                return f"{count_text} ({pct_text})"
-            if count_text:
-                return count_text
-            if pct_text:
-                return pct_text
-            return ""
+        def _format_value_cell(raw_value: Any) -> str:
+            text_value = _stringify_for_display(raw_value)
+            if text_value is None:
+                return "—"
+            text = str(text_value).strip()
+            if not text or text.lower() == "nan":
+                return "—"
+            if len(text) > 50:
+                return text[:47] + "..."
+            return text
 
         def _format_semantic_label(value: Any) -> str:
             if value is None:
@@ -881,136 +833,63 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
             normalized = text_value.replace("_", " ")
             return normalized.title()
 
-        def _format_confidence_score(value: Any) -> str:
-            if value is None:
+        def _format_confidence_display(value: Optional[float]) -> str:
+            if value is None or math.isnan(value):
                 return ""
-            try:
-                numeric = float(value)
-            except Exception:
-                text_value = str(value).strip()
-                return text_value or ""
-            if math.isnan(numeric):
-                return ""
-            if numeric <= 1.0:
-                numeric *= 100.0
-            formatted = f"{numeric:.1f}" if numeric < 10 else f"{numeric:.0f}"
-            formatted = formatted.rstrip("0").rstrip(".")
+            if value < 10.0:
+                formatted = f"{value:.1f}".rstrip("0").rstrip(".")
+            else:
+                formatted = f"{value:.0f}"
             return f"{formatted}%"
 
+        def _confidence_style(value: Optional[float]) -> str:
+            if value is None or math.isnan(value):
+                return ""
+            if value >= 90.0:
+                return "background-color: #2e7d32; color: #ffffff;"
+            if value >= 75.0:
+                return "background-color: #f9a825; color: #000000;"
+            return "background-color: #9e9e9e; color: #ffffff;"
+
         def _compose_note(row: pd.Series) -> str:
-            parts: List[str] = []
-            error_text = _displayable_value(row.get("error"))
-            if error_text:
-                parts.append(error_text)
-            else:
-                rationale_text = _displayable_value(row.get("rationale"))
-                if rationale_text:
-                    parts.append(rationale_text)
-            sentinel_count = _safe_int(row.get("date_sentinel_count"))
-            if sentinel_count:
-                parts.append("ignored sentinel 0-dates.")
-            return " ".join(parts)
+            text_value = _stringify_for_display(row.get("rationale"))
+            if not text_value:
+                text_value = _stringify_for_display(row.get("error"))
+            note = str(text_value or "").strip()
+            if len(note) > 120:
+                return note[:117] + "..."
+            return note
 
-        def _resolve_profile_bounds(row: pd.Series) -> pd.Series:
-            semantic = str(row.get("semantic_type") or "").upper()
-            data_type = row.get("data_type")
+        formatted_rows: List[Dict[str, Any]] = []
+        for _, row in display_df.iterrows():
+            nulls_text = _format_count_with_pct(row.get("nulls"), row.get("null_pct"))
+            distinct_text = _format_count_with_pct(row.get("distincts"), row.get("distinct_pct"))
+            min_value = _format_value_cell(row.get("min_val"))
+            max_value = _format_value_cell(row.get("max_val"))
+            confidence_raw = _safe_float(row.get("confidence"))
+            if confidence_raw is not None and confidence_raw <= 1.0:
+                confidence_raw *= 100.0
+            if confidence_raw is not None:
+                confidence_raw = max(0.0, min(confidence_raw, 100.0))
+            formatted_rows.append(
+                {
+                    "Column": str(row.get("column_name") or ""),
+                    "Physical Type": str(row.get("data_type") or ""),
+                    "Nulls": nulls_text,
+                    "Distinct": distinct_text,
+                    "Avg Length": _format_avg_length_cell(row),
+                    "Min Value": min_value,
+                    "Max Value": max_value,
+                    "Guessed Type": _format_semantic_label(row.get("semantic_type")),
+                    "Confidence": confidence_raw,
+                    "Note": _compose_note(row),
+                }
+            )
 
-            def _normalize_text(value: Any) -> Optional[str]:
-                text_value = _displayable_value(value)
-                return text_value or None
-
-            def _format_date_value(value: Any) -> Optional[str]:
-                text_value = _normalize_text(value)
-                if not text_value:
-                    return None
-                try:
-                    parsed = pd.to_datetime(text_value, errors="coerce")
-                except Exception:
-                    parsed = None
-                if parsed is not None and not pd.isna(parsed):
-                    try:
-                        return parsed.date().isoformat()
-                    except Exception:
-                        pass
-                try:
-                    parsed_dt = datetime.fromisoformat(text_value)
-                except Exception:
-                    return text_value
-                if hasattr(parsed_dt, "date"):
-                    return parsed_dt.date().isoformat()
-                return parsed_dt.isoformat()
-
-            def _date_parse_success(row_obj: pd.Series) -> bool:
-                ratio_value = row_obj.get("date_parse_success_ratio")
-                if ratio_value is not None:
-                    try:
-                        if float(ratio_value) > 0.0:
-                            return True
-                    except Exception:
-                        pass
-                return bool(_normalize_text(row_obj.get("parsed_date_min")) or _normalize_text(row_obj.get("parsed_date_max")))
-
-            min_display: Optional[str] = None
-            max_display: Optional[str] = None
-            length_display = _format_len_range(row.get("len_min"), row.get("len_max"))
-
-            if semantic in {"DATE", "DATE_IN_TEXT"} and _date_parse_success(row):
-                min_display = _format_date_value(row.get("parsed_date_min"))
-                max_display = _format_date_value(row.get("parsed_date_max"))
-                if not min_display:
-                    min_display = _format_date_value(row.get("profile_min")) or _format_date_value(row.get("min_val"))
-                if not max_display:
-                    max_display = _format_date_value(row.get("profile_max")) or _format_date_value(row.get("max_val"))
-            else:
-                numeric_ratio = row.get("numeric_like_ratio")
-                numeric_confident = False
-                if numeric_ratio is not None:
-                    try:
-                        numeric_confident = float(numeric_ratio) >= 0.90
-                    except Exception:
-                        numeric_confident = False
-                numeric_min_display = _normalize_text(row.get("numeric_min"))
-                numeric_max_display = _normalize_text(row.get("numeric_max"))
-
-                if numeric_confident or _is_numeric_type_name(data_type):
-                    min_display = numeric_min_display or _normalize_text(row.get("profile_min")) or _normalize_text(row.get("min_val"))
-                    max_display = numeric_max_display or _normalize_text(row.get("profile_max")) or _normalize_text(row.get("max_val"))
-                elif _is_temporal_type_name(data_type):
-                    min_display = _format_date_value(row.get("profile_min")) or _format_date_value(row.get("min_val"))
-                    max_display = _format_date_value(row.get("profile_max")) or _format_date_value(row.get("max_val"))
-                elif length_display:
-                    min_display = length_display
-                    max_display = length_display
-
-            if min_display is None and length_display and min_display != length_display:
-                min_display = length_display
-            if max_display is None and length_display and max_display != length_display:
-                max_display = length_display
-
-            if min_display is None:
-                min_display = _normalize_text(row.get("profile_min")) or _normalize_text(row.get("min_val")) or "—"
-            if max_display is None:
-                max_display = _normalize_text(row.get("profile_max")) or _normalize_text(row.get("max_val")) or "—"
-
-            return pd.Series({"Profile Min": min_display, "Profile Max": max_display})
-
-        bounds_df = display_df.apply(_resolve_profile_bounds, axis=1)
-        display_df = display_df.join(bounds_df)
-
-        display_df["Avg Len"] = display_df.apply(_format_avg_length, axis=1)
-        display_df["Null %"] = display_df["null_pct"].apply(_format_percentage_str)
-        display_df["Distinct (count/%)"] = display_df.apply(_format_distinct_summary, axis=1)
-        display_df["Guessed Type"] = display_df["semantic_type"].apply(_format_semantic_label)
-        display_df["Confidence"] = display_df["confidence"].apply(_format_confidence_score)
-        display_df["Note"] = display_df.apply(_compose_note, axis=1)
-        display_df["Column"] = display_df["column_name"].astype(str)
-        display_df["Physical Type"] = display_df["data_type"].astype(str)
-        for column in ("Avg Len", "Null %", "Distinct (count/%)", "Profile Min", "Profile Max", "Confidence", "Note"):
-            display_df[column] = display_df[column].fillna("")
-        display_df["Guessed Type"] = display_df["Guessed Type"].fillna("Unknown")
-
-        grid_df = display_df[grid_columns].copy()
-        st.dataframe(grid_df, hide_index=True, use_container_width=True)
+        grid_df = pd.DataFrame(formatted_rows, columns=grid_columns)
+        styler = grid_df.style.format({"Confidence": _format_confidence_display})
+        styler = styler.applymap(_confidence_style, subset=["Confidence"])
+        st.dataframe(styler, hide_index=True, use_container_width=True)
     else:
         st.dataframe(pd.DataFrame(columns=grid_columns), hide_index=True, use_container_width=True)
 
