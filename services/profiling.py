@@ -75,6 +75,83 @@ CHAR_CLASS_PATTERNS: Dict[str, str] = {
 }
 
 
+DATE_PARSE_CONFIGS: Tuple[Dict[str, str], ...] = (
+    {
+        "key": "iso",
+        "format": "YYYY-MM-DD",
+        "label": "YYYY-MM-DD",
+        "regex": r"^\d{4}-\d{2}-\d{2}$",
+    },
+    {
+        "key": "iso_slash",
+        "format": "YYYY/MM/DD",
+        "label": "YYYY/MM/DD",
+        "regex": r"^\d{4}/\d{2}/\d{2}$",
+    },
+    {
+        "key": "iso_dot",
+        "format": "YYYY.MM.DD",
+        "label": "YYYY.MM.DD",
+        "regex": r"^\d{4}\.\d{2}\.\d{2}$",
+    },
+    {
+        "key": "yyyymmdd",
+        "format": "YYYYMMDD",
+        "label": "YYYYMMDD",
+        "regex": r"^\d{8}$",
+    },
+    {
+        "key": "ddmmyyyy",
+        "format": "DDMMYYYY",
+        "label": "DDMMYYYY",
+        "regex": r"^\d{8}$",
+    },
+    {
+        "key": "dd_mm_yyyy",
+        "format": "DD-MM-YYYY",
+        "label": "DD-MM-YYYY",
+        "regex": r"^\d{1,2}-\d{1,2}-\d{4}$",
+    },
+    {
+        "key": "dd_slash_mm",
+        "format": "DD/MM/YYYY",
+        "label": "DD/MM/YYYY",
+        "regex": r"^\d{1,2}/\d{1,2}/\d{4}$",
+    },
+    {
+        "key": "mm_dd_yyyy",
+        "format": "MM-DD-YYYY",
+        "label": "MM-DD-YYYY",
+        "regex": r"^\d{1,2}-\d{1,2}-\d{4}$",
+    },
+    {
+        "key": "mm_slash_dd",
+        "format": "MM/DD/YYYY",
+        "label": "MM/DD/YYYY",
+        "regex": r"^\d{1,2}/\d{1,2}/\d{4}$",
+    },
+    {
+        "key": "dd_mon_yyyy",
+        "format": "DD-MON-YYYY",
+        "label": "DD-MON-YYYY",
+        "regex": r"^\d{1,2}-[A-Za-z]{3}-\d{4}$",
+        "transform": "UPPER({col}::STRING)",
+    },
+    {
+        "key": "mon_dd_yyyy",
+        "format": "MON-DD-YYYY",
+        "label": "MON-DD-YYYY",
+        "regex": r"^[A-Za-z]{3}-\d{1,2}-\d{4}$",
+        "transform": "UPPER({col}::STRING)",
+    },
+)
+
+
+DATE_PARSE_LABELS: Dict[str, str] = {
+    config["key"]: config["label"] for config in DATE_PARSE_CONFIGS
+}
+
+
 FALLBACK_COUNTRY_CODES: Set[str] = {
     "US",
     "DE",
@@ -266,7 +343,9 @@ def _is_boolean_type(data_type: str) -> bool:
     return "BOOL" in upper or "BOOLEAN" in upper
 
 
-def _infer_semantic_type(column_entry: Dict[str, Any]) -> Tuple[str, float, str]:
+def _infer_semantic_type(
+    column_entry: Dict[str, Any]
+) -> Tuple[str, float, str, Optional[Any], Optional[Any]]:
     signals = column_entry.get("signals", {}) or {}
     regex = signals.get("regex", {}) or {}
     char_classes = signals.get("character_classes", {}) or {}
@@ -292,13 +371,33 @@ def _infer_semantic_type(column_entry: Dict[str, Any]) -> Tuple[str, float, str]
     top1_ratio_signal = _as_float(string_stats.get("top1_ratio"))
     top3_ratio_signal = _as_float(string_stats.get("top3_ratio"))
     numeric_like_ratio_signal = _as_float(string_stats.get("numeric_like_ratio"))
+    parse_format_ratios = date_parse.get("formats")
+    if isinstance(parse_format_ratios, dict):
+        format_ratios = {
+            str(key): _as_float(value)
+            for key, value in parse_format_ratios.items()
+        }
+    else:
+        format_ratios = {}
+        for key, value in date_parse.items():
+            if key.endswith("_ratio"):
+                format_ratios[str(key[:-6])] = _as_float(value)
     best_date_ratio = _as_float(date_parse.get("best_ratio"))
+    overall_success_ratio = _as_float(date_parse.get("success_ratio"))
     best_date_format = date_parse.get("best_format")
     parsed_date_min = date_parse.get("parsed_min")
     parsed_date_max = date_parse.get("parsed_max")
+    pattern_values: List[float] = []
+    if isinstance(date_patterns, dict):
+        for value in date_patterns.values():
+            val_float = _as_float(value)
+            if val_float is not None:
+                pattern_values.append(val_float)
+    pattern_values.extend(val for val in format_ratios.values() if val is not None)
     yyyymmdd_pattern_ratio = _as_float(date_patterns.get("yyyymmdd_ratio"))
     ddmmyyyy_pattern_ratio = _as_float(date_patterns.get("ddmmyyyy_ratio"))
     iso_pattern_ratio = _as_float(date_patterns.get("iso_ymd_ratio"))
+    pattern_ratio_fallback = max(pattern_values) if pattern_values else 0.0
     column_name_lower = (column_entry.get("column_name") or "").lower()
 
     distinct_pct_raw = column_entry.get("distinct_pct")
@@ -390,17 +489,21 @@ def _infer_semantic_type(column_entry: Dict[str, Any]) -> Tuple[str, float, str]
     if hints.get("phone"):
         _boost("PHONE", 12.0, "column name references phone")
 
-    if best_date_ratio is not None and best_date_ratio >= 0.6:
-        format_labels = {
-            "yyyymmdd": "YYYYMMDD",
-            "ddmmyyyy": "DDMMYYYY",
-            "iso": "YYYY-MM-DD",
-        }
-        label = format_labels.get(str(best_date_format or "").lower(), str(best_date_format or "text date").upper())
+    date_success_ratio = (
+        best_date_ratio
+        if best_date_ratio is not None
+        else overall_success_ratio
+    )
+    if date_success_ratio is not None and date_success_ratio >= 0.6:
+        format_key = str(best_date_format or "").lower()
+        label = DATE_PARSE_LABELS.get(
+            format_key,
+            str(best_date_format or "text date").upper(),
+        )
         _boost(
             "DATE_IN_TEXT",
-            85.0 * min(best_date_ratio, 1.0),
-            f"{best_date_ratio:.0%} of values parse as {label}",
+            85.0 * min(date_success_ratio, 1.0),
+            f"{date_success_ratio:.0%} of values parse as {label}",
         )
         if parsed_date_min or parsed_date_max:
             _boost(
@@ -416,6 +519,7 @@ def _infer_semantic_type(column_entry: Dict[str, Any]) -> Tuple[str, float, str]
             iso_pattern_ratio or 0.0,
             yyyymmdd_pattern_ratio or 0.0,
             ddmmyyyy_pattern_ratio or 0.0,
+            pattern_ratio_fallback,
         )
         if pattern_ratio >= 0.7:
             _boost(
@@ -552,8 +656,8 @@ def _infer_semantic_type(column_entry: Dict[str, Any]) -> Tuple[str, float, str]
         consistent_length = math.isclose(length_min, length_max, rel_tol=0.0, abs_tol=1.0)
 
     if distinct_ratio_signal is not None and distinct_ratio_signal >= 0.25:
-        dominance_ok = (top1_ratio_signal is None or top1_ratio_signal <= 0.2) and (
-            top3_ratio_signal is None or top3_ratio_signal <= 0.45
+        dominance_ok = (top1_ratio_signal is None or top1_ratio_signal <= 0.25) and (
+            top3_ratio_signal is None or top3_ratio_signal <= 0.5
         )
         if dominance_ok:
             reason = (
@@ -568,6 +672,23 @@ def _infer_semantic_type(column_entry: Dict[str, Any]) -> Tuple[str, float, str]
                 _boost("REF_CODE", 6.0, "mix of digits suggests coded identifiers")
             if char_alnum >= 0.6:
                 _boost("REF_CODE", 4.0, "alphanumeric composition typical of codes")
+            if uppercase_ratio >= 0.5 and consistent_length:
+                _boost("REF_CODE", 5.0, "values mostly uppercase with tight length range")
+    if (
+        distinct_ratio_signal is not None
+        and distinct_ratio_signal <= 0.2
+        and (top3_ratio_signal or 0.0) >= 0.6
+        and (numeric_like_ratio_signal or 0.0) >= 0.2
+    ):
+        _boost(
+            "REF_CODE",
+            18.0,
+            "low diversity but multiple repeated codes",
+        )
+        if consistent_length and length_min is not None:
+            _boost("REF_CODE", 6.0, f"values align around length ≈ {length_min:.0f}")
+        if uppercase_ratio >= 0.5:
+            _boost("REF_CODE", 4.0, "mostly uppercase values")
 
     distinct_ratio_value_raw = float(resolved_distinct_ratio)
     distinct_ratio_value = max(0.0, min(1.0, distinct_ratio_value_raw))
@@ -600,6 +721,10 @@ def _infer_semantic_type(column_entry: Dict[str, Any]) -> Tuple[str, float, str]
         if cond_limited_unique:
             forced_rationale_parts.append(
                 f"{distinct_count_value} distinct values across {row_count_value} rows"
+            )
+        if consistent_length and length_min is not None:
+            forced_rationale_parts.append(
+                f"values cluster around length {length_min:.0f}"
             )
 
     if distinct_pct is not None and distinct_pct >= 70.0:
@@ -643,6 +768,21 @@ def _infer_semantic_type(column_entry: Dict[str, Any]) -> Tuple[str, float, str]
             rationales.setdefault(best_type, []).append("defaulting to generic identifier due to lack of stronger signals")
 
     forced_rationale = "; ".join(part for part in forced_rationale_parts if part)
+    profile_min: Optional[Any] = column_entry.get("min_val")
+    profile_max: Optional[Any] = column_entry.get("max_val")
+    if best_type == "DATE_IN_TEXT":
+        profile_min = parsed_date_min or profile_min
+        profile_max = parsed_date_max or profile_max
+    elif _is_temporal(data_type):
+        profile_min = column_entry.get("min_val") or profile_min
+        profile_max = column_entry.get("max_val") or profile_max
+    elif best_type == "REF_CODE":
+        profile_min = column_entry.get("numeric_min") or profile_min
+        profile_max = column_entry.get("numeric_max") or profile_max
+    elif _is_numeric(data_type):
+        profile_min = column_entry.get("min_val")
+        profile_max = column_entry.get("max_val")
+
     if forced_type:
         best_type = forced_type
         if forced_confidence is not None:
@@ -654,7 +794,7 @@ def _infer_semantic_type(column_entry: Dict[str, Any]) -> Tuple[str, float, str]
                 forced_rationale = f"{date_success_ratio:.0%} of values parse successfully"
             else:
                 forced_rationale = "rule-based semantic classification"
-        return best_type, confidence, forced_rationale
+        return best_type, confidence, forced_rationale, profile_min, profile_max
 
     confidence = min(1.0, max(best_score, 0.0) / 100.0)
     confidence = round(confidence, 3)
@@ -668,7 +808,7 @@ def _infer_semantic_type(column_entry: Dict[str, Any]) -> Tuple[str, float, str]
 
     rationale = "; ".join(explanations[:3])
 
-    return best_type, confidence, rationale
+    return best_type, confidence, rationale, profile_min, profile_max
 
 
 def normalize_profile_row(row: Dict[str, Any]) -> Dict[str, Any]:
@@ -885,6 +1025,10 @@ def run_table_profile(
         date_parse_aliases: Dict[str, str] = {}
         date_parse_min_aliases: Dict[str, str] = {}
         date_parse_max_aliases: Dict[str, str] = {}
+        date_pattern_seen: Dict[str, str] = {}
+        any_parse_alias: Optional[str] = None
+        any_parse_min_alias: Optional[str] = None
+        any_parse_max_alias: Optional[str] = None
         numeric_like_alias: Optional[str] = None
         if is_string:
             metrics_sql.extend(
@@ -930,41 +1074,55 @@ def run_table_profile(
                 f"SUM(CASE WHEN {qcol} IS NOT NULL AND REGEXP_LIKE({qcol}::STRING, '{numeric_like_pattern}') THEN 1 ELSE 0 END) AS {numeric_like_alias}"
             )
 
-            date_pattern_aliases = {
-                "yyyymmdd_ratio": "STRING_DATE_YYYYMMDD_MATCHES",
-                "ddmmyyyy_ratio": "STRING_DATE_DDMMYYYY_MATCHES",
-                "iso_ymd_ratio": "STRING_DATE_ISO_YMD_MATCHES",
-            }
-            date_pattern_numeric = r"^\d{8}$".replace("\\", "\\\\")
-            date_pattern_iso = r"^\d{4}-\d{2}-\d{2}$".replace("\\", "\\\\")
-            metrics_sql.append(
-                f"SUM(CASE WHEN {qcol} IS NOT NULL AND REGEXP_LIKE({qcol}::STRING, '{date_pattern_numeric}') THEN 1 ELSE 0 END) AS {date_pattern_aliases['yyyymmdd_ratio']}"
-            )
-            metrics_sql.append(
-                f"SUM(CASE WHEN {qcol} IS NOT NULL AND REGEXP_LIKE({qcol}::STRING, '{date_pattern_numeric}') THEN 1 ELSE 0 END) AS {date_pattern_aliases['ddmmyyyy_ratio']}"
-            )
-            metrics_sql.append(
-                f"SUM(CASE WHEN {qcol} IS NOT NULL AND REGEXP_LIKE({qcol}::STRING, '{date_pattern_iso}') THEN 1 ELSE 0 END) AS {date_pattern_aliases['iso_ymd_ratio']}"
-            )
-
-            date_parse_aliases = {
-                "yyyymmdd": "STRING_DATE_PARSE_YYYYMMDD",
-                "ddmmyyyy": "STRING_DATE_PARSE_DDMMYYYY",
-                "iso": "STRING_DATE_PARSE_ISO",
-            }
-            for key, fmt in (("yyyymmdd", "YYYYMMDD"), ("ddmmyyyy", "DDMMYYYY"), ("iso", "YYYY-MM-DD")):
-                alias = date_parse_aliases[key]
-                metrics_sql.append(
-                    f"SUM(CASE WHEN TRY_TO_DATE({qcol}::STRING, '{fmt}') IS NOT NULL THEN 1 ELSE 0 END) AS {alias}"
+            coalesce_terms: List[str] = []
+            for config in DATE_PARSE_CONFIGS:
+                key = config["key"]
+                fmt = config["format"]
+                alias_key = (
+                    key.upper()
+                    .replace("-", "_")
+                    .replace("/", "_")
+                    .replace(".", "_")
                 )
-                date_parse_min_aliases[key] = f"STRING_DATE_MIN_{key.upper()}"
-                date_parse_max_aliases[key] = f"STRING_DATE_MAX_{key.upper()}"
+                parse_alias = f"STRING_DATE_PARSE_{alias_key}"
+                template = config.get("transform") or "{col}::STRING"
+                input_expr = template.format(col=qcol)
                 metrics_sql.append(
-                    f"MIN(TRY_TO_DATE({qcol}::STRING, '{fmt}')) AS {date_parse_min_aliases[key]}"
+                    f"SUM(CASE WHEN TRY_TO_DATE({input_expr}, '{fmt}') IS NOT NULL THEN 1 ELSE 0 END) AS {parse_alias}"
+                )
+                date_parse_aliases[key] = parse_alias
+                min_alias = f"STRING_DATE_MIN_{alias_key}"
+                max_alias = f"STRING_DATE_MAX_{alias_key}"
+                date_parse_min_aliases[key] = min_alias
+                date_parse_max_aliases[key] = max_alias
+                metrics_sql.append(
+                    f"MIN(TRY_TO_DATE({input_expr}, '{fmt}')) AS {min_alias}"
                 )
                 metrics_sql.append(
-                    f"MAX(TRY_TO_DATE({qcol}::STRING, '{fmt}')) AS {date_parse_max_aliases[key]}"
+                    f"MAX(TRY_TO_DATE({input_expr}, '{fmt}')) AS {max_alias}"
                 )
+                coalesce_terms.append(f"TRY_TO_DATE({input_expr}, '{fmt}')")
+                regex_pattern = config.get("regex")
+                if regex_pattern:
+                    alias = date_pattern_seen.get(regex_pattern)
+                    if not alias:
+                        alias = f"STRING_DATE_PATTERN_{alias_key}"
+                        pattern_sql = regex_pattern.replace("\\", "\\\\")
+                        metrics_sql.append(
+                            f"SUM(CASE WHEN {qcol} IS NOT NULL AND REGEXP_LIKE({qcol}::STRING, '{pattern_sql}') THEN 1 ELSE 0 END) AS {alias}"
+                        )
+                        date_pattern_seen[regex_pattern] = alias
+                    date_pattern_aliases[key] = alias
+            if coalesce_terms:
+                coalesce_expr = f"COALESCE({', '.join(coalesce_terms)})"
+                any_parse_alias = "STRING_DATE_PARSE_ANY"
+                any_parse_min_alias = "STRING_DATE_PARSE_ANY_MIN"
+                any_parse_max_alias = "STRING_DATE_PARSE_ANY_MAX"
+                metrics_sql.append(
+                    f"SUM(CASE WHEN {coalesce_expr} IS NOT NULL THEN 1 ELSE 0 END) AS {any_parse_alias}"
+                )
+                metrics_sql.append(f"MIN({coalesce_expr}) AS {any_parse_min_alias}")
+                metrics_sql.append(f"MAX({coalesce_expr}) AS {any_parse_max_alias}")
         else:
             char_pattern_aliases = {}
             regex_aliases = {}
@@ -973,6 +1131,10 @@ def run_table_profile(
             date_parse_aliases = {}
             date_parse_min_aliases = {}
             date_parse_max_aliases = {}
+            date_pattern_seen = {}
+            any_parse_alias = None
+            any_parse_min_alias = None
+            any_parse_max_alias = None
             numeric_like_alias = None
 
         sql = "SELECT " + ", ".join(metrics_sql) + f" FROM {sampled_ref}"
@@ -1104,6 +1266,19 @@ def run_table_profile(
             parsed_min_values[key] = _extract_row_value(row, date_parse_min_aliases.get(key, ""))
             parsed_max_values[key] = _extract_row_value(row, date_parse_max_aliases.get(key, ""))
 
+        any_parse_ratio: Optional[float] = None
+        any_parsed_min: Optional[Any] = None
+        any_parsed_max: Optional[Any] = None
+        if any_parse_alias:
+            any_matches_raw = _extract_row_value(row, any_parse_alias, 0)
+            try:
+                any_matches = int(any_matches_raw)
+            except Exception:
+                any_matches = 0
+            any_parse_ratio = (float(any_matches) / float(non_nulls)) if non_nulls else 0.0
+            any_parsed_min = _extract_row_value(row, any_parse_min_alias or "")
+            any_parsed_max = _extract_row_value(row, any_parse_max_alias or "")
+
         best_date_key: Optional[str] = None
         best_date_ratio = 0.0
         for key, ratio in date_parse_ratios.items():
@@ -1116,7 +1291,10 @@ def run_table_profile(
 
         parsed_date_min: Optional[str] = None
         parsed_date_max: Optional[str] = None
-        if best_date_key:
+        if any_parsed_min is not None or any_parsed_max is not None:
+            parsed_date_min = str(any_parsed_min) if any_parsed_min is not None else None
+            parsed_date_max = str(any_parsed_max) if any_parsed_max is not None else None
+        elif best_date_key:
             best_min = parsed_min_values.get(best_date_key)
             best_max = parsed_max_values.get(best_date_key)
             parsed_date_min = str(best_min) if best_min is not None else None
@@ -1190,14 +1368,15 @@ def run_table_profile(
                     "len_min": len_min_val,
                     "len_max": len_max_val,
                     "numeric_like_ratio": numeric_like_ratio,
-                    "date_pattern_yyyymmdd_ratio": date_pattern_ratios.get("yyyymmdd_ratio"),
-                    "date_pattern_ddmmyyyy_ratio": date_pattern_ratios.get("ddmmyyyy_ratio"),
-                    "date_pattern_iso_ymd_ratio": date_pattern_ratios.get("iso_ymd_ratio"),
+                    "date_pattern_yyyymmdd_ratio": date_pattern_ratios.get("yyyymmdd"),
+                    "date_pattern_ddmmyyyy_ratio": date_pattern_ratios.get("ddmmyyyy"),
+                    "date_pattern_iso_ymd_ratio": date_pattern_ratios.get("iso"),
                     "date_parse_ratio_yyyymmdd": date_parse_ratios.get("yyyymmdd"),
                     "date_parse_ratio_ddmmyyyy": date_parse_ratios.get("ddmmyyyy"),
                     "date_parse_ratio_iso": date_parse_ratios.get("iso"),
                     "date_parse_ratio_best": best_date_ratio if best_date_key else None,
                     "date_parse_best_format": best_date_key,
+                    "date_parse_success_ratio": any_parse_ratio,
                     "parsed_date_min": parsed_date_min,
                     "parsed_date_max": parsed_date_max,
                 }
@@ -1226,54 +1405,37 @@ def run_table_profile(
                 "top3_ratio": top3_ratio,
                 "numeric_like_ratio": numeric_like_ratio,
             }
-            signals["date_patterns"] = {
-                "yyyymmdd_ratio": date_pattern_ratios.get("yyyymmdd_ratio"),
-                "ddmmyyyy_ratio": date_pattern_ratios.get("ddmmyyyy_ratio"),
-                "iso_ymd_ratio": date_pattern_ratios.get("iso_ymd_ratio"),
-            }
+            signals["date_patterns"] = {str(key): date_pattern_ratios.get(key) for key in date_pattern_ratios}
             signals["date_parse"] = {
-                "yyyymmdd_ratio": date_parse_ratios.get("yyyymmdd"),
-                "ddmmyyyy_ratio": date_parse_ratios.get("ddmmyyyy"),
-                "iso_ratio": date_parse_ratios.get("iso"),
+                "formats": {str(key): date_parse_ratios.get(key) for key in date_parse_ratios},
                 "best_ratio": best_date_ratio if best_date_key else None,
                 "best_format": best_date_key,
+                "success_ratio": any_parse_ratio,
                 "parsed_min": parsed_date_min,
                 "parsed_max": parsed_date_max,
             }
         else:
             signals["length"] = {"min": None, "max": None, "avg": None}
 
-        for key, ratio in regex_ratios.items():
-            column_entry[f"signal_{key}_ratio"] = ratio
-        for key, ratio in char_ratios.items():
-            suffix = "whitespace_ratio" if key == "whitespace" else f"{key}_ratio"
-            column_entry[f"signal_{suffix}"] = ratio
-        for key, ratio in reference_ratios.items():
-            column_entry[f"signal_{key}_ratio"] = ratio
-        column_entry["signal_len_min"] = len_min_val if is_string else None
-        column_entry["signal_len_max"] = len_max_val if is_string else None
-        column_entry["signal_len_avg"] = avg_len if (is_string and avg_len is not None) else None
-        for key, value in hints.items():
-            column_entry[f"signal_hint_{key}"] = bool(value)
-
-        if is_string:
-            column_entry["signal_numeric_like_ratio"] = numeric_like_ratio
-            column_entry["signal_date_parse_best_ratio"] = best_date_ratio if best_date_key else None
-            column_entry["signal_date_parse_best_format"] = best_date_key
-            column_entry["signal_parsed_date_min"] = parsed_date_min
-            column_entry["signal_parsed_date_max"] = parsed_date_max
-
         column_entry["signals"] = signals
 
-        semantic_type, confidence, rationale = _infer_semantic_type(column_entry)
+        (
+            semantic_type,
+            confidence,
+            rationale,
+            profile_min,
+            profile_max,
+        ) = _infer_semantic_type(column_entry)
         column_entry["semantic_type"] = semantic_type
         column_entry["confidence"] = confidence
         column_entry["rationale"] = rationale
+        column_entry["profile_min"] = profile_min
+        column_entry["profile_max"] = profile_max
 
         if (
             semantic_type == "REF_CODE"
             and is_string
-            and (column_entry.get("signal_numeric_like_ratio") or 0.0) >= 0.9
+            and (numeric_like_ratio or 0.0) >= 0.9
         ):
             try:
                 bounds_row = _collect_single_row(
@@ -1304,12 +1466,18 @@ def run_table_profile(
             numeric_max_val = _to_float(numeric_max_raw)
             if numeric_min_val is not None:
                 column_entry["numeric_min"] = numeric_min_val
+                column_entry["profile_min"] = numeric_min_val
             elif numeric_min_raw is not None:
                 column_entry["numeric_min"] = str(numeric_min_raw)
+                if column_entry.get("profile_min") is None:
+                    column_entry["profile_min"] = str(numeric_min_raw)
             if numeric_max_val is not None:
                 column_entry["numeric_max"] = numeric_max_val
+                column_entry["profile_max"] = numeric_max_val
             elif numeric_max_raw is not None:
                 column_entry["numeric_max"] = str(numeric_max_raw)
+                if column_entry.get("profile_max") is None:
+                    column_entry["profile_max"] = str(numeric_max_raw)
 
         per_column.append(column_entry)
 
@@ -1574,9 +1742,16 @@ def save_profile_results(
             or (isinstance(rationale, str) and not rationale.strip())
         ):
             try:
-                inferred_type, inferred_conf, inferred_rationale = _infer_semantic_type(normalized_row)
+                (
+                    inferred_type,
+                    inferred_conf,
+                    inferred_rationale,
+                    inferred_min,
+                    inferred_max,
+                ) = _infer_semantic_type(normalized_row)
             except Exception:
                 inferred_type = inferred_conf = inferred_rationale = None
+                inferred_min = inferred_max = None
             else:
                 if semantic_type is None:
                     semantic_type = inferred_type
@@ -1584,6 +1759,10 @@ def save_profile_results(
                     confidence_raw = inferred_conf
                 if (isinstance(rationale, str) and not rationale.strip()) or rationale is None:
                     rationale = inferred_rationale
+                if normalized_row.get("profile_min") is None and inferred_min is not None:
+                    normalized_row["profile_min"] = inferred_min
+                if normalized_row.get("profile_max") is None and inferred_max is not None:
+                    normalized_row["profile_max"] = inferred_max
 
         try:
             confidence = float(confidence_raw) if confidence_raw is not None else None
