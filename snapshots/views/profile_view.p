@@ -7,7 +7,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from numbers import Integral, Real
-from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import pandas as pd
 import streamlit as st
@@ -417,28 +417,6 @@ def _format_percentage(value: Any) -> str:
         return ""
 
 
-def _badge_css(value: Any) -> str:
-    label = str(value or "Unknown")
-    styles = {
-        "High": "background-color: #0f9960; color: #ffffff;",
-        "Medium": "background-color: #f7b731; color: #2b2b2b;",
-        "Low": "background-color: #9aa0a6; color: #1f1f1f;",
-        "Unknown": "background-color: #dfe1e5; color: #1f1f1f;",
-    }
-    base = styles.get(label, styles["Unknown"])
-    return "; ".join(
-        [
-            base.rstrip(";"),
-            "border-radius: 12px",
-            "font-weight: 600",
-            "text-align: center",
-            "padding: 0.15rem 0.4rem",
-            "display: inline-block",
-            "min-width: 4rem",
-        ]
-    )
-
-
 def _format_ratio_pct(value: Optional[float], decimals: int = 0) -> str:
     if value is None:
         return "—"
@@ -473,25 +451,13 @@ def _badge_display_text(status: str, label: str) -> str:
     return label
 
 
-def _status_to_badge_css(status: str) -> str:
-    palette = {
-        "green": "background-color: #0f9960; color: #ffffff;",
-        "amber": "background-color: #f7b731; color: #2b2b2b;",
-        "red": "background-color: #d64541; color: #ffffff;",
-        "muted": "background-color: transparent; color: inherit; border: 1px solid rgba(0, 0, 0, 0.08);",
+def _status_to_badge_icon(status: str) -> str:
+    icon_map = {
+        "green": "🟢",
+        "amber": "🟡",
+        "red": "🔴",
     }
-    base = palette.get(status, palette["muted"]).rstrip(";")
-    return "; ".join(
-        [
-            base,
-            "border-radius: 12px",
-            "font-weight: 600",
-            "text-align: center",
-            "padding: 0.15rem 0.4rem",
-            "display: inline-block",
-            "min-width: 4rem",
-        ]
-    )
+    return icon_map.get(status, "⚪")
 
 
 def _format_card_value(value: Any, *, decimals: int = 2, allow_commas: bool = False) -> str:
@@ -852,8 +818,6 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
         )
         has_date_text = semantic_series.eq("DATE_IN_TEXT").any()
         has_ref_code = semantic_series.eq("REF_CODE").any()
-        badge_styles: Dict[str, List[str]] = {}
-        tooltip_columns: Dict[str, List[str]] = {}
         if "confidence" in display_df.columns:
             display_df["Confidence"] = display_df["confidence"].apply(
                 lambda val: float(val) if val is not None else None
@@ -864,16 +828,29 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
             display_df["Confidence"] = None
             display_df["Confidence Badge"] = "Unknown"
 
+        def _format_confidence_badge_label(raw_label: Any) -> str:
+            if raw_label is None:
+                return ""
+            label = str(raw_label).strip()
+            if not label or label.lower() == "nan":
+                return ""
+            icon_map = {
+                "High": "🟢",
+                "Medium": "🟡",
+                "Low": "🔴",
+                "Unknown": "⚪",
+            }
+            icon = icon_map.get(label, "⚪")
+            return f"{icon} {label}".strip()
+
+        display_df["Confidence Badge"] = display_df["Confidence Badge"].apply(_format_confidence_badge_label)
+
         if has_date_text:
             date_labels: List[str] = []
-            date_tooltips: List[str] = []
-            date_styles: List[str] = []
             for _, row in display_df.iterrows():
                 is_date = str(row.get("semantic_type") or "").upper() == "DATE_IN_TEXT"
                 if not is_date:
                     date_labels.append("")
-                    date_tooltips.append("")
-                    date_styles.append(_status_to_badge_css("muted"))
                     continue
                 ratio_pct = row.get("date_parse_best_pct")
                 ratio_norm: Optional[float] = None
@@ -888,13 +865,14 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
                 label = _badge_display_text(status, "Date (Text)")
                 fmt = row.get("date_parse_best_format") or "—"
                 ratio_display = _format_ratio_pct(ratio_norm, 0)
-                tooltip = f"Format: {fmt}; Success ratio: {ratio_display}"
-                date_labels.append(label)
-                date_tooltips.append(tooltip)
-                date_styles.append(_status_to_badge_css(status))
+                icon = _status_to_badge_icon(status)
+                info_parts = [
+                    f"{icon} {label}".strip(),
+                    f"Format: {fmt}" if fmt else "",
+                    f"Success: {ratio_display}" if ratio_display else "",
+                ]
+                date_labels.append(" • ".join(part for part in info_parts if part))
             display_df["Date (Text)"] = date_labels
-            tooltip_columns["Date (Text)"] = date_tooltips
-            badge_styles["Date (Text)"] = date_styles
         else:
             display_df = display_df.drop(
                 columns=[
@@ -908,14 +886,10 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
 
         if has_ref_code:
             ref_labels: List[str] = []
-            ref_tooltips: List[str] = []
-            ref_styles: List[str] = []
             for _, row in display_df.iterrows():
                 is_ref = str(row.get("semantic_type") or "").upper() == "REF_CODE"
                 if not is_ref:
                     ref_labels.append("")
-                    ref_tooltips.append("")
-                    ref_styles.append(_status_to_badge_css("muted"))
                     continue
                 distinct_ratio_pct = row.get("distinct_ratio_pct")
                 distinct_ratio: Optional[float] = None
@@ -939,15 +913,14 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
                         top3_ratio = None
                 distinct_display = _format_ratio_pct(distinct_ratio, 0)
                 top3_display = _format_ratio_pct(top3_ratio, 0)
-                tooltip = (
-                    f"Distinct ratio: {distinct_display}; Top-3 coverage: {top3_display}"
-                )
-                ref_labels.append(label)
-                ref_tooltips.append(tooltip)
-                ref_styles.append(_status_to_badge_css(status))
+                icon = _status_to_badge_icon(status)
+                info_parts = [
+                    f"{icon} {label}".strip(),
+                    f"Distinct: {distinct_display}" if distinct_display else "",
+                    f"Top-3: {top3_display}" if top3_display else "",
+                ]
+                ref_labels.append(" • ".join(part for part in info_parts if part))
             display_df["Reference Codes"] = ref_labels
-            tooltip_columns["Reference Codes"] = ref_tooltips
-            badge_styles["Reference Codes"] = ref_styles
         else:
             display_df = display_df.drop(columns=["Reference Codes"], errors="ignore")
 
@@ -1030,24 +1003,8 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
         for pct_col in percentage_columns:
             if pct_col in display_df.columns:
                 formatters[pct_col] = _format_percentage
-        styler = display_df.style.format(formatters)
-        if "Confidence Badge" in display_df.columns:
-            styler = styler.applymap(_badge_css, subset=["Confidence Badge"])
-        if badge_styles:
-            def _style_from_list(styles: List[str]) -> Callable[[pd.Series], List[str]]:
-                def _apply(_: pd.Series) -> List[str]:
-                    return styles
-
-                return _apply
-
-            for column, styles in badge_styles.items():
-                if column in display_df.columns:
-                    styler = styler.apply(_style_from_list(styles), subset=[column])
-        if tooltip_columns:
-            tooltip_df = pd.DataFrame(tooltip_columns, index=display_df.index)
-            existing_cols = [col for col in tooltip_df.columns if col in display_df.columns]
-            if existing_cols:
-                styler = styler.set_tooltips(tooltip_df[existing_cols])
+        for column, formatter in formatters.items():
+            display_df[column] = display_df[column].apply(formatter)
         column_config: Dict[str, st.column_config.BaseColumn] = {}
         if "Confidence Rationale" in display_df.columns:
             column_config["Confidence Rationale"] = st.column_config.TextColumn(
@@ -1056,7 +1013,7 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
                 width="medium",
             )
         st.dataframe(
-            styler,
+            display_df,
             hide_index=True,
             use_container_width=True,
             column_config=column_config or None,
