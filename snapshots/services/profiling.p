@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import logging
 import math
+import os
 import random
 from datetime import datetime
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
@@ -20,6 +22,19 @@ __all__ = [
     "save_profile_results",
     "normalize_profile_row",
 ]
+
+
+logger = logging.getLogger(__name__)
+
+
+def _env_flag(name: str, default: bool = False) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "t", "yes", "y", "on"}
+
+
+PROFILE_DEBUG = _env_flag("PROFILE_DEBUG", False)
 
 
 def _split_fqn(fqn: str) -> Tuple[str, str, str]:
@@ -1334,7 +1349,12 @@ def run_table_profile(
             )
         else:
             metrics_sql.append("0 AS WHITESPACE_ROWS")
-        metrics_sql.append(f"AVG(LENGTH({qcol}::STRING)) AS AVG_LEN")
+        if is_string:
+            metrics_sql.append(
+                f"AVG(LENGTH({qcol}::STRING)) FILTER (WHERE {qcol} IS NOT NULL) AS AVG_LEN"
+            )
+        else:
+            metrics_sql.append("NULL AS AVG_LEN")
 
         char_pattern_aliases: Dict[str, str] = {}
         regex_aliases: Dict[str, str] = {}
@@ -1514,11 +1534,11 @@ def run_table_profile(
         whitespace_rows = _extract_row_value(row, "WHITESPACE_ROWS", 0)
         avg_len_raw = _extract_row_value(row, "AVG_LEN")
         try:
-            avg_len = float(avg_len_raw) if avg_len_raw is not None else None
+            avg_len_value = float(avg_len_raw) if avg_len_raw is not None else None
         except Exception:
-            avg_len = None
+            avg_len_value = None
         if not is_string:
-            avg_len = None
+            avg_len_value = None
         try:
             whitespace_rows_int = int(whitespace_rows)
         except Exception:
@@ -1530,6 +1550,18 @@ def run_table_profile(
             if isinstance(non_nulls_count, int)
             else max(rows_profiled - nulls_int, 0)
         )
+        avg_len_debug_note: Optional[str] = None
+        if is_string:
+            if avg_len_value is None:
+                if non_nulls > 0:
+                    logger.warning("avg_len metric missing for column %s", name)
+                    if PROFILE_DEBUG:
+                        avg_len_debug_note = "⚠ avg_len missing"
+                avg_len_final: Optional[float] = 0.0
+            else:
+                avg_len_final = float(avg_len_value)
+        else:
+            avg_len_final = None
         if distincts_int is not None and non_nulls:
             distinct_pct = float(distincts_int) / float(non_nulls) * 100.0
         else:
@@ -1727,7 +1759,7 @@ def run_table_profile(
             "distinct_pct": distinct_pct,
             "min_val": min_val,
             "max_val": max_val,
-            "avg_len": avg_len,
+            "avg_len": avg_len_final if is_string else None,
             "whitespace_pct": whitespace_pct,
             "top_values": top_values,
             "top_coverage_pct": coverage_pct,
@@ -1737,6 +1769,12 @@ def run_table_profile(
             "null_cnt": nulls_int,
             "error": None,
         }
+        if avg_len_debug_note:
+            existing_note = column_entry.get("note")
+            if existing_note:
+                column_entry["note"] = f"{existing_note}; {avg_len_debug_note}"
+            else:
+                column_entry["note"] = avg_len_debug_note
 
         column_entry["len_min"] = len_min_val if is_string else None
         column_entry["len_max"] = len_max_val if is_string else None
@@ -1783,7 +1821,7 @@ def run_table_profile(
             signals["length"] = {
                 "min": len_min_val,
                 "max": len_max_val,
-                "avg": avg_len,
+                "avg": avg_len_final,
                 "stddev": len_stddev_val,
                 "spread": column_entry.get("len_spread"),
             }
@@ -1797,7 +1835,7 @@ def run_table_profile(
                 "numeric_like_ratio": numeric_like_ratio,
                 "sentinel_count": sentinel_count,
                 "len_spread": column_entry.get("len_spread"),
-                "avg_len": avg_len,
+                "avg_len": avg_len_final,
             }
             signals["date_patterns"] = {str(key): date_pattern_ratios.get(key) for key in date_pattern_ratios}
             signals["date_parse"] = {
