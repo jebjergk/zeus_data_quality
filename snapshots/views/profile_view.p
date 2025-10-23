@@ -244,17 +244,58 @@ def _table_picker(session_obj, preselect_fqn: Optional[str]):
 
 
 def _stringify_for_display(value: Any) -> Any:
-    """Return a JSON string for complex values so the grid stays readable."""
+    """Return a compact, human readable representation for complex values."""
+
+    def _stringify_compound(compound: Any) -> str:
+        if isinstance(compound, dict):
+            if not compound:
+                return ""
+            if len(compound) == 1:
+                (key, single_value), = compound.items()
+                if str(key).lower() in {"value", "val", "text"}:
+                    return _to_string(single_value)
+            parts = []
+            for key, sub_value in compound.items():
+                parts.append(f"{key}: {_to_string(sub_value)}")
+            return ", ".join(parts)
+        if isinstance(compound, (list, tuple, set)):
+            if isinstance(compound, set):
+                try:
+                    compound = sorted(compound)
+                except Exception:
+                    compound = list(compound)
+            items = [_to_string(item) for item in compound]
+            return ", ".join(item for item in items if item)
+        return str(compound)
+
+    def _to_string(obj: Any) -> str:
+        if obj is None:
+            return ""
+        if isinstance(obj, (dict, list, tuple, set)):
+            return _stringify_compound(obj)
+        if isinstance(obj, str):
+            stripped = obj.strip()
+            if stripped.startswith("{") or stripped.startswith("["):
+                try:
+                    parsed = json.loads(stripped)
+                except Exception:
+                    return obj
+                return _stringify_compound(parsed)
+            return obj
+        return str(obj)
 
     if value is None:
         return None
     if isinstance(value, (dict, list, tuple, set)):
-        try:
-            if isinstance(value, set):
-                value = sorted(value)
-            return json.dumps(value, ensure_ascii=False)
-        except Exception:
-            return str(value)
+        return _stringify_compound(value)
+    if isinstance(value, str):
+        stripped_value = value.strip()
+        if stripped_value.startswith("{") or stripped_value.startswith("["):
+            try:
+                parsed_value = json.loads(stripped_value)
+            except Exception:
+                return value
+            return _stringify_compound(parsed_value)
     return value
 
 
