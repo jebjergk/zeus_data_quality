@@ -331,9 +331,9 @@ def _profiles_to_frame(profiles: Iterable[ColumnProfile]) -> pd.DataFrame:
                 "column_name": profile.name,
                 "data_type": profile.data_type,
                 "nulls": profile.nulls,
-                "null_pct": round(profile.null_pct, 2) if profile.null_pct is not None else None,
+                "null_pct": round(profile.null_pct, 4) if profile.null_pct is not None else None,
                 "distincts": profile.distincts,
-                "distinct_pct": round(profile.distinct_pct, 2) if profile.distinct_pct is not None else None,
+                "distinct_pct": round(profile.distinct_pct, 4) if profile.distinct_pct is not None else None,
                 "min_val": _stringify_for_display(profile.min_val),
                 "max_val": _stringify_for_display(profile.max_val),
                 "avg_len": profile.avg_len if profile.avg_len is not None else None,
@@ -731,7 +731,7 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
 
     filtered_df = df.copy()
     if high_null:
-        filtered_df = filtered_df[(filtered_df["null_pct"].fillna(0) > 20)]
+        filtered_df = filtered_df[(filtered_df["null_pct"].fillna(0) > 0.20)]
     if unique_candidates and summary.get("rows_profiled"):
         rows = float(summary["rows_profiled"])
         filtered_df = filtered_df[(filtered_df["distincts"].fillna(0) >= rows) & (filtered_df["nulls"].fillna(0) == 0)]
@@ -791,17 +791,16 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
 
         def _format_count_with_pct(count_value: Any, pct_value: Any) -> str:
             count_int = _safe_int(count_value)
-            pct_float = _safe_float(pct_value)
+            pct_ratio = _safe_float(pct_value)
+            if count_int is None and pct_ratio is None:
+                return "—"
             parts: List[str] = []
             if count_int is not None:
                 parts.append(f"{count_int:,}")
-            if pct_float is not None:
-                if pct_float < 100:
-                    pct_text = f"{pct_float:.1f}%".rstrip("0").rstrip(".")
-                else:
-                    pct_text = f"{pct_float:.0f}%"
-                parts.append(f"({pct_text})")
-            return " ".join(parts) if parts else ""
+            if pct_ratio is not None:
+                pct_value = max(0.0, pct_ratio * 100.0)
+                parts.append(f"({pct_value:.1f}%)")
+            return " ".join(parts) if parts else "—"
 
         def _format_avg_length_cell(row: pd.Series) -> str:
             if not _is_string_type_name(row.get("data_type")):

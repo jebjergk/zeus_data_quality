@@ -930,7 +930,7 @@ def _infer_semantic_type(
         _boost("TICKER/SYMBOL", 45.0 * uppercase_ratio, "top values predominantly uppercase and short")
     if char_alpha >= 0.6 and (length_avg is None or length_avg <= 6.5):
         _boost("TICKER/SYMBOL", 10.0, "values mainly alphabetic with short length")
-    if distinct_pct is not None and distinct_pct >= 60.0:
+    if distinct_pct is not None and distinct_pct >= 0.60:
         _boost("TICKER/SYMBOL", 6.0, "high uniqueness typical for tickers")
 
     if _is_numeric(data_type):
@@ -944,7 +944,7 @@ def _infer_semantic_type(
         _boost("ENUM/STATUS", 30.0, "column name references status/type")
     if distincts is not None and distincts <= 20 and non_nulls:
         coverage = float(sum(int((entry.get("count") or 0)) for entry in top_values)) / float(non_nulls) if non_nulls else 0.0
-        if distinct_pct is not None and distinct_pct <= 40.0:
+        if distinct_pct is not None and distinct_pct <= 0.40:
             _boost("ENUM/STATUS", 25.0, "low cardinality suggests enum")
         if coverage >= 0.8:
             _boost("ENUM/STATUS", 10.0, "few values cover majority of rows")
@@ -1048,7 +1048,7 @@ def _infer_semantic_type(
                 f"values cluster around length {length_min:.0f}"
             )
 
-    if distinct_pct is not None and distinct_pct >= 70.0:
+    if distinct_pct is not None and distinct_pct >= 0.70:
         _boost("ACCOUNT_ID", 12.0, "high uniqueness typical for identifiers")
         _boost("ORDER_ID", 12.0)
         _boost("TRADE_ID", 12.0)
@@ -1122,7 +1122,7 @@ def _infer_semantic_type(
 
     explanations = rationales.get(best_type, [])
     if not explanations:
-        if null_pct >= 50.0:
+        if null_pct >= 0.5:
             explanations = ["limited matches because column is mostly null"]
         else:
             explanations = ["limited heuristic support but selected best available type"]
@@ -1317,6 +1317,7 @@ def run_table_profile(
         qcol = _quote_identifier(name)
         distinct_expr = "APPROX_COUNT_DISTINCT({col})" if rows_profiled > approx_threshold else "COUNT(DISTINCT {col})"
         metrics_sql = [
+            "COUNT(*) AS ROW_CNT",
             f"SUM(CASE WHEN {qcol} IS NULL THEN 1 ELSE 0 END) AS NULLS",
             f"{distinct_expr.format(col=qcol)} AS DISTINCTS",
             f"SUM(CASE WHEN {qcol} IS NOT NULL THEN 1 ELSE 0 END) AS NON_NULLS_COUNT",
@@ -1351,7 +1352,7 @@ def run_table_profile(
             metrics_sql.append("0 AS WHITESPACE_ROWS")
         if is_string:
             metrics_sql.append(
-                f"AVG(LENGTH({qcol}::STRING)) FILTER (WHERE {qcol} IS NOT NULL) AS AVG_LEN"
+                f"AVG(CASE WHEN {qcol} IS NOT NULL THEN LENGTH({qcol}::STRING) END) AS AVG_LEN"
             )
         else:
             metrics_sql.append("NULL AS AVG_LEN")
@@ -1506,17 +1507,23 @@ def run_table_profile(
         except Exception:
             row = None
 
-        nulls = _extract_row_value(row, "NULLS", 0)
+        row_cnt_raw = _extract_row_value(row, "ROW_CNT", rows_profiled)
         try:
-            nulls_int = int(nulls)
+            row_cnt = int(row_cnt_raw)
         except Exception:
-            nulls_int = 0
+            try:
+                row_cnt = int(float(row_cnt_raw))
+            except Exception:
+                row_cnt = int(rows_profiled)
 
-        non_nulls_raw = _extract_row_value(row, "NON_NULLS_COUNT", None)
+        nulls_raw = _extract_row_value(row, "NULLS", 0)
         try:
-            non_nulls_count = int(non_nulls_raw) if non_nulls_raw is not None else None
+            nulls_int = int(nulls_raw or 0)
         except Exception:
-            non_nulls_count = None
+            try:
+                nulls_int = int(float(nulls_raw)) if nulls_raw is not None else 0
+            except Exception:
+                nulls_int = 0
 
         distincts = _extract_row_value(row, "DISTINCTS")
         try:
@@ -1529,9 +1536,22 @@ def run_table_profile(
 
         min_val_raw = _extract_row_value(row, "MIN_VAL")
         max_val_raw = _extract_row_value(row, "MAX_VAL")
-        min_val = _stringify(min_val_raw) if min_val_raw is not None else None
-        max_val = _stringify(max_val_raw) if max_val_raw is not None else None
+        if is_string:
+            min_val = None if min_val_raw is None else str(min_val_raw)
+            max_val = None if max_val_raw is None else str(max_val_raw)
+        else:
+            min_val = _stringify(min_val_raw) if min_val_raw is not None else None
+            max_val = _stringify(max_val_raw) if max_val_raw is not None else None
+
         whitespace_rows = _extract_row_value(row, "WHITESPACE_ROWS", 0)
+        try:
+            whitespace_rows_int = int(whitespace_rows)
+        except Exception:
+            try:
+                whitespace_rows_int = int(float(whitespace_rows))
+            except Exception:
+                whitespace_rows_int = 0
+
         avg_len_raw = _extract_row_value(row, "AVG_LEN")
         try:
             avg_len_value = float(avg_len_raw) if avg_len_raw is not None else None
@@ -1539,34 +1559,34 @@ def run_table_profile(
             avg_len_value = None
         if not is_string:
             avg_len_value = None
-        try:
-            whitespace_rows_int = int(whitespace_rows)
-        except Exception:
-            whitespace_rows_int = 0
 
-        null_pct = (float(nulls_int) / rows_profiled * 100.0) if rows_profiled else 0.0
-        non_nulls = (
-            int(non_nulls_count)
-            if isinstance(non_nulls_count, int)
-            else max(rows_profiled - nulls_int, 0)
-        )
+        non_nulls = max(row_cnt - nulls_int, 0)
+        null_pct = (float(nulls_int) / float(row_cnt)) if row_cnt else 0.0
+        if distincts_int is not None and non_nulls:
+            distinct_pct = float(distincts_int) / float(non_nulls)
+        else:
+            distinct_pct = None
+        whitespace_pct = (float(whitespace_rows_int) / float(row_cnt) * 100.0) if row_cnt else 0.0
+
         avg_len_debug_note: Optional[str] = None
         if is_string:
             if avg_len_value is None:
                 if non_nulls > 0:
                     logger.warning("avg_len metric missing for column %s", name)
                     if PROFILE_DEBUG:
-                        avg_len_debug_note = "⚠ avg_len missing"
+                        avg_len_debug_note = "avg_len missing; replaced FILTER with CASE"
                 avg_len_final: Optional[float] = 0.0
             else:
                 avg_len_final = float(avg_len_value)
+                if (
+                    PROFILE_DEBUG
+                    and non_nulls > 0
+                    and math.isclose(avg_len_final, 0.0, rel_tol=0.0, abs_tol=1e-9)
+                ):
+                    logger.warning("avg_len value zero for column %s", name)
+                    avg_len_debug_note = "avg_len missing; replaced FILTER with CASE"
         else:
             avg_len_final = None
-        if distincts_int is not None and non_nulls:
-            distinct_pct = float(distincts_int) / float(non_nulls) * 100.0
-        else:
-            distinct_pct = None
-        whitespace_pct = (float(whitespace_rows_int) / rows_profiled * 100.0) if rows_profiled else 0.0
 
         len_min_val: Optional[float] = None
         len_max_val: Optional[float] = None
@@ -1754,17 +1774,17 @@ def run_table_profile(
             "column_name": name,
             "data_type": dtype,
             "nulls": nulls_int,
-            "null_pct": null_pct,
+            "null_pct": float(null_pct),
             "distincts": distincts_int,
-            "distinct_pct": distinct_pct,
+            "distinct_pct": float(distinct_pct) if distinct_pct is not None else None,
             "min_val": min_val,
             "max_val": max_val,
             "avg_len": avg_len_final if is_string else None,
             "whitespace_pct": whitespace_pct,
             "top_values": top_values,
             "top_coverage_pct": coverage_pct,
-            "rows_profiled": rows_profiled,
-            "row_cnt": rows_profiled,
+            "rows_profiled": row_cnt,
+            "row_cnt": row_cnt,
             "non_nulls": non_nulls,
             "null_cnt": nulls_int,
             "error": None,
@@ -2000,12 +2020,12 @@ def suggest_checks_from_profile(
         checks: Dict[str, Dict[str, Any]] = {}
 
         if distinct_pct is not None and distincts is not None:
-            if distinct_pct >= 99.9 and null_pct <= 1.0 and distincts >= non_nulls:
+            if distinct_pct >= 0.999 and null_pct <= 0.01 and distincts >= non_nulls:
                 checks["UNIQUE"] = {"severity": "ERROR", "params": {"ignore_nulls": True}}
 
         if null_pct > 0:
-            severity = "ERROR" if null_pct >= 1.0 else "WARN"
-            max_nulls = int(math.ceil((baseline_rows or 0) * (null_pct / 100.0)))
+            severity = "ERROR" if null_pct >= 0.01 else "WARN"
+            max_nulls = int(math.ceil((baseline_rows or 0) * null_pct))
             checks["NULL_COUNT"] = {"severity": severity, "params": {"max_nulls": max_nulls}}
 
         if whitespace_pct >= 5.0 and _is_string_type(data_type):
@@ -2058,7 +2078,7 @@ def suggest_checks_from_profile(
 
         if _is_temporal(data_type):
             name_upper = name.upper()
-            score = 100.0 - null_pct
+            score = 100.0 - (null_pct * 100.0)
             for boost, keyword in (
                 (50, "UPDATE"),
                 (45, "MODIFIED"),
