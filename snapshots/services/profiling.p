@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import math
 import random
+from datetime import datetime
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 from uuid import uuid4
 
@@ -364,9 +365,21 @@ def _infer_semantic_type(
         except Exception:
             return None
 
+    def _as_int(value: Any) -> Optional[int]:
+        try:
+            if value is None:
+                return None
+            return int(value)
+        except Exception:
+            try:
+                return int(float(value))
+            except Exception:
+                return None
+
     length_min = _as_float(length.get("min"))
     length_max = _as_float(length.get("max"))
     length_avg = _as_float(length.get("avg"))
+    length_stddev = _as_float(length.get("stddev"))
     distinct_ratio_signal = _as_float(string_stats.get("distinct_ratio"))
     top1_ratio_signal = _as_float(string_stats.get("top1_ratio"))
     top3_ratio_signal = _as_float(string_stats.get("top3_ratio"))
@@ -384,9 +397,18 @@ def _infer_semantic_type(
                 format_ratios[str(key[:-6])] = _as_float(value)
     best_date_ratio = _as_float(date_parse.get("best_ratio"))
     overall_success_ratio = _as_float(date_parse.get("success_ratio"))
+    date_success_ratio_signal = _as_float(date_parse.get("date_success_ratio"))
     best_date_format = date_parse.get("best_format")
     parsed_date_min = date_parse.get("parsed_min")
     parsed_date_max = date_parse.get("parsed_max")
+    date_valid_count_raw = date_parse.get("valid_count")
+    try:
+        date_valid_count = int(date_valid_count_raw) if date_valid_count_raw is not None else 0
+    except Exception:
+        try:
+            date_valid_count = int(float(date_valid_count_raw)) if date_valid_count_raw is not None else 0
+        except Exception:
+            date_valid_count = 0
     pattern_values: List[float] = []
     if isinstance(date_patterns, dict):
         for value in date_patterns.values():
@@ -490,11 +512,37 @@ def _infer_semantic_type(
         _boost("PHONE", 12.0, "column name references phone")
 
     date_success_ratio = (
-        best_date_ratio
-        if best_date_ratio is not None
-        else overall_success_ratio
+        date_success_ratio_signal
+        if date_success_ratio_signal is not None
+        else (
+            best_date_ratio
+            if best_date_ratio is not None
+            else overall_success_ratio
+        )
     )
-    if date_success_ratio is not None and date_success_ratio >= 0.6:
+    candidate_pattern_ratio = max(
+        value
+        for key, value in format_ratios.items()
+        if key in {
+            "yyyymmdd",
+            "ddmmyyyy",
+            "iso",
+            "iso_slash",
+            "iso_dot",
+            "dd_mm_yyyy",
+            "dd_slash_mm",
+            "mm_dd_yyyy",
+            "mm_slash_dd",
+            "dd_mon_yyyy",
+            "mon_dd_yyyy",
+        }
+        and value is not None
+    ) if format_ratios else 0.0
+    if (
+        date_success_ratio is not None
+        and date_success_ratio >= 0.6
+        and date_valid_count > 0
+    ):
         format_key = str(best_date_format or "").lower()
         label = DATE_PARSE_LABELS.get(
             format_key,
@@ -530,29 +578,243 @@ def _infer_semantic_type(
     if "date" in column_name_lower and not _is_temporal(data_type):
         _boost("DATE_IN_TEXT", 10.0, "column name references date but stored as string")
 
-    date_success_ratio = float(best_date_ratio or 0.0)
-    pattern_combo_sum = float((iso_pattern_ratio or 0.0) + (yyyymmdd_pattern_ratio or 0.0))
-    pattern_combo_ratio = min(pattern_combo_sum, 1.0)
-    distinct_ratio_for_date = float(resolved_distinct_ratio)
-    if date_success_ratio >= 0.9 or (
-        pattern_combo_sum >= 0.9 and distinct_ratio_for_date >= 0.01
+    def _parse_date_value(value: Any) -> Optional[datetime]:
+        if value is None:
+            return None
+        text = str(value).strip()
+        if not text:
+            return None
+        try:
+            return datetime.fromisoformat(text)
+        except Exception:
+            try:
+                return datetime.strptime(text[:10], "%Y-%m-%d")
+            except Exception:
+                return None
+
+    parsed_min_dt = _parse_date_value(parsed_date_min)
+    parsed_max_dt = _parse_date_value(parsed_date_max)
+    date_span_years: Optional[float] = None
+    if parsed_min_dt and parsed_max_dt:
+        try:
+            span_days = abs((parsed_max_dt - parsed_min_dt).days)
+            date_span_years = span_days / 365.25
+        except Exception:
+            date_span_years = None
+
+    date_is_candidate = (
+        (candidate_pattern_ratio or 0.0) > 0.0
+        or (date_success_ratio is not None and date_success_ratio >= 0.9)
+    ) and date_valid_count > 0
+
+    if (
+        not forced_type
+        and date_is_candidate
+        and date_success_ratio is not None
+        and date_success_ratio >= 0.8
     ):
+        format_key = str(best_date_format or "").lower()
+        label = DATE_PARSE_LABELS.get(
+            format_key,
+            str(best_date_format or "text date").upper(),
+        )
+        high_confidence = (
+            date_success_ratio >= 0.95
+            or (
+                date_success_ratio >= 0.9
+                and (date_span_years or 0.0) >= 5.0
+            )
+        )
+        if high_confidence:
+            forced_confidence = min(1.0, max(date_success_ratio, 0.95))
+        else:
+            forced_confidence = max(0.8, min(date_success_ratio, 0.94))
         forced_type = "DATE_IN_TEXT"
-        forced_confidence = round(min(max(date_success_ratio, 0.0), 1.0), 3)
-        if date_success_ratio >= 0.9:
-            forced_rationale_parts.append(
-                f"{date_success_ratio:.0%} of values parse successfully"
-            )
-        if pattern_combo_sum >= 0.9:
-            forced_rationale_parts.append(
-                f"YYYYMMDD/ISO patterns cover {pattern_combo_ratio:.0%} of values"
-            )
+        forced_rationale_parts = [
+            f"{label} parse success {date_success_ratio:.0%}",
+        ]
+        if date_span_years is not None and date_span_years > 0:
+            forced_rationale_parts.append(f"span {date_span_years:.1f}y")
         if parsed_date_min or parsed_date_max:
             forced_rationale_parts.append(
-                "parsed range {start} → {end}".format(
+                "{start} → {end}".format(
                     start=parsed_date_min or "?",
                     end=parsed_date_max or "?",
                 )
+            )
+
+    if not forced_type:
+        row_cnt_value = _as_int(column_entry.get("row_cnt"))
+        if row_cnt_value is None:
+            row_cnt_value = _as_int(column_entry.get("non_nulls"))
+        distinct_count_value = _as_int(column_entry.get("distincts"))
+        top3_ratio_value = top3_ratio_signal
+        if top3_ratio_value is None and non_nulls:
+            try:
+                top3_total = sum(
+                    int(top_values[idx].get("count") or 0)
+                    for idx in range(min(3, len(top_values)))
+                )
+                top3_ratio_value = (
+                    float(top3_total) / float(non_nulls)
+                ) if non_nulls else None
+            except Exception:
+                top3_ratio_value = None
+        distinct_ratio_value = (
+            resolved_distinct_ratio if distinct_ratio_signal is not None else None
+        )
+        account_length_condition = (
+            (length_avg is not None and length_avg >= 8.0)
+            or (length_stddev is not None and length_stddev >= 1.5)
+        )
+        account_ratio_condition = False
+        if distinct_ratio_value is not None and distinct_ratio_value >= 0.6:
+            account_ratio_condition = True
+        elif (
+            distinct_count_value is not None
+            and row_cnt_value is not None
+            and row_cnt_value > 0
+        ):
+            threshold = min(int(row_cnt_value * 0.6), 10000)
+            if distinct_count_value >= threshold:
+                account_ratio_condition = True
+        top3_ok_for_account = (
+            top3_ratio_value is None or top3_ratio_value <= 0.30
+        )
+        account_condition = (
+            account_ratio_condition and top3_ok_for_account and account_length_condition
+        )
+
+        ref_ratio_condition = (
+            distinct_ratio_value is not None
+            and distinct_ratio_value <= 0.30
+            and top3_ratio_value is not None
+            and top3_ratio_value >= 0.80
+        )
+        ref_lookup_condition = (
+            distinct_count_value is not None
+            and distinct_count_value <= 200
+            and (row_cnt_value or 0) >= 5000
+        )
+        ref_length_condition = (
+            (length_avg is None or length_avg <= 10.0)
+            and (length_stddev is None or length_stddev <= 1.5)
+        )
+        ref_condition = (
+            (ref_ratio_condition or ref_lookup_condition)
+            and ref_length_condition
+        )
+
+        column_name_upper = column_name_lower.upper()
+        ref_hint_tokens = (
+            "_CODE",
+            "_TYPE",
+            "_STATUS",
+            "LAND",
+            "COUNTRY",
+            "XREF",
+            "CLASS",
+            "CAT",
+            "SEGMENT",
+        )
+        ref_name_hint = any(token in column_name_upper for token in ref_hint_tokens)
+
+        def _clamp_conf(value: float, minimum: float, maximum: float = 0.98) -> float:
+            return max(minimum, min(maximum, value))
+
+        distinct_pct_display = None
+        if distinct_ratio_value is not None:
+            distinct_pct_display = f"{distinct_ratio_value:.0%} distinct"
+        top3_display = None
+        if top3_ratio_value is not None:
+            top3_display = f"top3 {top3_ratio_value:.0%}"
+
+        if account_condition and (
+            not ref_condition
+            or (ref_condition and (distinct_ratio_value or 0.0) >= 0.6)
+        ):
+            account_confidence = 0.82
+            if distinct_ratio_value is not None:
+                if distinct_ratio_value >= 0.8:
+                    account_confidence += 0.08
+                elif distinct_ratio_value >= 0.7:
+                    account_confidence += 0.05
+            if top3_ratio_value is not None:
+                if top3_ratio_value <= 0.15:
+                    account_confidence += 0.05
+                elif top3_ratio_value <= 0.25:
+                    account_confidence += 0.03
+            if length_avg is not None:
+                if length_avg >= 12.0:
+                    account_confidence += 0.04
+                elif length_avg >= 8.0:
+                    account_confidence += 0.02
+            if length_stddev is not None and length_stddev >= 2.5:
+                account_confidence += 0.03
+            if hints.get("id"):
+                account_confidence += 0.05
+            forced_type = "ACCOUNT_ID"
+            forced_confidence = round(_clamp_conf(account_confidence, 0.75, 0.99), 3)
+            forced_rationale_parts = []
+            if distinct_pct_display:
+                forced_rationale_parts.append(distinct_pct_display)
+            if top3_display:
+                forced_rationale_parts.append(top3_display)
+            if length_avg is not None:
+                forced_rationale_parts.append(f"avg len {length_avg:.1f}")
+            if distinct_count_value is not None and row_cnt_value:
+                forced_rationale_parts.append(
+                    f"{distinct_count_value} distinct / {row_cnt_value} rows"
+                )
+        elif ref_condition:
+            ref_confidence = 0.8
+            if distinct_ratio_value is not None and distinct_ratio_value <= 0.2:
+                ref_confidence += 0.05
+            elif distinct_ratio_value is not None and distinct_ratio_value <= 0.3:
+                ref_confidence += 0.03
+            if top3_ratio_value is not None and top3_ratio_value >= 0.9:
+                ref_confidence += 0.05
+            elif top3_ratio_value is not None and top3_ratio_value >= 0.8:
+                ref_confidence += 0.03
+            if distinct_count_value is not None:
+                if distinct_count_value <= 50:
+                    ref_confidence += 0.05
+                elif distinct_count_value <= 200:
+                    ref_confidence += 0.03
+            if row_cnt_value is not None and row_cnt_value >= 10000 and (
+                distinct_count_value is not None and distinct_count_value <= 200
+            ):
+                ref_confidence += 0.03
+            if length_stddev is not None and length_stddev <= 1.0:
+                ref_confidence += 0.04
+            if length_avg is not None and length_avg <= 8.0:
+                ref_confidence += 0.03
+            if ref_name_hint:
+                ref_confidence += 0.05
+            forced_type = "REF_CODE"
+            forced_confidence = round(_clamp_conf(ref_confidence, 0.7, 0.95), 3)
+            forced_rationale_parts = []
+            if top3_display:
+                forced_rationale_parts.append(top3_display)
+            if distinct_count_value is not None and row_cnt_value:
+                forced_rationale_parts.append(
+                    f"{distinct_count_value} distinct / {row_cnt_value} rows"
+                )
+            if length_avg is not None:
+                forced_rationale_parts.append(f"avg len {length_avg:.1f}")
+        elif (
+            best_type in {"ACCOUNT_ID", "REF_CODE"}
+            and distinct_count_value is not None
+            and distinct_count_value <= 200
+            and (top3_ratio_value or 0.0) >= 0.6
+        ):
+            forced_type = "ENUM/STATUS"
+            forced_confidence = 0.6
+            forced_rationale_parts = []
+            if top3_display:
+                forced_rationale_parts.append(top3_display)
+            forced_rationale_parts.append(
+                f"{distinct_count_value} frequent values"
             )
 
     currency_ref = _ratio(references, "reference_currency_code")
@@ -1030,12 +1292,18 @@ def run_table_profile(
         any_parse_min_alias: Optional[str] = None
         any_parse_max_alias: Optional[str] = None
         numeric_like_alias: Optional[str] = None
+        sentinel_alias: Optional[str] = None
+        len_stddev_alias: Optional[str] = None
         if is_string:
             metrics_sql.extend(
                 [
                     f"MIN(LENGTH({qcol}::STRING)) AS LEN_MIN",
                     f"MAX(LENGTH({qcol}::STRING)) AS LEN_MAX",
                 ]
+            )
+            len_stddev_alias = "LEN_STDDEV"
+            metrics_sql.append(
+                f"STDDEV_SAMP(LENGTH({qcol}::STRING)) AS {len_stddev_alias}"
             )
             for key, pattern in SEMANTIC_REGEX_PATTERNS.items():
                 alias = f"REGEX_{key.upper()}_MATCHES"
@@ -1044,6 +1312,16 @@ def run_table_profile(
                     f"SUM(CASE WHEN {qcol} IS NOT NULL AND REGEXP_LIKE({qcol}::STRING, '{pattern_sql}') THEN 1 ELSE 0 END) AS {alias}"
                 )
                 regex_aliases[key] = alias
+            trimmed_expr = f"TRIM({qcol}::STRING)"
+            sentinel_alias = "STRING_DATE_SENTINELS"
+            sentinel_values = ("'0'", "'00000000'", "'0000-00-00'", "'0000/00/00'")
+            metrics_sql.append(
+                "SUM(CASE WHEN {expr} IN ({sentinels}) THEN 1 ELSE 0 END) AS {alias}".format(
+                    expr=trimmed_expr,
+                    sentinels=", ".join(sentinel_values),
+                    alias=sentinel_alias,
+                )
+            )
             for key, pattern in CHAR_CLASS_PATTERNS.items():
                 alias = f"CHAR_{key.upper()}_MATCHES"
                 pattern_sql = pattern.replace("\\", "\\\\")
@@ -1087,8 +1365,15 @@ def run_table_profile(
                 parse_alias = f"STRING_DATE_PARSE_{alias_key}"
                 template = config.get("transform") or "{col}::STRING"
                 input_expr = template.format(col=qcol)
+                guarded_expr = (
+                    "CASE WHEN {trim} IN ({sentinels}) THEN NULL ELSE {expr} END".format(
+                        trim=trimmed_expr,
+                        sentinels=", ".join(sentinel_values),
+                        expr=input_expr,
+                    )
+                )
                 metrics_sql.append(
-                    f"SUM(CASE WHEN TRY_TO_DATE({input_expr}, '{fmt}') IS NOT NULL THEN 1 ELSE 0 END) AS {parse_alias}"
+                    f"SUM(CASE WHEN TRY_TO_DATE({guarded_expr}, '{fmt}') IS NOT NULL THEN 1 ELSE 0 END) AS {parse_alias}"
                 )
                 date_parse_aliases[key] = parse_alias
                 min_alias = f"STRING_DATE_MIN_{alias_key}"
@@ -1096,12 +1381,12 @@ def run_table_profile(
                 date_parse_min_aliases[key] = min_alias
                 date_parse_max_aliases[key] = max_alias
                 metrics_sql.append(
-                    f"MIN(TRY_TO_DATE({input_expr}, '{fmt}')) AS {min_alias}"
+                    f"MIN(TRY_TO_DATE({guarded_expr}, '{fmt}')) AS {min_alias}"
                 )
                 metrics_sql.append(
-                    f"MAX(TRY_TO_DATE({input_expr}, '{fmt}')) AS {max_alias}"
+                    f"MAX(TRY_TO_DATE({guarded_expr}, '{fmt}')) AS {max_alias}"
                 )
-                coalesce_terms.append(f"TRY_TO_DATE({input_expr}, '{fmt}')")
+                coalesce_terms.append(f"TRY_TO_DATE({guarded_expr}, '{fmt}')")
                 regex_pattern = config.get("regex")
                 if regex_pattern:
                     alias = date_pattern_seen.get(regex_pattern)
@@ -1136,6 +1421,8 @@ def run_table_profile(
             any_parse_min_alias = None
             any_parse_max_alias = None
             numeric_like_alias = None
+            trimmed_expr = None
+            sentinel_values = ()
 
         sql = "SELECT " + ", ".join(metrics_sql) + f" FROM {sampled_ref}"
         try:
@@ -1191,6 +1478,7 @@ def run_table_profile(
 
         len_min_val: Optional[float] = None
         len_max_val: Optional[float] = None
+        len_stddev_val: Optional[float] = None
         if is_string:
             len_min_raw = _extract_row_value(row, "LEN_MIN")
             len_max_raw = _extract_row_value(row, "LEN_MAX")
@@ -1202,6 +1490,12 @@ def run_table_profile(
                 len_max_val = float(len_max_raw) if len_max_raw is not None else None
             except Exception:
                 len_max_val = None
+            if len_stddev_alias:
+                len_stddev_raw = _extract_row_value(row, len_stddev_alias)
+                try:
+                    len_stddev_val = float(len_stddev_raw) if len_stddev_raw is not None else None
+                except Exception:
+                    len_stddev_val = None
 
         regex_ratios: Dict[str, Optional[float]] = {}
         for key, alias in regex_aliases.items():
@@ -1242,6 +1536,18 @@ def run_table_profile(
                 matches = 0
             numeric_like_ratio = (float(matches) / float(non_nulls)) if non_nulls else 0.0
 
+        sentinel_count: int = 0
+        if sentinel_alias:
+            sentinel_raw = _extract_row_value(row, sentinel_alias, 0)
+            try:
+                sentinel_count = int(sentinel_raw)
+            except Exception:
+                try:
+                    sentinel_count = int(float(sentinel_raw))
+                except Exception:
+                    sentinel_count = 0
+        valid_string_count = max((non_nulls or 0) - sentinel_count, 0)
+
         date_pattern_ratios: Dict[str, Optional[float]] = {}
         for key, alias in date_pattern_aliases.items():
             matches_raw = _extract_row_value(row, alias, 0)
@@ -1249,7 +1555,11 @@ def run_table_profile(
                 matches = int(matches_raw)
             except Exception:
                 matches = 0
-            date_pattern_ratios[key] = (float(matches) / float(non_nulls)) if non_nulls else 0.0
+            denominator = float(valid_string_count) if valid_string_count else float(non_nulls or 0)
+            if denominator:
+                date_pattern_ratios[key] = float(matches) / denominator
+            else:
+                date_pattern_ratios[key] = 0.0
 
         date_parse_counts: Dict[str, int] = {}
         date_parse_ratios: Dict[str, Optional[float]] = {}
@@ -1262,7 +1572,11 @@ def run_table_profile(
             except Exception:
                 matches = 0
             date_parse_counts[key] = matches
-            date_parse_ratios[key] = (float(matches) / float(non_nulls)) if non_nulls else 0.0
+            denominator = float(valid_string_count) if valid_string_count else float(non_nulls or 0)
+            if denominator:
+                date_parse_ratios[key] = float(matches) / denominator
+            else:
+                date_parse_ratios[key] = 0.0
             parsed_min_values[key] = _extract_row_value(row, date_parse_min_aliases.get(key, ""))
             parsed_max_values[key] = _extract_row_value(row, date_parse_max_aliases.get(key, ""))
 
@@ -1275,7 +1589,11 @@ def run_table_profile(
                 any_matches = int(any_matches_raw)
             except Exception:
                 any_matches = 0
-            any_parse_ratio = (float(any_matches) / float(non_nulls)) if non_nulls else 0.0
+            denominator = float(valid_string_count) if valid_string_count else float(non_nulls or 0)
+            if denominator:
+                any_parse_ratio = float(any_matches) / denominator
+            else:
+                any_parse_ratio = 0.0
             any_parsed_min = _extract_row_value(row, any_parse_min_alias or "")
             any_parsed_max = _extract_row_value(row, any_parse_max_alias or "")
 
@@ -1369,6 +1687,8 @@ def run_table_profile(
                     "top1_ratio": top1_ratio,
                     "top3_ratio": top3_ratio,
                     "numeric_like_ratio": numeric_like_ratio,
+                    "date_sentinel_count": sentinel_count,
+                    "len_stddev": len_stddev_val,
                     "date_pattern_yyyymmdd_ratio": date_pattern_ratios.get("yyyymmdd"),
                     "date_pattern_ddmmyyyy_ratio": date_pattern_ratios.get("ddmmyyyy"),
                     "date_pattern_iso_ymd_ratio": date_pattern_ratios.get("iso"),
@@ -1378,6 +1698,9 @@ def run_table_profile(
                     "date_parse_ratio_best": best_date_ratio if best_date_key else None,
                     "date_parse_best_format": best_date_key,
                     "date_parse_success_ratio": any_parse_ratio,
+                    "date_success_ratio": best_date_ratio if best_date_key else any_parse_ratio,
+                    "date_format_detected": best_date_key,
+                    "date_valid_count": valid_string_count,
                     "parsed_date_min": parsed_date_min,
                     "parsed_date_max": parsed_date_max,
                 }
@@ -1396,6 +1719,7 @@ def run_table_profile(
                 "min": len_min_val,
                 "max": len_max_val,
                 "avg": avg_len,
+                "stddev": len_stddev_val,
             }
             if "whitespace" in char_ratios:
                 signals["whitespace_ratio"] = char_ratios.get("whitespace")
@@ -1405,6 +1729,7 @@ def run_table_profile(
                 "top1_ratio": top1_ratio,
                 "top3_ratio": top3_ratio,
                 "numeric_like_ratio": numeric_like_ratio,
+                "sentinel_count": sentinel_count,
             }
             signals["date_patterns"] = {str(key): date_pattern_ratios.get(key) for key in date_pattern_ratios}
             signals["date_parse"] = {
@@ -1412,6 +1737,9 @@ def run_table_profile(
                 "best_ratio": best_date_ratio if best_date_key else None,
                 "best_format": best_date_key,
                 "success_ratio": any_parse_ratio,
+                "date_success_ratio": best_date_ratio if best_date_key else any_parse_ratio,
+                "format_detected": best_date_key,
+                "valid_count": valid_string_count,
                 "parsed_min": parsed_date_min,
                 "parsed_max": parsed_date_max,
             }
