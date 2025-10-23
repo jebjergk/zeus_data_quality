@@ -398,6 +398,20 @@ def _confidence_badge_label(confidence: Optional[float]) -> str:
     return "Low"
 
 
+def _confidence_badge_theme() -> Dict[str, Dict[str, str]]:
+    return {
+        "High": {"bg": "#0f9d58", "fg": "#ffffff", "accent": "#0b7d46"},
+        "Medium": {"bg": "#fbbc04", "fg": "#3c2f00", "accent": "#c58c00"},
+        "Low": {"bg": "#ea4335", "fg": "#ffffff", "accent": "#b3261e"},
+        "Unknown": {"bg": "#dfe3e6", "fg": "#1f2933", "accent": "#b0b8bf"},
+    }
+
+
+def _confidence_badge_colors(label: str) -> Dict[str, str]:
+    theme = _confidence_badge_theme()
+    return theme.get(label, theme["Unknown"])
+
+
 def _format_confidence(value: Any) -> str:
     try:
         if value is None:
@@ -949,14 +963,7 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
             label = str(raw_label).strip()
             if not label or label.lower() == "nan":
                 return ""
-            icon_map = {
-                "High": "🟢",
-                "Medium": "🟡",
-                "Low": "🔴",
-                "Unknown": "⚪",
-            }
-            icon = icon_map.get(label, "⚪")
-            return f"{icon} {label}".strip()
+            return label
 
         display_df["Confidence Badge"] = display_df["Confidence Badge"].apply(_format_confidence_badge_label)
 
@@ -1129,11 +1136,53 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
                 help="Explanation for how the guessed type confidence was determined.",
                 width="medium",
             )
+        accent_column = display_df.columns[0] if not display_df.empty else None
+
+        def _badge_row_style(row: pd.Series) -> List[str]:
+            label = str(row.get("Confidence Badge", "")).strip()
+            colors = _confidence_badge_colors(label)
+            badge_styles = []
+            for col in row.index:
+                cell_style_parts: List[str] = []
+                if col == "Confidence Badge":
+                    cell_style_parts.append(
+                        "background-color: {bg}; color: {fg}; font-weight: 600; "
+                        "text-align: center; border-radius: 999px; padding: 0.1rem 0.35rem;"
+                        .format(**colors)
+                    )
+                if accent_column and colors.get("accent") and col == accent_column:
+                    cell_style_parts.append(f"border-left: 0.35rem solid {colors['accent']};")
+                badge_styles.append(" ".join(cell_style_parts))
+            return badge_styles
+
+        styled_df = (
+            display_df.style.format(na_rep="")
+            .apply(_badge_row_style, axis=1)
+            .set_properties(subset=["Confidence Badge"], **{"text-align": "center"})
+        )
+
         st.dataframe(
-            display_df,
+            styled_df,
             hide_index=True,
             use_container_width=True,
             column_config=column_config or None,
+        )
+
+        legend_items = []
+        for label, colors in _confidence_badge_theme().items():
+            legend_items.append(
+                (
+                    f"<span style='display:inline-flex;align-items:center;margin-right:0.75rem;'>"
+                    f"<span style='display:inline-block;width:0.65rem;height:0.65rem;border-radius:0.25rem;"
+                    f"background:{colors['bg']};border:1px solid {colors['accent']};margin-right:0.25rem;'></span>"
+                    f"{label}</span>"
+                )
+            )
+        st.markdown(
+            "<div style='font-size:0.75rem;margin-top:0.35rem;color:rgba(49,51,63,0.7);'>Confidence legend: "
+            + "".join(legend_items)
+            + "</div>",
+            unsafe_allow_html=True,
         )
     else:
         st.dataframe(display_df, hide_index=True, use_container_width=True)
