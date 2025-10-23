@@ -729,6 +729,13 @@ def _infer_semantic_type(
         if top3_ratio_value is not None:
             top3_display = f"top3 {top3_ratio_value:.0%}"
 
+        preliminary_best_type: Optional[str] = None
+        if scores:
+            try:
+                preliminary_best_type = max(scores, key=scores.get)
+            except ValueError:
+                preliminary_best_type = None
+
         if account_condition and (
             not ref_condition
             or (ref_condition and (distinct_ratio_value or 0.0) >= 0.6)
@@ -803,7 +810,7 @@ def _infer_semantic_type(
             if length_avg is not None:
                 forced_rationale_parts.append(f"avg len {length_avg:.1f}")
         elif (
-            best_type in {"ACCOUNT_ID", "REF_CODE"}
+            preliminary_best_type in {"ACCOUNT_ID", "REF_CODE"}
             and distinct_count_value is not None
             and distinct_count_value <= 200
             and (top3_ratio_value or 0.0) >= 0.6
