@@ -103,6 +103,7 @@ class ColumnProfile:
     profile_min: Optional[Any] = None
     profile_max: Optional[Any] = None
     date_parse_success_ratio: Optional[float] = None
+    date_sentinel_count: Optional[int] = None
     top_values: List[Dict[str, Any]] = field(default_factory=list)
     error: Optional[str] = None
     semantic_type: Optional[str] = None
@@ -185,6 +186,7 @@ def _column_profile_from_payload(column: Dict[str, Any]) -> ColumnProfile:
         numeric_max=numeric_max_value,
         profile_min=normalized.get("profile_min"),
         profile_max=normalized.get("profile_max"),
+        date_sentinel_count=_safe_int(normalized.get("date_sentinel_count")),
         top_values=top_values_list,
         error=normalized.get("error"),
         semantic_type=normalized.get("semantic_type"),
@@ -358,6 +360,9 @@ def _profiles_to_frame(profiles: Iterable[ColumnProfile]) -> pd.DataFrame:
                 "numeric_max": _stringify_for_display(profile.numeric_max),
                 "profile_min": _stringify_for_display(profile.profile_min),
                 "profile_max": _stringify_for_display(profile.profile_max),
+                "numeric_like_ratio": profile.numeric_like_ratio,
+                "date_parse_success_ratio": profile.date_parse_success_ratio,
+                "date_sentinel_count": profile.date_sentinel_count,
                 "top_values": profile.top_values,
                 "error": profile.error,
                 "semantic_type": profile.semantic_type,
@@ -887,48 +892,99 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
             return f"{formatted}%"
 
         def _compose_note(row: pd.Series) -> str:
+            parts: List[str] = []
             error_text = _displayable_value(row.get("error"))
             if error_text:
-                return error_text
-            rationale_text = _displayable_value(row.get("rationale"))
-            return rationale_text
+                parts.append(error_text)
+            else:
+                rationale_text = _displayable_value(row.get("rationale"))
+                if rationale_text:
+                    parts.append(rationale_text)
+            sentinel_count = _safe_int(row.get("date_sentinel_count"))
+            if sentinel_count:
+                parts.append("ignored sentinel 0-dates.")
+            return " ".join(parts)
 
         def _resolve_profile_bounds(row: pd.Series) -> pd.Series:
             semantic = str(row.get("semantic_type") or "").upper()
             data_type = row.get("data_type")
 
-            if semantic == "DATE_IN_TEXT":
-                min_display = _displayable_value(row.get("parsed_date_min"), row.get("profile_min"), row.get("min_val"))
-                max_display = _displayable_value(row.get("parsed_date_max"), row.get("profile_max"), row.get("max_val"))
-            else:
-                numeric_min_display = _displayable_value(row.get("numeric_min"))
-                numeric_max_display = _displayable_value(row.get("numeric_max"))
-                numeric_like = bool(numeric_min_display or numeric_max_display)
-                if not numeric_like:
-                    numeric_like_pct = row.get("numeric_like_pct")
-                    if numeric_like_pct is not None:
-                        try:
-                            numeric_like = float(numeric_like_pct) >= 80.0
-                        except Exception:
-                            numeric_like = False
-                if numeric_like or _is_numeric_type_name(data_type):
-                    min_display = numeric_min_display or _displayable_value(row.get("profile_min"), row.get("min_val"))
-                    max_display = numeric_max_display or _displayable_value(row.get("profile_max"), row.get("max_val"))
-                elif _is_temporal_type_name(data_type):
-                    min_display = _displayable_value(row.get("profile_min"), row.get("min_val"))
-                    max_display = _displayable_value(row.get("profile_max"), row.get("max_val"))
-                else:
-                    min_display = ""
-                    max_display = ""
+            def _normalize_text(value: Any) -> Optional[str]:
+                text_value = _displayable_value(value)
+                return text_value or None
 
-            if not min_display and not max_display:
-                length_display = _format_len_range(row.get("len_min"), row.get("len_max"))
-                if length_display:
+            def _format_date_value(value: Any) -> Optional[str]:
+                text_value = _normalize_text(value)
+                if not text_value:
+                    return None
+                try:
+                    parsed = pd.to_datetime(text_value, errors="coerce")
+                except Exception:
+                    parsed = None
+                if parsed is not None and not pd.isna(parsed):
+                    try:
+                        return parsed.date().isoformat()
+                    except Exception:
+                        pass
+                try:
+                    parsed_dt = datetime.fromisoformat(text_value)
+                except Exception:
+                    return text_value
+                if hasattr(parsed_dt, "date"):
+                    return parsed_dt.date().isoformat()
+                return parsed_dt.isoformat()
+
+            def _date_parse_success(row_obj: pd.Series) -> bool:
+                ratio_value = row_obj.get("date_parse_success_ratio")
+                if ratio_value is not None:
+                    try:
+                        if float(ratio_value) > 0.0:
+                            return True
+                    except Exception:
+                        pass
+                return bool(_normalize_text(row_obj.get("parsed_date_min")) or _normalize_text(row_obj.get("parsed_date_max")))
+
+            min_display: Optional[str] = None
+            max_display: Optional[str] = None
+            length_display = _format_len_range(row.get("len_min"), row.get("len_max"))
+
+            if semantic in {"DATE", "DATE_IN_TEXT"} and _date_parse_success(row):
+                min_display = _format_date_value(row.get("parsed_date_min"))
+                max_display = _format_date_value(row.get("parsed_date_max"))
+                if not min_display:
+                    min_display = _format_date_value(row.get("profile_min")) or _format_date_value(row.get("min_val"))
+                if not max_display:
+                    max_display = _format_date_value(row.get("profile_max")) or _format_date_value(row.get("max_val"))
+            else:
+                numeric_ratio = row.get("numeric_like_ratio")
+                numeric_confident = False
+                if numeric_ratio is not None:
+                    try:
+                        numeric_confident = float(numeric_ratio) >= 0.90
+                    except Exception:
+                        numeric_confident = False
+                numeric_min_display = _normalize_text(row.get("numeric_min"))
+                numeric_max_display = _normalize_text(row.get("numeric_max"))
+
+                if numeric_confident or _is_numeric_type_name(data_type):
+                    min_display = numeric_min_display or _normalize_text(row.get("profile_min")) or _normalize_text(row.get("min_val"))
+                    max_display = numeric_max_display or _normalize_text(row.get("profile_max")) or _normalize_text(row.get("max_val"))
+                elif _is_temporal_type_name(data_type):
+                    min_display = _format_date_value(row.get("profile_min")) or _format_date_value(row.get("min_val"))
+                    max_display = _format_date_value(row.get("profile_max")) or _format_date_value(row.get("max_val"))
+                elif length_display:
                     min_display = length_display
                     max_display = length_display
-                else:
-                    min_display = _displayable_value(row.get("profile_min"), row.get("min_val"))
-                    max_display = _displayable_value(row.get("profile_max"), row.get("max_val"))
+
+            if min_display is None and length_display and min_display != length_display:
+                min_display = length_display
+            if max_display is None and length_display and max_display != length_display:
+                max_display = length_display
+
+            if min_display is None:
+                min_display = _normalize_text(row.get("profile_min")) or _normalize_text(row.get("min_val")) or "—"
+            if max_display is None:
+                max_display = _normalize_text(row.get("profile_max")) or _normalize_text(row.get("max_val")) or "—"
 
             return pd.Series({"Profile Min": min_display, "Profile Max": max_display})
 
