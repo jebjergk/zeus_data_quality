@@ -1,5 +1,6 @@
 from __future__ import annotations
 import html
+import json
 import math
 import textwrap
 import time
@@ -242,6 +243,21 @@ def _table_picker(session_obj, preselect_fqn: Optional[str]):
     return stateless_table_picker(session_obj, preselect_fqn)
 
 
+def _stringify_for_display(value: Any) -> Any:
+    """Return a JSON string for complex values so the grid stays readable."""
+
+    if value is None:
+        return None
+    if isinstance(value, (dict, list, tuple, set)):
+        try:
+            if isinstance(value, set):
+                value = sorted(value)
+            return json.dumps(value, ensure_ascii=False)
+        except Exception:
+            return str(value)
+    return value
+
+
 def _profiles_to_frame(profiles: Iterable[ColumnProfile]) -> pd.DataFrame:
     records = []
     for profile in profiles:
@@ -261,8 +277,8 @@ def _profiles_to_frame(profiles: Iterable[ColumnProfile]) -> pd.DataFrame:
                 "null_pct": round(profile.null_pct, 2) if profile.null_pct is not None else None,
                 "distincts": profile.distincts,
                 "distinct_pct": round(profile.distinct_pct, 2) if profile.distinct_pct is not None else None,
-                "min_val": profile.min_val,
-                "max_val": profile.max_val,
+                "min_val": _stringify_for_display(profile.min_val),
+                "max_val": _stringify_for_display(profile.max_val),
                 "avg_len": round(profile.avg_len, 2) if profile.avg_len is not None else None,
                 "whitespace_pct": round(profile.whitespace_pct, 2) if profile.whitespace_pct is not None else None,
                 "row_cnt": profile.row_cnt,
@@ -280,10 +296,10 @@ def _profiles_to_frame(profiles: Iterable[ColumnProfile]) -> pd.DataFrame:
                 "date_parse_iso_pct": _pct(profile.date_parse_ratio_iso),
                 "date_parse_best_pct": _pct(profile.date_parse_ratio_best),
                 "date_parse_best_format": profile.date_parse_best_format,
-                "parsed_date_min": profile.parsed_date_min,
-                "parsed_date_max": profile.parsed_date_max,
-                "numeric_min": profile.numeric_min,
-                "numeric_max": profile.numeric_max,
+                "parsed_date_min": _stringify_for_display(profile.parsed_date_min),
+                "parsed_date_max": _stringify_for_display(profile.parsed_date_max),
+                "numeric_min": _stringify_for_display(profile.numeric_min),
+                "numeric_max": _stringify_for_display(profile.numeric_max),
                 "top_values": profile.top_values,
                 "error": profile.error,
                 "semantic_type": profile.semantic_type,
@@ -504,81 +520,6 @@ def _render_metric_card(
     ).strip()
     st.markdown(card_html, unsafe_allow_html=True)
 
-
-def _render_min_max_assessments(profiles: Iterable[ColumnProfile]) -> None:
-    cards: List[Tuple[str, Optional[str], List[Tuple[str, str, Optional[str]]]]] = []
-
-    for profile in profiles:
-        semantic_type = (profile.semantic_type or "").upper()
-        if semantic_type == "DATE_IN_TEXT":
-            min_date = profile.parsed_date_min
-            max_date = profile.parsed_date_max
-            if not (min_date or max_date):
-                continue
-            success_ratio = profile.date_parse_ratio_best
-            tooltip = "parsed from text"
-            if success_ratio is not None:
-                try:
-                    ratio_float = float(success_ratio)
-                except Exception:
-                    ratio_float = math.nan
-                if not math.isnan(ratio_float):
-                    tooltip = (
-                        f"parsed from text; success ratio = {_format_ratio_pct(ratio_float, 0)}"
-                    )
-            metrics = [
-                ("Min date", _format_card_value(min_date), tooltip),
-                ("Max date", _format_card_value(max_date), tooltip),
-            ]
-            cards.append((profile.name, "DATE_IN_TEXT", metrics))
-            continue
-
-        if semantic_type == "REF_CODE":
-            distinct_display = _format_card_value(
-                profile.distincts, decimals=0, allow_commas=True
-            )
-            top3_display = _format_ratio_pct(profile.top3_ratio, 1)
-            length_min = _format_card_value(profile.len_min, decimals=1)
-            length_max = _format_card_value(profile.len_max, decimals=1)
-            metrics: List[Tuple[str, str, Optional[str]]] = [
-                ("Distinct count", distinct_display, None),
-                ("Top 3 coverage", top3_display, None),
-                ("Length min/max", f"{length_min} / {length_max}", None),
-            ]
-            numeric_ratio = profile.numeric_like_ratio or 0.0
-            if numeric_ratio >= 0.9 and (profile.numeric_min is not None or profile.numeric_max is not None):
-                metrics.append(
-                    (
-                        "Numeric min",
-                        _format_card_value(profile.numeric_min, allow_commas=True),
-                        None,
-                    )
-                )
-                metrics.append(
-                    (
-                        "Numeric max",
-                        _format_card_value(profile.numeric_max, allow_commas=True),
-                        None,
-                    )
-                )
-            cards.append((profile.name, "REF_CODE", metrics))
-
-    if not cards:
-        return
-
-    st.subheader("Min/Max assessments", anchor=False)
-    st.caption("Profiler-derived bounds tailored to semantic type hints.")
-
-    chunk = 2
-    for idx in range(0, len(cards), chunk):
-        row_cards = cards[idx : idx + chunk]
-        cols = st.columns(len(row_cards))
-        for col, card in zip(cols, row_cards):
-            with col:
-                title, subtitle, metrics = card
-                _render_metric_card(title, metrics, subtitle)
-
-
 def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: ARG001 - interface matches requirement
     st.header("🧪 Profile Table")
     st.caption(
@@ -742,7 +683,6 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
 
     profiles_raw = profile_result.get("columns", [])
     profiles = [_column_profile_from_payload(col) for col in profiles_raw]
-    _render_min_max_assessments(profiles)
     df = _profiles_to_frame(profiles)
 
     filter_box = st.container()
@@ -871,12 +811,6 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
         )
         has_date_text = semantic_series.eq("DATE_IN_TEXT").any()
         has_ref_code = semantic_series.eq("REF_CODE").any()
-        has_length_bounds = {"len_min", "len_max"}.issubset(display_df.columns) and (
-            display_df[["len_min", "len_max"]].notna().any().any()
-        )
-        has_numeric_bounds = {"numeric_min", "numeric_max"}.issubset(display_df.columns) and (
-            display_df[["numeric_min", "numeric_max"]].notna().any().any()
-        )
         badge_styles: Dict[str, List[str]] = {}
         tooltip_columns: Dict[str, List[str]] = {}
         if "confidence" in display_df.columns:
@@ -888,16 +822,6 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
         else:
             display_df["Confidence"] = None
             display_df["Confidence Badge"] = "Unknown"
-        if has_length_bounds:
-            display_df["Len Min/Max"] = display_df.apply(
-                lambda row: (
-                    ""
-                    if pd.isna(row.get("len_min")) and pd.isna(row.get("len_max"))
-                    else f"{_format_card_value(row.get('len_min'), decimals=0)} / {_format_card_value(row.get('len_max'), decimals=0)}"
-                ),
-                axis=1,
-            )
-        display_df = display_df.drop(columns=["len_min", "len_max"], errors="ignore")
 
         if has_date_text:
             date_labels: List[str] = []
@@ -986,69 +910,65 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
         else:
             display_df = display_df.drop(columns=["Reference Codes"], errors="ignore")
 
-        if not has_length_bounds:
-            display_df = display_df.drop(columns=["Len Min/Max"], errors="ignore")
-
-        if not has_numeric_bounds:
-            display_df = display_df.drop(columns=["numeric_min", "numeric_max"], errors="ignore")
+        display_df = display_df.drop(
+            columns=[
+                "len_min",
+                "len_max",
+                "Len Min/Max",
+                "numeric_min",
+                "numeric_max",
+                "distinct_ratio_pct",
+                "top1_ratio_pct",
+                "top3_ratio_pct",
+                "numeric_like_pct",
+                "date_pattern_yyyymmdd_pct",
+                "date_pattern_ddmmyyyy_pct",
+                "date_pattern_iso_ymd_pct",
+                "date_parse_yyyymmdd_pct",
+                "date_parse_ddmmyyyy_pct",
+                "date_parse_iso_pct",
+                "date_parse_best_pct",
+                "date_parse_best_format",
+                "parsed_date_min",
+                "parsed_date_max",
+            ],
+            errors="ignore",
+        )
 
         rename_map = {
+            "column_name": "Column",
             "semantic_type": "Guessed Type",
             "rationale": "Confidence Rationale",
             "row_cnt": "Non-null Rows",
             "distincts": "Distinct Count",
-            "distinct_ratio_pct": "Distinct Ratio %",
-            "top1_ratio_pct": "Top 1 Ratio %",
-            "top3_ratio_pct": "Top-3 Coverage %",
-            "numeric_like_pct": "Numeric-like %",
-            "numeric_min": "Numeric Min",
-            "numeric_max": "Numeric Max",
-            "date_pattern_yyyymmdd_pct": "YYYYMMDD Pattern %",
-            "date_pattern_ddmmyyyy_pct": "DDMMYYYY Pattern %",
-            "date_pattern_iso_ymd_pct": "ISO Pattern %",
-            "date_parse_yyyymmdd_pct": "YYYYMMDD Parse %",
-            "date_parse_ddmmyyyy_pct": "DDMMYYYY Parse %",
-            "date_parse_iso_pct": "ISO Parse %",
-            "date_parse_best_pct": "Best Parse %",
-            "date_parse_best_format": "Best Parse Format",
-            "parsed_date_min": "Parsed Min Date",
-            "parsed_date_max": "Parsed Max Date",
+            "distinct_pct": "Distinct %",
+            "null_pct": "Null %",
+            "avg_len": "Avg Length",
+            "whitespace_pct": "Whitespace %",
+            "min_val": "Min",
+            "max_val": "Max",
+            "nulls": "Nulls",
+            "error": "Error",
+            "data_type": "Data Type",
         }
         display_df = display_df.rename(columns={k: v for k, v in rename_map.items() if k in display_df.columns})
         if "Guessed Type" in display_df.columns:
             display_df["Guessed Type"] = display_df["Guessed Type"].fillna("Unknown")
         ordered_columns = [
-            "column_name",
-            "data_type",
+            "Column",
+            "Data Type",
             "Non-null Rows",
-            "nulls",
-            "null_pct",
+            "Nulls",
+            "Null %",
             "Distinct Count",
-            "distinct_pct",
-            "Distinct Ratio %",
-            "Top 1 Ratio %",
-            "Top-3 Coverage %",
-            "Numeric-like %",
-            "min_val",
-            "max_val",
-            "Numeric Min",
-            "Numeric Max",
-            "avg_len",
-            "Len Min/Max",
-            "whitespace_pct",
-            "YYYYMMDD Pattern %",
-            "DDMMYYYY Pattern %",
-            "ISO Pattern %",
-            "YYYYMMDD Parse %",
-            "DDMMYYYY Parse %",
-            "ISO Parse %",
-            "Best Parse %",
-            "Best Parse Format",
-            "Parsed Min Date",
-            "Parsed Max Date",
+            "Distinct %",
+            "Min",
+            "Max",
+            "Avg Length",
+            "Whitespace %",
             "Date (Text)",
             "Reference Codes",
-            "error",
+            "Error",
             "Guessed Type",
             "Confidence Badge",
             "Confidence",
@@ -1058,24 +978,13 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
             col for col in display_df.columns if col not in ordered_columns
         ]]
         formatters: Dict[str, Any] = {"Confidence": _format_confidence}
-        for count_col in ("nulls", "Distinct Count", "Non-null Rows"):
+        for count_col in ("Nulls", "Distinct Count", "Non-null Rows"):
             if count_col in display_df.columns:
                 formatters[count_col] = _format_count
         percentage_columns = (
-            "null_pct",
-            "distinct_pct",
-            "whitespace_pct",
-            "Distinct Ratio %",
-            "Top 1 Ratio %",
-            "Top-3 Coverage %",
-            "Numeric-like %",
-            "YYYYMMDD Pattern %",
-            "DDMMYYYY Pattern %",
-            "ISO Pattern %",
-            "YYYYMMDD Parse %",
-            "DDMMYYYY Parse %",
-            "ISO Parse %",
-            "Best Parse %",
+            "Null %",
+            "Distinct %",
+            "Whitespace %",
         )
         for pct_col in percentage_columns:
             if pct_col in display_df.columns:
@@ -1144,6 +1053,7 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
             for col in tv_df.columns:
                 if col == "Count":
                     continue
+                tv_df[col] = tv_df[col].apply(_stringify_for_display)
                 if "pct" in col.lower():
                     tv_df[col] = tv_df[col].apply(_format_percentage)
 
