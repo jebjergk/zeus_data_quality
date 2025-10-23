@@ -100,6 +100,9 @@ class ColumnProfile:
     parsed_date_max: Optional[str] = None
     numeric_min: Optional[Any] = None
     numeric_max: Optional[Any] = None
+    profile_min: Optional[Any] = None
+    profile_max: Optional[Any] = None
+    date_parse_success_ratio: Optional[float] = None
     top_values: List[Dict[str, Any]] = field(default_factory=list)
     error: Optional[str] = None
     semantic_type: Optional[str] = None
@@ -122,6 +125,14 @@ def _column_profile_from_payload(column: Dict[str, Any]) -> ColumnProfile:
             "yyyymmdd": "YYYYMMDD",
             "ddmmyyyy": "DDMMYYYY",
             "iso": "YYYY-MM-DD",
+            "iso_slash": "YYYY/MM/DD",
+            "iso_dot": "YYYY.MM.DD",
+            "dd_mm_yyyy": "DD-MM-YYYY",
+            "dd_slash_mm": "DD/MM/YYYY",
+            "mm_dd_yyyy": "MM-DD-YYYY",
+            "mm_slash_dd": "MM/DD/YYYY",
+            "dd_mon_yyyy": "DD-MON-YYYY",
+            "mon_dd_yyyy": "MON-DD-YYYY",
         }
         best_format_display = format_map.get(fmt_key, str(best_format_value))
     else:
@@ -166,11 +177,14 @@ def _column_profile_from_payload(column: Dict[str, Any]) -> ColumnProfile:
         date_parse_ratio_ddmmyyyy=_safe_float(normalized.get("date_parse_ratio_ddmmyyyy")),
         date_parse_ratio_iso=_safe_float(normalized.get("date_parse_ratio_iso")),
         date_parse_ratio_best=_safe_float(normalized.get("date_parse_ratio_best")),
+        date_parse_success_ratio=_safe_float(normalized.get("date_parse_success_ratio")),
         date_parse_best_format=best_format_display,
         parsed_date_min=str(normalized.get("parsed_date_min")) if normalized.get("parsed_date_min") else None,
         parsed_date_max=str(normalized.get("parsed_date_max")) if normalized.get("parsed_date_max") else None,
         numeric_min=numeric_min_value,
         numeric_max=numeric_max_value,
+        profile_min=normalized.get("profile_min"),
+        profile_max=normalized.get("profile_max"),
         top_values=top_values_list,
         error=normalized.get("error"),
         semantic_type=normalized.get("semantic_type"),
@@ -336,11 +350,14 @@ def _profiles_to_frame(profiles: Iterable[ColumnProfile]) -> pd.DataFrame:
                 "date_parse_ddmmyyyy_pct": _pct(profile.date_parse_ratio_ddmmyyyy),
                 "date_parse_iso_pct": _pct(profile.date_parse_ratio_iso),
                 "date_parse_best_pct": _pct(profile.date_parse_ratio_best),
+                "date_parse_success_pct": _pct(profile.date_parse_success_ratio),
                 "date_parse_best_format": profile.date_parse_best_format,
                 "parsed_date_min": _stringify_for_display(profile.parsed_date_min),
                 "parsed_date_max": _stringify_for_display(profile.parsed_date_max),
                 "numeric_min": _stringify_for_display(profile.numeric_min),
                 "numeric_max": _stringify_for_display(profile.numeric_max),
+                "profile_min": _stringify_for_display(profile.profile_min),
+                "profile_max": _stringify_for_display(profile.profile_max),
                 "top_values": profile.top_values,
                 "error": profile.error,
                 "semantic_type": profile.semantic_type,

@@ -46,8 +46,10 @@ def build_profile_suggestion(profile_result: Dict[str, Any]) -> Optional[Dict[st
         null_pct = float(column.get("null_pct") or 0.0)
         distincts = column.get("distincts")
         whitespace_pct = float(column.get("whitespace_pct") or 0.0)
-        min_val = column.get("min_val")
-        max_val = column.get("max_val")
+        profile_min = column.get("profile_min")
+        profile_max = column.get("profile_max")
+        min_val = profile_min if profile_min is not None else column.get("min_val")
+        max_val = profile_max if profile_max is not None else column.get("max_val")
         top_values = column.get("top_values") or []
 
         checks: Dict[str, Dict[str, Any]] = {}
@@ -62,11 +64,27 @@ def build_profile_suggestion(profile_result: Dict[str, Any]) -> Optional[Dict[st
             "yyyymmdd": "YYYYMMDD",
             "ddmmyyyy": "DDMMYYYY",
             "iso": "YYYY-MM-DD",
+            "iso_slash": "YYYY/MM/DD",
+            "iso_dot": "YYYY.MM.DD",
+            "dd_mm_yyyy": "DD-MM-YYYY",
+            "dd_slash_mm": "DD/MM/YYYY",
+            "mm_dd_yyyy": "MM-DD-YYYY",
+            "mm_slash_dd": "MM/DD/YYYY",
+            "dd_mon_yyyy": "DD-MON-YYYY",
+            "mon_dd_yyyy": "MON-DD-YYYY",
         }
         format_regexes = {
             "yyyymmdd": r"^\\d{8}$",
-            "ddmmyyyy": r"^(?:\\d{2}[\\/\\-]?){2}\\d{4}$",
+            "ddmmyyyy": r"^\\d{8}$",
             "iso": r"^\\d{4}-\\d{2}-\\d{2}$",
+            "iso_slash": r"^\\d{4}/\\d{2}/\\d{2}$",
+            "iso_dot": r"^\\d{4}\\.\\d{2}\\.\\d{2}$",
+            "dd_mm_yyyy": r"^\\d{1,2}-\\d{1,2}-\\d{4}$",
+            "dd_slash_mm": r"^\\d{1,2}/\\d{1,2}/\\d{4}$",
+            "mm_dd_yyyy": r"^\\d{1,2}-\\d{1,2}-\\d{4}$",
+            "mm_slash_dd": r"^\\d{1,2}/\\d{1,2}/\\d{4}$",
+            "dd_mon_yyyy": r"^\\d{1,2}-[A-Za-z]{3}-\\d{4}$",
+            "mon_dd_yyyy": r"^[A-Za-z]{3}-\\d{1,2}-\\d{4}$",
         }
 
         if rows_profiled > 0:
@@ -141,8 +159,8 @@ def build_profile_suggestion(profile_result: Dict[str, Any]) -> Optional[Dict[st
             }
 
         if semantic_type == "DATE_IN_TEXT":
-            parsed_min = column.get("parsed_date_min")
-            parsed_max = column.get("parsed_date_max")
+            parsed_min = column.get("profile_min") or column.get("parsed_date_min")
+            parsed_max = column.get("profile_max") or column.get("parsed_date_max")
             format_label = format_labels.get(best_date_format or "")
             format_regex = format_regexes.get(best_date_format or "")
             if format_regex:
