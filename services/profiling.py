@@ -1358,6 +1358,9 @@ def run_table_profile(
             "error": None,
         }
 
+        column_entry["len_min"] = len_min_val if is_string else None
+        column_entry["len_max"] = len_max_val if is_string else None
+
         if is_string:
             column_entry.update(
                 {
@@ -1365,8 +1368,6 @@ def run_table_profile(
                     "distinct_ratio": (float(distincts_int) / float(non_nulls)) if (distincts_int is not None and non_nulls) else None,
                     "top1_ratio": top1_ratio,
                     "top3_ratio": top3_ratio,
-                    "len_min": len_min_val,
-                    "len_max": len_max_val,
                     "numeric_like_ratio": numeric_like_ratio,
                     "date_pattern_yyyymmdd_ratio": date_pattern_ratios.get("yyyymmdd"),
                     "date_pattern_ddmmyyyy_ratio": date_pattern_ratios.get("ddmmyyyy"),

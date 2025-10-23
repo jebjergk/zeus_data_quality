@@ -388,42 +388,6 @@ def _profiles_to_frame(profiles: Iterable[ColumnProfile]) -> pd.DataFrame:
     return df
 
 
-def _confidence_badge_label(confidence: Optional[float]) -> str:
-    if confidence is None or (isinstance(confidence, float) and math.isnan(confidence)):
-        return "Unknown"
-    if confidence >= 0.9:
-        return "High"
-    if confidence >= 0.75:
-        return "Medium"
-    return "Low"
-
-
-def _confidence_badge_theme() -> Dict[str, Dict[str, str]]:
-    return {
-        "High": {"bg": "#0f9d58", "fg": "#ffffff", "accent": "#0b7d46"},
-        "Medium": {"bg": "#fbbc04", "fg": "#3c2f00", "accent": "#c58c00"},
-        "Low": {"bg": "#ea4335", "fg": "#ffffff", "accent": "#b3261e"},
-        "Unknown": {"bg": "#dfe3e6", "fg": "#1f2933", "accent": "#b0b8bf"},
-    }
-
-
-def _confidence_badge_colors(label: str) -> Dict[str, str]:
-    theme = _confidence_badge_theme()
-    return theme.get(label, theme["Unknown"])
-
-
-def _format_confidence(value: Any) -> str:
-    try:
-        if value is None:
-            return ""
-        value_float = float(value)
-        if math.isnan(value_float):
-            return ""
-        return f"{value_float:.0%}"
-    except Exception:
-        return ""
-
-
 def _format_count(value: Any) -> str:
     if value is None:
         return ""
@@ -446,49 +410,6 @@ def _format_percentage(value: Any) -> str:
         return f"{value_float:.2f}"
     except Exception:
         return ""
-
-
-def _format_ratio_pct(value: Optional[float], decimals: int = 0) -> str:
-    if value is None:
-        return "—"
-    try:
-        ratio = float(value)
-        if math.isnan(ratio):
-            return "—"
-        return f"{ratio * 100:.{decimals}f}%"
-    except Exception:
-        return "—"
-
-
-def _ratio_badge_status(ratio: Optional[float]) -> str:
-    if ratio is None:
-        return "muted"
-    try:
-        value = float(ratio)
-    except Exception:
-        return "muted"
-    if math.isnan(value):
-        return "muted"
-    if value >= 0.9:
-        return "green"
-    if value >= 0.75:
-        return "amber"
-    return "red"
-
-
-def _badge_display_text(status: str, label: str) -> str:
-    if status == "muted":
-        return ""
-    return label
-
-
-def _status_to_badge_icon(status: str) -> str:
-    icon_map = {
-        "green": "🟢",
-        "amber": "🟡",
-        "red": "🔴",
-    }
-    return icon_map.get(status, "⚪")
 
 
 def _format_card_value(value: Any, *, decimals: int = 2, allow_commas: bool = False) -> str:
@@ -839,17 +760,20 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
         for key in active_semantic_filters:
             allowed_types.update(semantic_filter_map.get(key, set()))
         filtered_df = filtered_df[filtered_df["semantic_type"].isin(allowed_types)]
-    display_df = filtered_df.drop(columns=["top_values"], errors="ignore").copy()
+    display_df = filtered_df.copy()
+    grid_columns = [
+        "Column",
+        "Physical Type",
+        "Null %",
+        "Distinct (count/%)",
+        "Avg Len",
+        "Profile Min",
+        "Profile Max",
+        "Guessed Type",
+        "Confidence",
+        "Note",
+    ]
     if not display_df.empty:
-        semantic_series = (
-            display_df.get("semantic_type", pd.Series(dtype=str))
-            .fillna("")
-            .astype(str)
-            .str.upper()
-        )
-        has_date_text = semantic_series.eq("DATE_IN_TEXT").any()
-        has_ref_code = semantic_series.eq("REF_CODE").any()
-
         def _is_numeric_type_name(type_name: Any) -> bool:
             upper = str(type_name or "").upper()
             return any(token in upper for token in ("NUMBER", "INT", "DECIMAL", "FLOAT", "DOUBLE", "REAL"))
@@ -858,26 +782,18 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
             upper = str(type_name or "").upper()
             return any(token in upper for token in ("DATE", "TIME", "TIMESTAMP"))
 
-        def _displayable_value(*candidates: Any) -> Optional[str]:
+        def _displayable_value(*candidates: Any) -> str:
             for candidate in candidates:
                 formatted = _stringify_for_display(candidate)
                 if formatted is None:
                     continue
-                if isinstance(formatted, float):
-                    if math.isnan(formatted):
-                        continue
-                    if formatted.is_integer():
-                        formatted_text = f"{int(formatted)}"
-                    else:
-                        formatted_text = f"{formatted:.6g}"
-                else:
-                    formatted_text = str(formatted).strip()
-                if not formatted_text or formatted_text.lower() == "nan":
+                text_value = str(formatted).strip()
+                if not text_value or text_value.lower() == "nan":
                     continue
-                return formatted_text
-            return None
+                return text_value
+            return ""
 
-        def _format_len_value(value: Any) -> Optional[str]:
+        def _format_len_number(value: Any) -> Optional[str]:
             if value is None:
                 return None
             try:
@@ -892,8 +808,8 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
             return f"{numeric:.2f}".rstrip("0").rstrip(".")
 
         def _format_len_range(min_len: Any, max_len: Any) -> Optional[str]:
-            min_text = _format_len_value(min_len)
-            max_text = _format_len_value(max_len)
+            min_text = _format_len_number(min_len)
+            max_text = _format_len_number(max_len)
             if min_text and max_text:
                 if min_text == max_text:
                     return f"len {min_text}"
@@ -904,7 +820,80 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
                 return f"len ≤{max_text}"
             return None
 
-        def _resolve_min_max(row: pd.Series) -> pd.Series:
+        def _format_avg_length(row: pd.Series) -> str:
+            avg_text = _format_len_number(row.get("avg_len"))
+            range_text = _format_len_range(row.get("len_min"), row.get("len_max"))
+            if avg_text and range_text:
+                return f"{avg_text} ({range_text.replace('len ', '')})"
+            if range_text:
+                return range_text.replace("len ", "")
+            if avg_text:
+                return avg_text
+            return ""
+
+        def _format_percentage_str(value: Any, decimals: int = 2) -> str:
+            if value is None:
+                return ""
+            try:
+                numeric = float(value)
+            except Exception:
+                text_value = str(value).strip()
+                return text_value or ""
+            if math.isnan(numeric):
+                return ""
+            formatted = f"{numeric:.{decimals}f}".rstrip("0").rstrip(".")
+            return f"{formatted}%"
+
+        def _format_distinct_summary(row: pd.Series) -> str:
+            count = row.get("distincts")
+            pct_text = _format_percentage_str(row.get("distinct_pct"))
+            count_text = ""
+            if count is not None:
+                try:
+                    count_text = f"{int(count):,}"
+                except Exception:
+                    count_text = str(count)
+            if count_text and pct_text:
+                return f"{count_text} ({pct_text})"
+            if count_text:
+                return count_text
+            if pct_text:
+                return pct_text
+            return ""
+
+        def _format_semantic_label(value: Any) -> str:
+            if value is None:
+                return "Unknown"
+            text_value = str(value).strip()
+            if not text_value:
+                return "Unknown"
+            normalized = text_value.replace("_", " ")
+            return normalized.title()
+
+        def _format_confidence_score(value: Any) -> str:
+            if value is None:
+                return ""
+            try:
+                numeric = float(value)
+            except Exception:
+                text_value = str(value).strip()
+                return text_value or ""
+            if math.isnan(numeric):
+                return ""
+            if numeric <= 1.0:
+                numeric *= 100.0
+            formatted = f"{numeric:.1f}" if numeric < 10 else f"{numeric:.0f}"
+            formatted = formatted.rstrip("0").rstrip(".")
+            return f"{formatted}%"
+
+        def _compose_note(row: pd.Series) -> str:
+            error_text = _displayable_value(row.get("error"))
+            if error_text:
+                return error_text
+            rationale_text = _displayable_value(row.get("rationale"))
+            return rationale_text
+
+        def _resolve_profile_bounds(row: pd.Series) -> pd.Series:
             semantic = str(row.get("semantic_type") or "").upper()
             data_type = row.get("data_type")
 
@@ -914,8 +903,7 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
             else:
                 numeric_min_display = _displayable_value(row.get("numeric_min"))
                 numeric_max_display = _displayable_value(row.get("numeric_max"))
-                numeric_like = numeric_min_display is not None or numeric_max_display is not None
-
+                numeric_like = bool(numeric_min_display or numeric_max_display)
                 if not numeric_like:
                     numeric_like_pct = row.get("numeric_like_pct")
                     if numeric_like_pct is not None:
@@ -923,7 +911,6 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
                             numeric_like = float(numeric_like_pct) >= 80.0
                         except Exception:
                             numeric_like = False
-
                 if numeric_like or _is_numeric_type_name(data_type):
                     min_display = numeric_min_display or _displayable_value(row.get("profile_min"), row.get("min_val"))
                     max_display = numeric_max_display or _displayable_value(row.get("profile_max"), row.get("max_val"))
@@ -931,8 +918,8 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
                     min_display = _displayable_value(row.get("profile_min"), row.get("min_val"))
                     max_display = _displayable_value(row.get("profile_max"), row.get("max_val"))
                 else:
-                    min_display = None
-                    max_display = None
+                    min_display = ""
+                    max_display = ""
 
             if not min_display and not max_display:
                 length_display = _format_len_range(row.get("len_min"), row.get("len_max"))
@@ -943,249 +930,27 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
                     min_display = _displayable_value(row.get("profile_min"), row.get("min_val"))
                     max_display = _displayable_value(row.get("profile_max"), row.get("max_val"))
 
-            return pd.Series({"min_val": min_display, "max_val": max_display})
+            return pd.Series({"Profile Min": min_display, "Profile Max": max_display})
 
-        if {"min_val", "max_val"}.issubset(display_df.columns):
-            display_df[["min_val", "max_val"]] = display_df.apply(_resolve_min_max, axis=1)
-        if "confidence" in display_df.columns:
-            display_df["Confidence"] = display_df["confidence"].apply(
-                lambda val: float(val) if val is not None else None
-            )
-            display_df["Confidence Badge"] = display_df["confidence"].apply(_confidence_badge_label)
-            display_df = display_df.drop(columns=["confidence"], errors="ignore")
-        else:
-            display_df["Confidence"] = None
-            display_df["Confidence Badge"] = "Unknown"
+        bounds_df = display_df.apply(_resolve_profile_bounds, axis=1)
+        display_df = display_df.join(bounds_df)
 
-        def _format_confidence_badge_label(raw_label: Any) -> str:
-            if raw_label is None:
-                return ""
-            label = str(raw_label).strip()
-            if not label or label.lower() == "nan":
-                return ""
-            return label
+        display_df["Avg Len"] = display_df.apply(_format_avg_length, axis=1)
+        display_df["Null %"] = display_df["null_pct"].apply(_format_percentage_str)
+        display_df["Distinct (count/%)"] = display_df.apply(_format_distinct_summary, axis=1)
+        display_df["Guessed Type"] = display_df["semantic_type"].apply(_format_semantic_label)
+        display_df["Confidence"] = display_df["confidence"].apply(_format_confidence_score)
+        display_df["Note"] = display_df.apply(_compose_note, axis=1)
+        display_df["Column"] = display_df["column_name"].astype(str)
+        display_df["Physical Type"] = display_df["data_type"].astype(str)
+        for column in ("Avg Len", "Null %", "Distinct (count/%)", "Profile Min", "Profile Max", "Confidence", "Note"):
+            display_df[column] = display_df[column].fillna("")
+        display_df["Guessed Type"] = display_df["Guessed Type"].fillna("Unknown")
 
-        display_df["Confidence Badge"] = display_df["Confidence Badge"].apply(_format_confidence_badge_label)
-
-        if has_date_text:
-            date_labels: List[str] = []
-            for _, row in display_df.iterrows():
-                is_date = str(row.get("semantic_type") or "").upper() == "DATE_IN_TEXT"
-                if not is_date:
-                    date_labels.append("")
-                    continue
-                ratio_pct = row.get("date_parse_best_pct")
-                ratio_norm: Optional[float] = None
-                if ratio_pct is not None:
-                    try:
-                        ratio_norm = float(ratio_pct) / 100.0
-                        if math.isnan(ratio_norm):
-                            ratio_norm = None
-                    except Exception:
-                        ratio_norm = None
-                status = _ratio_badge_status(ratio_norm)
-                label = _badge_display_text(status, "Date (Text)")
-                fmt = row.get("date_parse_best_format") or "—"
-                ratio_display = _format_ratio_pct(ratio_norm, 0)
-                icon = _status_to_badge_icon(status)
-                info_parts = [
-                    f"{icon} {label}".strip(),
-                    f"Format: {fmt}" if fmt else "",
-                    f"Success: {ratio_display}" if ratio_display else "",
-                ]
-                date_labels.append(" • ".join(part for part in info_parts if part))
-            display_df["Date (Text)"] = date_labels
-        else:
-            display_df = display_df.drop(
-                columns=[
-                    "date_parse_best_pct",
-                    "date_parse_best_format",
-                    "parsed_date_min",
-                    "parsed_date_max",
-                ],
-                errors="ignore",
-            )
-
-        if has_ref_code:
-            ref_labels: List[str] = []
-            for _, row in display_df.iterrows():
-                is_ref = str(row.get("semantic_type") or "").upper() == "REF_CODE"
-                if not is_ref:
-                    ref_labels.append("")
-                    continue
-                distinct_ratio_pct = row.get("distinct_ratio_pct")
-                distinct_ratio: Optional[float] = None
-                if distinct_ratio_pct is not None:
-                    try:
-                        distinct_ratio = float(distinct_ratio_pct) / 100.0
-                        if math.isnan(distinct_ratio):
-                            distinct_ratio = None
-                    except Exception:
-                        distinct_ratio = None
-                status = _ratio_badge_status(distinct_ratio)
-                label = _badge_display_text(status, "Reference Codes")
-                top3_ratio_pct = row.get("top3_ratio_pct")
-                top3_ratio: Optional[float] = None
-                if top3_ratio_pct is not None:
-                    try:
-                        top3_ratio = float(top3_ratio_pct) / 100.0
-                        if math.isnan(top3_ratio):
-                            top3_ratio = None
-                    except Exception:
-                        top3_ratio = None
-                distinct_display = _format_ratio_pct(distinct_ratio, 0)
-                top3_display = _format_ratio_pct(top3_ratio, 0)
-                icon = _status_to_badge_icon(status)
-                info_parts = [
-                    f"{icon} {label}".strip(),
-                    f"Distinct: {distinct_display}" if distinct_display else "",
-                    f"Top-3: {top3_display}" if top3_display else "",
-                ]
-                ref_labels.append(" • ".join(part for part in info_parts if part))
-            display_df["Reference Codes"] = ref_labels
-        else:
-            display_df = display_df.drop(columns=["Reference Codes"], errors="ignore")
-
-        display_df = display_df.drop(
-            columns=[
-                "len_min",
-                "len_max",
-                "Len Min/Max",
-                "numeric_min",
-                "numeric_max",
-                "distinct_ratio_pct",
-                "top1_ratio_pct",
-                "top3_ratio_pct",
-                "numeric_like_pct",
-                "date_pattern_yyyymmdd_pct",
-                "date_pattern_ddmmyyyy_pct",
-                "date_pattern_iso_ymd_pct",
-                "date_parse_yyyymmdd_pct",
-                "date_parse_ddmmyyyy_pct",
-                "date_parse_iso_pct",
-                "date_parse_best_pct",
-                "date_parse_best_format",
-                "parsed_date_min",
-                "parsed_date_max",
-                "profile_min",
-                "profile_max",
-            ],
-            errors="ignore",
-        )
-
-        rename_map = {
-            "column_name": "Column",
-            "semantic_type": "Guessed Type",
-            "rationale": "Confidence Rationale",
-            "row_cnt": "Non-null Rows",
-            "distincts": "Distinct Count",
-            "distinct_pct": "Distinct %",
-            "null_pct": "Null %",
-            "avg_len": "Avg Length",
-            "whitespace_pct": "Whitespace %",
-            "min_val": "Min",
-            "max_val": "Max",
-            "nulls": "Nulls",
-            "error": "Error",
-            "data_type": "Data Type",
-        }
-        display_df = display_df.rename(columns={k: v for k, v in rename_map.items() if k in display_df.columns})
-        if "Guessed Type" in display_df.columns:
-            display_df["Guessed Type"] = display_df["Guessed Type"].fillna("Unknown")
-        ordered_columns = [
-            "Column",
-            "Data Type",
-            "Non-null Rows",
-            "Nulls",
-            "Null %",
-            "Distinct Count",
-            "Distinct %",
-            "Min",
-            "Max",
-            "Avg Length",
-            "Whitespace %",
-            "Date (Text)",
-            "Reference Codes",
-            "Error",
-            "Guessed Type",
-            "Confidence Badge",
-            "Confidence",
-            "Confidence Rationale",
-        ]
-        display_df = display_df[[col for col in ordered_columns if col in display_df.columns] + [
-            col for col in display_df.columns if col not in ordered_columns
-        ]]
-        formatters: Dict[str, Any] = {"Confidence": _format_confidence}
-        for count_col in ("Nulls", "Distinct Count", "Non-null Rows"):
-            if count_col in display_df.columns:
-                formatters[count_col] = _format_count
-        percentage_columns = (
-            "Null %",
-            "Distinct %",
-            "Whitespace %",
-        )
-        for pct_col in percentage_columns:
-            if pct_col in display_df.columns:
-                formatters[pct_col] = _format_percentage
-        for column, formatter in formatters.items():
-            display_df[column] = display_df[column].apply(formatter)
-        column_config: Dict[str, st.column_config.BaseColumn] = {}
-        if "Confidence Rationale" in display_df.columns:
-            column_config["Confidence Rationale"] = st.column_config.TextColumn(
-                "Confidence Rationale",
-                help="Explanation for how the guessed type confidence was determined.",
-                width="medium",
-            )
-        accent_column = display_df.columns[0] if not display_df.empty else None
-
-        def _badge_row_style(row: pd.Series) -> List[str]:
-            label = str(row.get("Confidence Badge", "")).strip()
-            colors = _confidence_badge_colors(label)
-            badge_styles = []
-            for col in row.index:
-                cell_style_parts: List[str] = []
-                if col == "Confidence Badge":
-                    cell_style_parts.append(
-                        "background-color: {bg}; color: {fg}; font-weight: 600; "
-                        "text-align: center; border-radius: 999px; padding: 0.1rem 0.35rem;"
-                        .format(**colors)
-                    )
-                if accent_column and colors.get("accent") and col == accent_column:
-                    cell_style_parts.append(f"border-left: 0.35rem solid {colors['accent']};")
-                badge_styles.append(" ".join(cell_style_parts))
-            return badge_styles
-
-        styled_df = (
-            display_df.style.format(na_rep="")
-            .apply(_badge_row_style, axis=1)
-            .set_properties(subset=["Confidence Badge"], **{"text-align": "center"})
-        )
-
-        st.dataframe(
-            styled_df,
-            hide_index=True,
-            use_container_width=True,
-            column_config=column_config or None,
-        )
-
-        legend_items = []
-        for label, colors in _confidence_badge_theme().items():
-            legend_items.append(
-                (
-                    f"<span style='display:inline-flex;align-items:center;margin-right:0.75rem;'>"
-                    f"<span style='display:inline-block;width:0.65rem;height:0.65rem;border-radius:0.25rem;"
-                    f"background:{colors['bg']};border:1px solid {colors['accent']};margin-right:0.25rem;'></span>"
-                    f"{label}</span>"
-                )
-            )
-        st.markdown(
-            "<div style='font-size:0.75rem;margin-top:0.35rem;color:rgba(49,51,63,0.7);'>Confidence legend: "
-            + "".join(legend_items)
-            + "</div>",
-            unsafe_allow_html=True,
-        )
+        grid_df = display_df[grid_columns].copy()
+        st.dataframe(grid_df, hide_index=True, use_container_width=True)
     else:
-        st.dataframe(display_df, hide_index=True, use_container_width=True)
+        st.dataframe(pd.DataFrame(columns=grid_columns), hide_index=True, use_container_width=True)
 
     if filtered_df.empty:
         st.info("No columns matched the selected filters.")
