@@ -10,6 +10,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 from uuid import uuid4
 
 from services.profile import _is_numeric, _is_temporal, _stringify
+from services.semantics import clamp_confidence, truncate_note
 from utils.meta import _q
 
 __all__ = [
@@ -380,6 +381,7 @@ def _infer_semantic_type(
     length_max = _as_float(length.get("max"))
     length_avg = _as_float(length.get("avg"))
     length_stddev = _as_float(length.get("stddev"))
+    length_spread = _as_float(length.get("spread"))
     distinct_ratio_signal = _as_float(string_stats.get("distinct_ratio"))
     top1_ratio_signal = _as_float(string_stats.get("top1_ratio"))
     top3_ratio_signal = _as_float(string_stats.get("top3_ratio"))
@@ -410,15 +412,20 @@ def _infer_semantic_type(
         except Exception:
             date_valid_count = 0
     pattern_values: List[float] = []
+    pattern_ratio_lookup: Dict[str, Optional[float]] = {}
     if isinstance(date_patterns, dict):
-        for value in date_patterns.values():
+        for key, value in date_patterns.items():
+            normalized_key = str(key or "").lower()
             val_float = _as_float(value)
             if val_float is not None:
                 pattern_values.append(val_float)
+            pattern_ratio_lookup[normalized_key] = val_float
+            if normalized_key.endswith("_ratio") and normalized_key[:-6] not in pattern_ratio_lookup:
+                pattern_ratio_lookup[normalized_key[:-6]] = val_float
     pattern_values.extend(val for val in format_ratios.values() if val is not None)
-    yyyymmdd_pattern_ratio = _as_float(date_patterns.get("yyyymmdd_ratio"))
-    ddmmyyyy_pattern_ratio = _as_float(date_patterns.get("ddmmyyyy_ratio"))
-    iso_pattern_ratio = _as_float(date_patterns.get("iso_ymd_ratio"))
+    yyyymmdd_pattern_ratio = pattern_ratio_lookup.get("yyyymmdd")
+    ddmmyyyy_pattern_ratio = pattern_ratio_lookup.get("ddmmyyyy")
+    iso_pattern_ratio = pattern_ratio_lookup.get("iso") or pattern_ratio_lookup.get("iso_ymd")
     pattern_ratio_fallback = max(pattern_values) if pattern_values else 0.0
     column_name_lower = (column_entry.get("column_name") or "").lower()
 
@@ -520,24 +527,20 @@ def _infer_semantic_type(
             else overall_success_ratio
         )
     )
-    candidate_pattern_ratio = max(
-        value
-        for key, value in format_ratios.items()
-        if key in {
-            "yyyymmdd",
-            "ddmmyyyy",
-            "iso",
-            "iso_slash",
-            "iso_dot",
-            "dd_mm_yyyy",
-            "dd_slash_mm",
-            "mm_dd_yyyy",
-            "mm_slash_dd",
-            "dd_mon_yyyy",
-            "mon_dd_yyyy",
-        }
-        and value is not None
-    ) if format_ratios else 0.0
+    targeted_patterns = {
+        "yyyymmdd",
+        "ddmmyyyy",
+        "iso",
+        "iso_slash",
+        "iso_dot",
+        "dd_mm_yyyy",
+        "dd_slash_mm",
+    }
+    pattern_max_ratio = 0.0
+    for key in targeted_patterns:
+        ratio_val = pattern_ratio_lookup.get(key)
+        if ratio_val is not None and ratio_val > pattern_max_ratio:
+            pattern_max_ratio = ratio_val
     if (
         date_success_ratio is not None
         and date_success_ratio >= 0.6
@@ -602,16 +605,22 @@ def _infer_semantic_type(
         except Exception:
             date_span_years = None
 
-    date_is_candidate = (
-        (candidate_pattern_ratio or 0.0) > 0.0
-        or (date_success_ratio is not None and date_success_ratio >= 0.9)
-    ) and date_valid_count > 0
+    sentinel_zero_count = _as_int(column_entry.get("date_sentinel_count")) or 0
+    best_success_ratio = 0.0
+    for candidate in (
+        date_success_ratio,
+        best_date_ratio,
+        overall_success_ratio,
+    ):
+        if candidate is not None and candidate > best_success_ratio:
+            best_success_ratio = float(candidate)
+    best_success_ratio = max(0.0, min(best_success_ratio, 1.0))
 
     if (
         not forced_type
-        and date_is_candidate
-        and date_success_ratio is not None
-        and date_success_ratio >= 0.8
+        and best_success_ratio >= 0.8
+        and pattern_max_ratio >= 0.8
+        and date_valid_count > 0
     ):
         format_key = str(best_date_format or "").lower()
         label = DATE_PARSE_LABELS.get(
@@ -619,91 +628,57 @@ def _infer_semantic_type(
             str(best_date_format or "text date").upper(),
         )
         high_confidence = (
-            date_success_ratio >= 0.95
+            best_success_ratio >= 0.95
             or (
-                date_success_ratio >= 0.9
+                best_success_ratio >= 0.9
                 and (date_span_years or 0.0) >= 5.0
             )
         )
         if high_confidence:
-            forced_confidence = min(1.0, max(date_success_ratio, 0.95))
+            forced_confidence = round(min(1.0, max(best_success_ratio, 0.9)), 3)
         else:
-            forced_confidence = max(0.8, min(date_success_ratio, 0.94))
+            forced_confidence = round(min(0.89, max(0.75, best_success_ratio)), 3)
+        pct_value = best_success_ratio * 100.0
+        if pct_value < 10.0:
+            pct_text = f"{pct_value:.1f}%".rstrip("0").rstrip(".")
+        else:
+            pct_text = f"{pct_value:.0f}%"
+        note_parts: List[str] = [f"Parsed as {label} ({pct_text})"]
+        if sentinel_zero_count > 0:
+            note_parts.append("ignored sentinel zeros")
+        if date_span_years is not None and date_span_years >= 1.0 and high_confidence:
+            note_parts.append(f"span {date_span_years:.1f}y")
+        note_text = "; ".join(part for part in note_parts if part)
         forced_type = "DATE_IN_TEXT"
-        forced_rationale_parts = [
-            f"{label} parse success {date_success_ratio:.0%}",
-        ]
-        if date_span_years is not None and date_span_years > 0:
-            forced_rationale_parts.append(f"span {date_span_years:.1f}y")
-        if parsed_date_min or parsed_date_max:
-            forced_rationale_parts.append(
-                "{start} → {end}".format(
-                    start=parsed_date_min or "?",
-                    end=parsed_date_max or "?",
-                )
-            )
+        forced_rationale_parts = [truncate_note(note_text)]
 
     if not forced_type:
         row_cnt_value = _as_int(column_entry.get("row_cnt"))
+        null_cnt_value = _as_int(column_entry.get("null_cnt")) or 0
         if row_cnt_value is None:
-            row_cnt_value = _as_int(column_entry.get("non_nulls"))
+            row_cnt_value = _as_int(column_entry.get("rows_profiled"))
+        non_null_count = non_nulls or 0
+        if row_cnt_value is not None:
+            non_null_count = max(row_cnt_value - null_cnt_value, non_null_count)
         distinct_count_value = _as_int(column_entry.get("distincts"))
         top3_ratio_value = top3_ratio_signal
-        if top3_ratio_value is None and non_nulls:
+        if top3_ratio_value is None and non_null_count:
             try:
                 top3_total = sum(
                     int(top_values[idx].get("count") or 0)
                     for idx in range(min(3, len(top_values)))
                 )
                 top3_ratio_value = (
-                    float(top3_total) / float(non_nulls)
-                ) if non_nulls else None
+                    float(top3_total) / float(non_null_count)
+                ) if non_null_count else None
             except Exception:
                 top3_ratio_value = None
-        distinct_ratio_value = (
-            resolved_distinct_ratio if distinct_ratio_signal is not None else None
-        )
-        account_length_condition = (
-            (length_avg is not None and length_avg >= 8.0)
-            or (length_stddev is not None and length_stddev >= 1.5)
-        )
-        account_ratio_condition = False
-        if distinct_ratio_value is not None and distinct_ratio_value >= 0.6:
-            account_ratio_condition = True
-        elif (
-            distinct_count_value is not None
-            and row_cnt_value is not None
-            and row_cnt_value > 0
-        ):
-            threshold = min(int(row_cnt_value * 0.6), 10000)
-            if distinct_count_value >= threshold:
-                account_ratio_condition = True
-        top3_ok_for_account = (
-            top3_ratio_value is None or top3_ratio_value <= 0.30
-        )
-        account_condition = (
-            account_ratio_condition and top3_ok_for_account and account_length_condition
-        )
-
-        ref_ratio_condition = (
-            distinct_ratio_value is not None
-            and distinct_ratio_value <= 0.30
-            and top3_ratio_value is not None
-            and top3_ratio_value >= 0.80
-        )
-        ref_lookup_condition = (
-            distinct_count_value is not None
-            and distinct_count_value <= 200
-            and (row_cnt_value or 0) >= 5000
-        )
-        ref_length_condition = (
-            (length_avg is None or length_avg <= 10.0)
-            and (length_stddev is None or length_stddev <= 1.5)
-        )
-        ref_condition = (
-            (ref_ratio_condition or ref_lookup_condition)
-            and ref_length_condition
-        )
+        if distinct_ratio_signal is not None:
+            distinct_ratio_value = float(distinct_ratio_signal)
+        elif distinct_count_value is not None and non_null_count:
+            distinct_ratio_value = float(distinct_count_value) / float(non_null_count)
+        else:
+            distinct_ratio_value = None
 
         column_name_upper = column_name_lower.upper()
         ref_hint_tokens = (
@@ -719,15 +694,64 @@ def _infer_semantic_type(
         )
         ref_name_hint = any(token in column_name_upper for token in ref_hint_tokens)
 
-        def _clamp_conf(value: float, minimum: float, maximum: float = 0.98) -> float:
-            return max(minimum, min(maximum, value))
-
         distinct_pct_display = None
         if distinct_ratio_value is not None:
             distinct_pct_display = f"{distinct_ratio_value:.0%} distinct"
         top3_display = None
         if top3_ratio_value is not None:
-            top3_display = f"top3 {top3_ratio_value:.0%}"
+            top3_display = f"top3 coverage {top3_ratio_value:.0%}"
+
+        len_spread_value = length_spread
+        if len_spread_value is None and length_min is not None and length_max is not None:
+            len_spread_value = float(length_max) - float(length_min)
+        spread_ratio = None
+        if len_spread_value is not None and length_avg not in (None, 0.0):
+            spread_ratio = len_spread_value / max(length_avg or 1.0, 1e-6)
+
+        near_unique = False
+        if distinct_ratio_value is not None and distinct_ratio_value >= 0.6:
+            near_unique = True
+        elif (
+            distinct_count_value is not None
+            and row_cnt_value is not None
+            and row_cnt_value > 0
+        ):
+            threshold = min(int(row_cnt_value * 0.6), 10000)
+            if distinct_count_value >= threshold:
+                near_unique = True
+
+        top3_ok_for_account = top3_ratio_value is None or top3_ratio_value <= 0.30
+        entropy_ok = False
+        if length_avg is not None and length_avg >= 8.0:
+            entropy_ok = True
+        elif length_stddev is not None and length_stddev >= 2.5:
+            entropy_ok = True
+        account_condition = near_unique and top3_ok_for_account and entropy_ok
+
+        tight_length_spread = False
+        if len_spread_value is not None:
+            if len_spread_value <= 2.0:
+                tight_length_spread = True
+            elif spread_ratio is not None and spread_ratio <= 0.25:
+                tight_length_spread = True
+
+        ref_cardinality = False
+        if (
+            distinct_ratio_value is not None
+            and top3_ratio_value is not None
+            and distinct_ratio_value <= 0.30
+            and top3_ratio_value >= 0.80
+        ):
+            ref_cardinality = True
+        elif (
+            distinct_count_value is not None
+            and row_cnt_value is not None
+            and row_cnt_value >= 5000
+            and distinct_count_value <= 200
+        ):
+            ref_cardinality = True
+
+        ref_condition = ref_cardinality and tight_length_spread
 
         preliminary_best_type: Optional[str] = None
         if scores:
@@ -736,10 +760,19 @@ def _infer_semantic_type(
             except ValueError:
                 preliminary_best_type = None
 
-        if account_condition and (
-            not ref_condition
-            or (ref_condition and (distinct_ratio_value or 0.0) >= 0.6)
+        name_hint_bonus = 0.05 if ref_name_hint else 0.0
+        if hints.get("account") or hints.get("id"):
+            name_hint_bonus = max(name_hint_bonus, 0.05)
+
+        free_text_penalty = 0.0
+        if (
+            spread_ratio is not None
+            and spread_ratio >= 1.0
+            and (distinct_ratio_value or 0.0) >= 0.30
         ):
+            free_text_penalty = 0.1
+
+        if account_condition and (not ref_condition or ref_cardinality is False):
             account_confidence = 0.82
             if distinct_ratio_value is not None:
                 if distinct_ratio_value >= 0.8:
@@ -751,28 +784,30 @@ def _infer_semantic_type(
                     account_confidence += 0.05
                 elif top3_ratio_value <= 0.25:
                     account_confidence += 0.03
-            if length_avg is not None:
-                if length_avg >= 12.0:
-                    account_confidence += 0.04
-                elif length_avg >= 8.0:
-                    account_confidence += 0.02
-            if length_stddev is not None and length_stddev >= 2.5:
-                account_confidence += 0.03
-            if hints.get("id"):
+            if length_avg is not None and length_avg >= 12.0:
+                account_confidence += 0.04
+            if hints.get("account") or hints.get("id"):
                 account_confidence += 0.05
+            account_confidence = max(0.0, account_confidence - free_text_penalty)
             forced_type = "ACCOUNT_ID"
-            forced_confidence = round(_clamp_conf(account_confidence, 0.75, 0.99), 3)
-            forced_rationale_parts = []
+            account_confidence = clamp_confidence(account_confidence, 0.75, 0.99) or 0.0
+            forced_confidence = round(account_confidence, 3)
+            rationale_parts: List[str] = []
             if distinct_pct_display:
-                forced_rationale_parts.append(distinct_pct_display)
+                rationale_parts.append(distinct_pct_display)
             if top3_display:
-                forced_rationale_parts.append(top3_display)
+                rationale_parts.append(top3_display)
             if length_avg is not None:
-                forced_rationale_parts.append(f"avg len {length_avg:.1f}")
+                rationale_parts.append(f"avg len {length_avg:.1f}")
             if distinct_count_value is not None and row_cnt_value:
-                forced_rationale_parts.append(
+                rationale_parts.append(
                     f"{distinct_count_value} distinct / {row_cnt_value} rows"
                 )
+            if free_text_penalty > 0:
+                rationale_parts.append("wide length spread")
+            if not rationale_parts:
+                rationale_parts.append("near-unique identifier pattern")
+            forced_rationale_parts = [truncate_note("; ".join(rationale_parts))]
         elif ref_condition:
             ref_confidence = 0.8
             if distinct_ratio_value is not None and distinct_ratio_value <= 0.2:
@@ -783,32 +818,35 @@ def _infer_semantic_type(
                 ref_confidence += 0.05
             elif top3_ratio_value is not None and top3_ratio_value >= 0.8:
                 ref_confidence += 0.03
-            if distinct_count_value is not None:
-                if distinct_count_value <= 50:
-                    ref_confidence += 0.05
-                elif distinct_count_value <= 200:
-                    ref_confidence += 0.03
-            if row_cnt_value is not None and row_cnt_value >= 10000 and (
-                distinct_count_value is not None and distinct_count_value <= 200
-            ):
-                ref_confidence += 0.03
-            if length_stddev is not None and length_stddev <= 1.0:
-                ref_confidence += 0.04
-            if length_avg is not None and length_avg <= 8.0:
-                ref_confidence += 0.03
-            if ref_name_hint:
+            if distinct_count_value is not None and distinct_count_value <= 50:
                 ref_confidence += 0.05
+            elif distinct_count_value is not None and distinct_count_value <= 200:
+                ref_confidence += 0.03
+            ref_confidence += name_hint_bonus
+            ref_confidence = max(0.0, ref_confidence - free_text_penalty)
             forced_type = "REF_CODE"
-            forced_confidence = round(_clamp_conf(ref_confidence, 0.7, 0.95), 3)
-            forced_rationale_parts = []
+            ref_confidence = clamp_confidence(ref_confidence, 0.7, 0.95) or 0.0
+            forced_confidence = round(ref_confidence, 3)
+            note_parts = []
             if top3_display:
-                forced_rationale_parts.append(top3_display)
+                note_parts.append(top3_display)
+            if len_spread_value is not None:
+                if len_spread_value.is_integer():
+                    spread_text = f"len spread {int(len_spread_value)}"
+                else:
+                    spread_text = f"len spread {len_spread_value:.1f}".rstrip("0").rstrip(".")
+                note_parts.append(spread_text)
+            if tight_length_spread:
+                note_parts.append("tight length spread")
             if distinct_count_value is not None and row_cnt_value:
-                forced_rationale_parts.append(
+                note_parts.append(
                     f"{distinct_count_value} distinct / {row_cnt_value} rows"
                 )
-            if length_avg is not None:
-                forced_rationale_parts.append(f"avg len {length_avg:.1f}")
+            if free_text_penalty > 0:
+                note_parts.append("wide length spread")
+            if not note_parts:
+                note_parts.append("reference code distribution")
+            forced_rationale_parts = [truncate_note("; ".join(note_parts))]
         elif (
             preliminary_best_type in {"ACCOUNT_ID", "REF_CODE"}
             and distinct_count_value is not None
@@ -817,12 +855,11 @@ def _infer_semantic_type(
         ):
             forced_type = "ENUM/STATUS"
             forced_confidence = 0.6
-            forced_rationale_parts = []
+            note_parts = []
             if top3_display:
-                forced_rationale_parts.append(top3_display)
-            forced_rationale_parts.append(
-                f"{distinct_count_value} frequent values"
-            )
+                note_parts.append(top3_display)
+            note_parts.append(f"{distinct_count_value} frequent values")
+            forced_rationale_parts = [truncate_note("; ".join(note_parts))]
 
     currency_ref = _ratio(references, "reference_currency_code")
     if currency_ref > 0:
@@ -1269,7 +1306,14 @@ def run_table_profile(
             f"{distinct_expr.format(col=qcol)} AS DISTINCTS",
             f"SUM(CASE WHEN {qcol} IS NOT NULL THEN 1 ELSE 0 END) AS NON_NULLS_COUNT",
         ]
-        if _is_numeric(dtype) or _is_temporal(dtype) or _is_string_type(dtype):
+        if _is_numeric(dtype):
+            metrics_sql.extend(
+                [
+                    f"MIN({qcol}) AS MIN_VAL",
+                    f"MAX({qcol}) AS MAX_VAL",
+                ]
+            )
+        elif _is_temporal(dtype):
             metrics_sql.extend(
                 [
                     f"MIN({qcol}) AS MIN_VAL",
@@ -1277,7 +1321,12 @@ def run_table_profile(
                 ]
             )
         else:
-            metrics_sql.extend(["NULL AS MIN_VAL", "NULL AS MAX_VAL"])
+            metrics_sql.extend(
+                [
+                    f"MIN(TO_VARCHAR({qcol})) AS MIN_VAL",
+                    f"MAX(TO_VARCHAR({qcol})) AS MAX_VAL",
+                ]
+            )
         is_string = _is_string_type(dtype)
         if is_string:
             metrics_sql.append(
@@ -1458,13 +1507,17 @@ def run_table_profile(
             except Exception:
                 distincts_int = None
 
-        min_val = _extract_row_value(row, "MIN_VAL")
-        max_val = _extract_row_value(row, "MAX_VAL")
+        min_val_raw = _extract_row_value(row, "MIN_VAL")
+        max_val_raw = _extract_row_value(row, "MAX_VAL")
+        min_val = _stringify(min_val_raw) if min_val_raw is not None else None
+        max_val = _stringify(max_val_raw) if max_val_raw is not None else None
         whitespace_rows = _extract_row_value(row, "WHITESPACE_ROWS", 0)
         avg_len_raw = _extract_row_value(row, "AVG_LEN")
         try:
             avg_len = float(avg_len_raw) if avg_len_raw is not None else None
         except Exception:
+            avg_len = None
+        if not is_string:
             avg_len = None
         try:
             whitespace_rows_int = int(whitespace_rows)
@@ -1672,24 +1725,29 @@ def run_table_profile(
             "null_pct": null_pct,
             "distincts": distincts_int,
             "distinct_pct": distinct_pct,
-            "min_val": min_val if (min_val is not None) else None,
-            "max_val": max_val if (max_val is not None) else None,
+            "min_val": min_val,
+            "max_val": max_val,
             "avg_len": avg_len,
             "whitespace_pct": whitespace_pct,
             "top_values": top_values,
             "top_coverage_pct": coverage_pct,
             "rows_profiled": rows_profiled,
+            "row_cnt": rows_profiled,
             "non_nulls": non_nulls,
+            "null_cnt": nulls_int,
             "error": None,
         }
 
         column_entry["len_min"] = len_min_val if is_string else None
         column_entry["len_max"] = len_max_val if is_string else None
+        if is_string and len_min_val is not None and len_max_val is not None:
+            column_entry["len_spread"] = float(len_max_val) - float(len_min_val)
+        else:
+            column_entry["len_spread"] = None
 
         if is_string:
             column_entry.update(
                 {
-                    "row_cnt": non_nulls,
                     "distinct_ratio": (float(distincts_int) / float(non_nulls)) if (distincts_int is not None and non_nulls) else None,
                     "top1_ratio": top1_ratio,
                     "top3_ratio": top3_ratio,
@@ -1727,6 +1785,7 @@ def run_table_profile(
                 "max": len_max_val,
                 "avg": avg_len,
                 "stddev": len_stddev_val,
+                "spread": column_entry.get("len_spread"),
             }
             if "whitespace" in char_ratios:
                 signals["whitespace_ratio"] = char_ratios.get("whitespace")
@@ -1737,6 +1796,8 @@ def run_table_profile(
                 "top3_ratio": top3_ratio,
                 "numeric_like_ratio": numeric_like_ratio,
                 "sentinel_count": sentinel_count,
+                "len_spread": column_entry.get("len_spread"),
+                "avg_len": avg_len,
             }
             signals["date_patterns"] = {str(key): date_pattern_ratios.get(key) for key in date_pattern_ratios}
             signals["date_parse"] = {
@@ -1751,7 +1812,7 @@ def run_table_profile(
                 "parsed_max": parsed_date_max,
             }
         else:
-            signals["length"] = {"min": None, "max": None, "avg": None}
+            signals["length"] = {"min": None, "max": None, "avg": None, "spread": None}
 
         column_entry["signals"] = signals
 
