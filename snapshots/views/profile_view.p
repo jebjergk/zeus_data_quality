@@ -69,6 +69,26 @@ def _safe_float(value: Any) -> Optional[float]:
         return None
 
 
+def _safe_bool(value: Any) -> Optional[bool]:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        if math.isnan(value):
+            return None
+        return bool(value)
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if not normalized:
+            return None
+        if normalized in {"true", "t", "yes", "y", "1"}:
+            return True
+        if normalized in {"false", "f", "no", "n", "0"}:
+            return False
+    return None
+
+
 @dataclass
 class ColumnProfile:
     name: str
@@ -81,6 +101,7 @@ class ColumnProfile:
     max_val: Optional[Any]
     avg_len: Optional[float]
     whitespace_pct: Optional[float]
+    whitespace_only_pct: Optional[float] = None
     row_cnt: Optional[int] = None
     distinct_ratio: Optional[float] = None
     top1_ratio: Optional[float] = None
@@ -109,6 +130,8 @@ class ColumnProfile:
     semantic_type: Optional[str] = None
     confidence: Optional[float] = None
     rationale: Optional[str] = None
+    dq_selected: Optional[bool] = None
+    dq_reason: Optional[str] = None
 
 
 def _column_profile_from_payload(column: Dict[str, Any]) -> ColumnProfile:
@@ -192,6 +215,9 @@ def _column_profile_from_payload(column: Dict[str, Any]) -> ColumnProfile:
         semantic_type=normalized.get("semantic_type"),
         confidence=_safe_float(normalized.get("confidence")),
         rationale=normalized.get("rationale"),
+        whitespace_only_pct=_safe_float(normalized.get("whitespace_only_pct")),
+        dq_selected=_safe_bool(normalized.get("dq_selected")),
+        dq_reason=_stringify_for_display(normalized.get("dq_reason")),
     )
 
 
@@ -338,6 +364,9 @@ def _profiles_to_frame(profiles: Iterable[ColumnProfile]) -> pd.DataFrame:
                 "max_val": _stringify_for_display(profile.max_val),
                 "avg_len": profile.avg_len if profile.avg_len is not None else None,
                 "whitespace_pct": round(profile.whitespace_pct, 2) if profile.whitespace_pct is not None else None,
+                "whitespace_only_pct": round(profile.whitespace_only_pct, 2)
+                if profile.whitespace_only_pct is not None
+                else None,
                 "row_cnt": profile.row_cnt,
                 "len_min": round(profile.len_min, 2) if profile.len_min is not None else None,
                 "len_max": round(profile.len_max, 2) if profile.len_max is not None else None,
@@ -368,6 +397,10 @@ def _profiles_to_frame(profiles: Iterable[ColumnProfile]) -> pd.DataFrame:
                 "semantic_type": profile.semantic_type,
                 "confidence": profile.confidence,
                 "rationale": profile.rationale,
+                "dq_selected": bool(profile.dq_selected)
+                if profile.dq_selected is not None
+                else False,
+                "dq_reason": profile.dq_reason if profile.dq_reason is not None else None,
             }
         )
     df = pd.DataFrame.from_records(records)
@@ -553,17 +586,32 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
         if save_profile:
             st.info("Saving profiles is not yet supported.")
 
-    button_cols = st.columns([1, 1, 2])
+    stored_profile_result = st.session_state.get("profile_results")
+    has_suggested_columns = False
+    if stored_profile_result:
+        for column_payload in stored_profile_result.get("columns", []):
+            if _safe_bool(column_payload.get("dq_selected")):
+                has_suggested_columns = True
+                break
+
+    button_cols = st.columns([1, 1, 1, 2])
     with button_cols[0]:
         run_profile = st.button("▶️ Run Profile", type="primary")
     with button_cols[1]:
         suggest_cfg = st.button(
             "✨ Suggest DQ Config",
             type="secondary",
-            disabled=not st.session_state.get("profile_results"),
+            disabled=not stored_profile_result,
+        )
+    with button_cols[2]:
+        use_suggested_cfg = st.button(
+            "Use suggested columns in DQ config",
+            type="secondary",
+            disabled=not (stored_profile_result and has_suggested_columns),
+            help="Load only the columns marked as suggested into the configuration editor.",
         )
 
-    profile_result = st.session_state.get("profile_results")
+    profile_result = stored_profile_result
 
     if run_profile:
         if not session:
@@ -611,27 +659,48 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
                 st.session_state["profile_results"] = profile_result
                 st.rerun()
 
-    if suggest_cfg and profile_result:
-        suggestion = build_profile_suggestion(profile_result)
+    def _load_suggestion(profile_payload: Dict[str, Any], success_message: str) -> None:
+        suggestion = build_profile_suggestion(profile_payload)
         if not suggestion:
             st.info("No suggestions available for the current profile.")
+            return
+        st.session_state["cfg_mode"] = "edit"
+        st.session_state["selected_config_id"] = None
+        st.session_state["editor_target_fqn"] = profile_payload.get("target_table")
+        st.session_state["profile_suggestion"] = suggestion
+        try:
+            current_params = dict(st.query_params)  # type: ignore[attr-defined]
+        except Exception:
+            current_params = {}
+        current_params["page"] = "cfg"
+        try:
+            st.query_params = current_params  # type: ignore[attr-defined]
+        except Exception:
+            pass
+        st.session_state["page"] = "cfg"
+        st.success(success_message)
+        st.rerun()
+
+    if suggest_cfg and profile_result:
+        _load_suggestion(profile_result, "Loaded profile suggestion into the configuration editor.")
+
+    if use_suggested_cfg and profile_result:
+        selected_columns: List[Dict[str, Any]] = []
+        for column_payload in profile_result.get("columns", []):
+            if _safe_bool(column_payload.get("dq_selected")):
+                selected_columns.append(column_payload)
+        if not selected_columns:
+            st.info("No suggested columns available for the current profile.")
         else:
-            st.session_state["cfg_mode"] = "edit"
-            st.session_state["selected_config_id"] = None
-            st.session_state["editor_target_fqn"] = profile_result.get("target_table")
-            st.session_state["profile_suggestion"] = suggestion
-            try:
-                current_params = dict(st.query_params)  # type: ignore[attr-defined]
-            except Exception:
-                current_params = {}
-            current_params["page"] = "cfg"
-            try:
-                st.query_params = current_params  # type: ignore[attr-defined]
-            except Exception:
-                pass
-            st.session_state["page"] = "cfg"
-            st.success("Loaded profile suggestion into the configuration editor.")
-            st.rerun()
+            filtered_profile = dict(profile_result)
+            filtered_summary = dict(filtered_profile.get("summary") or {})
+            filtered_profile["columns"] = selected_columns
+            filtered_summary["columns"] = len(selected_columns)
+            filtered_profile["summary"] = filtered_summary
+            _load_suggestion(
+                filtered_profile,
+                "Loaded suggested columns into the configuration editor.",
+            )
 
     if not profile_result:
         return
@@ -654,6 +723,24 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
     profiles_raw = profile_result.get("columns", [])
     profiles = [_column_profile_from_payload(col) for col in profiles_raw]
     df = _profiles_to_frame(profiles)
+    required_defaults: Dict[str, Any] = {
+        "dq_selected": False,
+        "dq_reason": "",
+        "whitespace_pct": None,
+        "whitespace_only_pct": None,
+    }
+    for column_name, default_value in required_defaults.items():
+        if column_name not in df.columns:
+            df[column_name] = default_value
+    if "dq_selected" in df.columns:
+        df["dq_selected"] = df["dq_selected"].apply(lambda value: (_safe_bool(value) or False))
+    if "dq_reason" in df.columns:
+        df["dq_reason"] = df["dq_reason"].apply(
+            lambda value: _stringify_for_display(value) or ""
+        )
+    for whitespace_column in ("whitespace_pct", "whitespace_only_pct"):
+        if whitespace_column in df.columns:
+            df[whitespace_column] = pd.to_numeric(df[whitespace_column], errors="coerce")
 
     filter_box = st.container()
     with filter_box:
@@ -672,6 +759,10 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
         filter_contact = semantic_cols[4].checkbox("Contact", value=False)
         filter_date_text = semantic_cols[5].checkbox("Date (Text)", value=False)
         filter_ref_codes = semantic_cols[6].checkbox("Reference Codes", value=False)
+
+    total_columns = int(df.shape[0])
+    suggested_columns = int(df["dq_selected"].sum()) if not df.empty else 0
+    st.caption(f"Suggested: {suggested_columns} columns (of {total_columns}).")
 
     save_enabled = bool(session and meta_db and meta_schema)
     if not save_enabled:
@@ -773,10 +864,12 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
         filtered_df = filtered_df[filtered_df["semantic_type"].isin(allowed_types)]
     display_df = filtered_df.copy()
     grid_columns = [
+        "Suggested",
         "Column",
         "Physical Type",
         "Nulls",
         "Distinct",
+        "Whitespace %",
         "Len (min/avg/max)",
         "Min Value",
         "Max Value",
@@ -883,8 +976,37 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
                 return "background-color: #f9a825; color: #000000;"
             return "background-color: #9e9e9e; color: #ffffff;"
 
+        def _format_suggested_display(value: Any) -> str:
+            return "✅" if bool(value) else "—"
+
+        def _suggested_chip_style(value: Any) -> str:
+            if bool(value):
+                return (
+                    "background-color: #2e7d32; color: #ffffff; border-radius: 9999px; "
+                    "padding: 0.1rem 0.5rem; text-align: center;"
+                )
+            return "text-align: center;"
+
+        def _format_whitespace_display(value: Any) -> str:
+            numeric = _safe_float(value)
+            if numeric is None or numeric <= 0:
+                return "—"
+            return f"{numeric:.2f}%"
+
+        def _whitespace_style(value: Any) -> str:
+            numeric = _safe_float(value)
+            if numeric is None or numeric <= 0:
+                return ""
+            if numeric > 20.0:
+                return "color: #c62828;"
+            if numeric > 5.0:
+                return "color: #f9a825;"
+            return ""
+
         def _compose_note(row: pd.Series) -> str:
-            text_value = _stringify_for_display(row.get("rationale"))
+            text_value = _stringify_for_display(row.get("dq_reason"))
+            if not text_value:
+                text_value = _stringify_for_display(row.get("rationale"))
             if not text_value:
                 text_value = _stringify_for_display(row.get("error"))
             note = str(text_value or "").strip()
@@ -903,12 +1025,15 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
                 confidence_raw *= 100.0
             if confidence_raw is not None:
                 confidence_raw = max(0.0, min(confidence_raw, 100.0))
+            whitespace_value = _safe_float(row.get("whitespace_pct"))
             formatted_rows.append(
                 {
+                    "Suggested": bool(row.get("dq_selected")),
                     "Column": str(row.get("column_name") or ""),
                     "Physical Type": str(row.get("data_type") or ""),
                     "Nulls": nulls_text,
                     "Distinct": distinct_text,
+                    "Whitespace %": whitespace_value,
                     "Len (min/avg/max)": _format_length_stats_cell(row),
                     "Min Value": min_value,
                     "Max Value": max_value,
@@ -919,7 +1044,15 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
             )
 
         grid_df = pd.DataFrame(formatted_rows, columns=grid_columns)
-        styler = grid_df.style.format({"Confidence": _format_confidence_display})
+        styler = grid_df.style.format(
+            {
+                "Suggested": _format_suggested_display,
+                "Whitespace %": _format_whitespace_display,
+                "Confidence": _format_confidence_display,
+            }
+        )
+        styler = styler.applymap(_suggested_chip_style, subset=["Suggested"])
+        styler = styler.applymap(_whitespace_style, subset=["Whitespace %"])
         styler = styler.applymap(_confidence_style, subset=["Confidence"])
         st.dataframe(styler, hide_index=True, use_container_width=True)
     else:
