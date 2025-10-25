@@ -7,7 +7,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from numbers import Integral, Real
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 import pandas as pd
 import streamlit as st
@@ -1035,6 +1035,18 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
                 return {"color": "#f9a825", "font-weight": "600"}
             return {}
 
+        def _column_config_with_optional_style(
+            factory: Callable[..., Any], *args: Any, cell_style: Optional[Callable[[Any], Dict[str, str]]] = None, **kwargs: Any
+        ) -> Any:
+            """Create a column config, gracefully ignoring unsupported cell_style argument."""
+
+            if cell_style is None:
+                return factory(*args, **kwargs)
+            try:
+                return factory(*args, cell_style=cell_style, **kwargs)
+            except TypeError:
+                return factory(*args, **kwargs)
+
         def _compose_note(row: pd.Series) -> str:
             text_value = _stringify_for_display(row.get("dq_reason"))
             if not text_value:
@@ -1104,13 +1116,15 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
             "Avg Length": st.column_config.Column("Avg Length", disabled=True),
             "Min Value": st.column_config.Column("Min Value", disabled=True),
             "Max Value": st.column_config.Column("Max Value", disabled=True),
-            "Whitespace %": st.column_config.Column(
+            "Whitespace %": _column_config_with_optional_style(
+                st.column_config.Column,
                 "Whitespace %",
                 disabled=True,
                 cell_style=_whitespace_cell_style,
             ),
             "Guessed Type": st.column_config.Column("Guessed Type", disabled=True),
-            "Confidence": st.column_config.Column(
+            "Confidence": _column_config_with_optional_style(
+                st.column_config.Column,
                 "Confidence",
                 disabled=True,
                 cell_style=_confidence_style,
