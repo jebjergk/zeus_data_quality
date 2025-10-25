@@ -1117,14 +1117,14 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
             "Min Value": st.column_config.Column("Min Value", disabled=True),
             "Max Value": st.column_config.Column("Max Value", disabled=True),
             "Whitespace %": _column_config_with_optional_style(
-                st.column_config.Column,
+                st.column_config.TextColumn,
                 "Whitespace %",
                 disabled=True,
                 cell_style=_whitespace_cell_style,
             ),
             "Guessed Type": st.column_config.Column("Guessed Type", disabled=True),
             "Confidence": _column_config_with_optional_style(
-                st.column_config.Column,
+                st.column_config.TextColumn,
                 "Confidence",
                 disabled=True,
                 cell_style=_confidence_style,
