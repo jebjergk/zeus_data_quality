@@ -1322,7 +1322,8 @@ def run_table_profile(
             f"{distinct_expr.format(col=qcol)} AS DISTINCTS",
             f"SUM(CASE WHEN {qcol} IS NOT NULL THEN 1 ELSE 0 END) AS NON_NULLS_COUNT",
         ]
-        if _is_numeric(dtype):
+        is_numeric = _is_numeric(dtype)
+        if is_numeric:
             metrics_sql.extend(
                 [
                     f"MIN({qcol}) AS MIN_VAL",
@@ -1350,9 +1351,16 @@ def run_table_profile(
             )
         else:
             metrics_sql.append("0 AS WHITESPACE_ROWS")
+        length_expr: Optional[str]
         if is_string:
+            length_expr = f"LENGTH({qcol}::STRING)"
+        elif is_numeric:
+            length_expr = f"LENGTH(TO_VARCHAR({qcol}))"
+        else:
+            length_expr = None
+        if length_expr:
             metrics_sql.append(
-                f"AVG(CASE WHEN {qcol} IS NOT NULL THEN LENGTH({qcol}::STRING) END) AS AVG_LEN"
+                f"AVG(CASE WHEN {qcol} IS NOT NULL THEN {length_expr} END) AS AVG_LEN"
             )
         else:
             metrics_sql.append("NULL AS AVG_LEN")
@@ -1371,17 +1379,18 @@ def run_table_profile(
         numeric_like_alias: Optional[str] = None
         sentinel_alias: Optional[str] = None
         len_stddev_alias: Optional[str] = None
-        if is_string:
+        if length_expr:
             metrics_sql.extend(
                 [
-                    f"MIN(LENGTH({qcol}::STRING)) AS LEN_MIN",
-                    f"MAX(LENGTH({qcol}::STRING)) AS LEN_MAX",
+                    f"MIN({length_expr}) AS LEN_MIN",
+                    f"MAX({length_expr}) AS LEN_MAX",
                 ]
             )
             len_stddev_alias = "LEN_STDDEV"
             metrics_sql.append(
-                f"STDDEV_SAMP(LENGTH({qcol}::STRING)) AS {len_stddev_alias}"
+                f"STDDEV_SAMP({length_expr}) AS {len_stddev_alias}"
             )
+        if is_string:
             for key, pattern in SEMANTIC_REGEX_PATTERNS.items():
                 alias = f"REGEX_{key.upper()}_MATCHES"
                 pattern_sql = pattern.replace("\\", "\\\\")
@@ -1502,10 +1511,78 @@ def run_table_profile(
             sentinel_values = ()
 
         sql = "SELECT " + ", ".join(metrics_sql) + f" FROM {sampled_ref}"
+        error_message: Optional[str] = None
         try:
             row = _collect_single_row(session, sql)
-        except Exception:
-            row = None
+        except Exception as exc:
+            error_message = f"{exc.__class__.__name__}: {exc}"
+            logger.warning("Profile query failed for column %s: %s", name, error_message)
+            minimal_metrics = [
+                "COUNT(*) AS ROW_CNT",
+                f"SUM(CASE WHEN {qcol} IS NULL THEN 1 ELSE 0 END) AS NULLS",
+                f"{distinct_expr.format(col=qcol)} AS DISTINCTS",
+                f"SUM(CASE WHEN {qcol} IS NOT NULL THEN 1 ELSE 0 END) AS NON_NULLS_COUNT",
+            ]
+            if is_numeric:
+                minimal_metrics.extend(
+                    [
+                        f"MIN({qcol}) AS MIN_VAL",
+                        f"MAX({qcol}) AS MAX_VAL",
+                    ]
+                )
+            elif _is_temporal(dtype):
+                minimal_metrics.extend(
+                    [
+                        f"MIN({qcol}) AS MIN_VAL",
+                        f"MAX({qcol}) AS MAX_VAL",
+                    ]
+                )
+            else:
+                minimal_metrics.extend(
+                    [
+                        f"MIN(TO_VARCHAR({qcol})) AS MIN_VAL",
+                        f"MAX(TO_VARCHAR({qcol})) AS MAX_VAL",
+                    ]
+                )
+            if is_string:
+                minimal_metrics.append(
+                    f"SUM(CASE WHEN {qcol} IS NOT NULL AND {qcol}::STRING != TRIM({qcol}::STRING) THEN 1 ELSE 0 END) AS WHITESPACE_ROWS"
+                )
+            else:
+                minimal_metrics.append("0 AS WHITESPACE_ROWS")
+            if length_expr:
+                minimal_metrics.extend(
+                    [
+                        f"AVG(CASE WHEN {qcol} IS NOT NULL THEN {length_expr} END) AS AVG_LEN",
+                        f"MIN({length_expr}) AS LEN_MIN",
+                        f"MAX({length_expr}) AS LEN_MAX",
+                        f"STDDEV_SAMP({length_expr}) AS LEN_STDDEV",
+                    ]
+                )
+            else:
+                minimal_metrics.extend(
+                    [
+                        "NULL AS AVG_LEN",
+                        "NULL AS LEN_MIN",
+                        "NULL AS LEN_MAX",
+                        "NULL AS LEN_STDDEV",
+                    ]
+                )
+            minimal_sql = "SELECT " + ", ".join(minimal_metrics) + f" FROM {sampled_ref}"
+            try:
+                row = _collect_single_row(session, minimal_sql)
+            except Exception as fallback_exc:
+                fallback_message = f"{fallback_exc.__class__.__name__}: {fallback_exc}"
+                logger.warning(
+                    "Minimal profile query failed for column %s: %s",
+                    name,
+                    fallback_message,
+                )
+                if error_message:
+                    error_message = f"{error_message}; fallback failed: {fallback_message}"
+                else:
+                    error_message = f"fallback failed: {fallback_message}"
+                row = None
 
         row_cnt_raw = _extract_row_value(row, "ROW_CNT", rows_profiled)
         try:
@@ -1557,8 +1634,6 @@ def run_table_profile(
             avg_len_value = float(avg_len_raw) if avg_len_raw is not None else None
         except Exception:
             avg_len_value = None
-        if not is_string:
-            avg_len_value = None
 
         non_nulls = max(row_cnt - nulls_int, 0)
         null_pct = (float(nulls_int) / float(row_cnt)) if row_cnt else 0.0
@@ -1585,13 +1660,16 @@ def run_table_profile(
                 ):
                     logger.warning("avg_len value zero for column %s", name)
                     avg_len_debug_note = "avg_len missing; replaced FILTER with CASE"
+        elif is_numeric:
+            avg_len_final = float(avg_len_value) if avg_len_value is not None else None
         else:
             avg_len_final = None
 
         len_min_val: Optional[float] = None
         len_max_val: Optional[float] = None
         len_stddev_val: Optional[float] = None
-        if is_string:
+        supports_length_stats = length_expr is not None
+        if supports_length_stats:
             len_min_raw = _extract_row_value(row, "LEN_MIN")
             len_max_raw = _extract_row_value(row, "LEN_MAX")
             try:
@@ -1779,7 +1857,7 @@ def run_table_profile(
             "distinct_pct": float(distinct_pct) if distinct_pct is not None else None,
             "min_val": min_val,
             "max_val": max_val,
-            "avg_len": avg_len_final if is_string else None,
+            "avg_len": avg_len_final if supports_length_stats else None,
             "whitespace_pct": whitespace_pct,
             "top_values": top_values,
             "top_coverage_pct": coverage_pct,
@@ -1787,7 +1865,7 @@ def run_table_profile(
             "row_cnt": row_cnt,
             "non_nulls": non_nulls,
             "null_cnt": nulls_int,
-            "error": None,
+            "error": error_message,
         }
         if avg_len_debug_note:
             existing_note = column_entry.get("note")
@@ -1796,9 +1874,9 @@ def run_table_profile(
             else:
                 column_entry["note"] = avg_len_debug_note
 
-        column_entry["len_min"] = len_min_val if is_string else None
-        column_entry["len_max"] = len_max_val if is_string else None
-        if is_string and len_min_val is not None and len_max_val is not None:
+        column_entry["len_min"] = len_min_val if supports_length_stats else None
+        column_entry["len_max"] = len_max_val if supports_length_stats else None
+        if supports_length_stats and len_min_val is not None and len_max_val is not None:
             column_entry["len_spread"] = float(len_max_val) - float(len_min_val)
         else:
             column_entry["len_spread"] = None
@@ -1837,7 +1915,7 @@ def run_table_profile(
             "reference_matches": reference_ratios,
             "hints": hints,
         }
-        if is_string:
+        if supports_length_stats:
             signals["length"] = {
                 "min": len_min_val,
                 "max": len_max_val,
@@ -1845,6 +1923,9 @@ def run_table_profile(
                 "stddev": len_stddev_val,
                 "spread": column_entry.get("len_spread"),
             }
+        else:
+            signals["length"] = {"min": None, "max": None, "avg": None, "spread": None}
+        if is_string:
             if "whitespace" in char_ratios:
                 signals["whitespace_ratio"] = char_ratios.get("whitespace")
             signals["string_stats"] = {
@@ -1869,8 +1950,6 @@ def run_table_profile(
                 "parsed_min": parsed_date_min,
                 "parsed_max": parsed_date_max,
             }
-        else:
-            signals["length"] = {"min": None, "max": None, "avg": None, "spread": None}
 
         column_entry["signals"] = signals
 
