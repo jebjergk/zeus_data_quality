@@ -400,7 +400,9 @@ def _profiles_to_frame(profiles: Iterable[ColumnProfile]) -> pd.DataFrame:
                 "dq_selected": bool(profile.dq_selected)
                 if profile.dq_selected is not None
                 else False,
-                "dq_reason": profile.dq_reason if profile.dq_reason is not None else None,
+                "dq_reason": str(profile.dq_reason)
+                if profile.dq_reason is not None
+                else "",
             }
         )
     df = pd.DataFrame.from_records(records)
@@ -594,6 +596,31 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
                 has_suggested_columns = True
                 break
 
+    selection_counts_state = st.session_state.get("profile_selection_counts")
+    if (
+        isinstance(selection_counts_state, tuple)
+        and len(selection_counts_state) == 2
+        and all(isinstance(val, (int, float)) for val in selection_counts_state)
+    ):
+        selection_counts = (
+            int(selection_counts_state[0]),
+            int(selection_counts_state[1]),
+        )
+    elif stored_profile_result:
+        selected_count = 0
+        total_count = 0
+        for column_payload in stored_profile_result.get("columns", []):
+            if _safe_bool(column_payload.get("dq_selected")):
+                selected_count += 1
+            total_count += 1
+        selection_counts = (selected_count, total_count)
+    else:
+        selection_counts = (0, 0)
+
+    st.caption(
+        f"Suggested: {int(selection_counts[0])} of {int(selection_counts[1])} columns selected"
+    )
+
     button_cols = st.columns([1, 1, 1, 2])
     with button_cols[0]:
         run_profile = st.button("▶️ Run Profile", type="primary")
@@ -681,14 +708,27 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
         st.success(success_message)
         st.rerun()
 
+    def _selected_columns(profile_payload: Dict[str, Any]) -> List[Dict[str, Any]]:
+        selected: List[Dict[str, Any]] = []
+        for column_payload in profile_payload.get("columns", []):
+            if _safe_bool(column_payload.get("dq_selected")):
+                selected.append(column_payload)
+        return selected
+
     if suggest_cfg and profile_result:
-        _load_suggestion(profile_result, "Loaded profile suggestion into the configuration editor.")
+        selected_columns = _selected_columns(profile_result)
+        if not selected_columns:
+            st.info("Select at least one column before generating DQ suggestions.")
+        else:
+            filtered_profile = dict(profile_result)
+            filtered_summary = dict(filtered_profile.get("summary") or {})
+            filtered_summary["columns"] = len(selected_columns)
+            filtered_profile["summary"] = filtered_summary
+            filtered_profile["columns"] = selected_columns
+            _load_suggestion(filtered_profile, "Loaded profile suggestion into the configuration editor.")
 
     if use_suggested_cfg and profile_result:
-        selected_columns: List[Dict[str, Any]] = []
-        for column_payload in profile_result.get("columns", []):
-            if _safe_bool(column_payload.get("dq_selected")):
-                selected_columns.append(column_payload)
+        selected_columns = _selected_columns(profile_result)
         if not selected_columns:
             st.info("No suggested columns available for the current profile.")
         else:
@@ -759,10 +799,6 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
         filter_contact = semantic_cols[4].checkbox("Contact", value=False)
         filter_date_text = semantic_cols[5].checkbox("Date (Text)", value=False)
         filter_ref_codes = semantic_cols[6].checkbox("Reference Codes", value=False)
-
-    total_columns = int(df.shape[0])
-    suggested_columns = int(df["dq_selected"].sum()) if not df.empty else 0
-    st.caption(f"Suggested: {suggested_columns} columns (of {total_columns}).")
 
     save_enabled = bool(session and meta_db and meta_schema)
     if not save_enabled:
@@ -864,15 +900,15 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
         filtered_df = filtered_df[filtered_df["semantic_type"].isin(allowed_types)]
     display_df = filtered_df.copy()
     grid_columns = [
-        "Suggested",
+        "Include",
         "Column",
         "Physical Type",
         "Nulls",
         "Distinct",
-        "Whitespace %",
-        "Len (min/avg/max)",
+        "Avg Length",
         "Min Value",
         "Max Value",
+        "Whitespace %",
         "Guessed Type",
         "Confidence",
         "Note",
@@ -967,41 +1003,37 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
                 formatted = f"{value:.0f}"
             return f"{formatted}%"
 
-        def _confidence_style(value: Optional[float]) -> str:
-            if value is None or math.isnan(value):
-                return ""
-            if value >= 90.0:
-                return "background-color: #2e7d32; color: #ffffff;"
-            if value >= 75.0:
-                return "background-color: #f9a825; color: #000000;"
-            return "background-color: #9e9e9e; color: #ffffff;"
-
-        def _format_suggested_display(value: Any) -> str:
-            return "✅" if bool(value) else "—"
-
-        def _suggested_chip_style(value: Any) -> str:
-            if bool(value):
-                return (
-                    "background-color: #2e7d32; color: #ffffff; border-radius: 9999px; "
-                    "padding: 0.1rem 0.5rem; text-align: center;"
-                )
-            return "text-align: center;"
+        def _confidence_style(value: Any) -> Dict[str, str]:
+            numeric = _safe_float(value)
+            if numeric is None:
+                if isinstance(value, str) and value.endswith("%"):
+                    numeric = _safe_float(value.replace("%", ""))
+            if numeric is None or math.isnan(float(numeric)):
+                return {}
+            if numeric >= 90.0:
+                return {"backgroundColor": "#2e7d32", "color": "#ffffff"}
+            if numeric >= 75.0:
+                return {"backgroundColor": "#f9a825", "color": "#000000"}
+            return {"backgroundColor": "#9e9e9e", "color": "#ffffff"}
 
         def _format_whitespace_display(value: Any) -> str:
             numeric = _safe_float(value)
-            if numeric is None or numeric <= 0:
+            if numeric is None or math.isclose(numeric, 0.0, abs_tol=1e-9):
                 return "—"
-            return f"{numeric:.2f}%"
+            return f"{numeric:.1f}%"
 
-        def _whitespace_style(value: Any) -> str:
+        def _whitespace_cell_style(value: Any) -> Dict[str, str]:
             numeric = _safe_float(value)
+            if numeric is None:
+                if isinstance(value, str) and value.endswith("%"):
+                    numeric = _safe_float(value.replace("%", ""))
             if numeric is None or numeric <= 0:
-                return ""
-            if numeric > 20.0:
-                return "color: #c62828;"
-            if numeric > 5.0:
-                return "color: #f9a825;"
-            return ""
+                return {}
+            if numeric >= 20.0:
+                return {"color": "#c62828", "font-weight": "600"}
+            if numeric >= 5.0:
+                return {"color": "#f9a825", "font-weight": "600"}
+            return {}
 
         def _compose_note(row: pd.Series) -> str:
             text_value = _stringify_for_display(row.get("dq_reason"))
@@ -1014,49 +1046,126 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
                 return note[:117] + "..."
             return note
 
-        formatted_rows: List[Dict[str, Any]] = []
-        for _, row in display_df.iterrows():
-            nulls_text = _format_count_with_pct(row.get("nulls"), row.get("null_pct"))
-            distinct_text = _format_count_with_pct(row.get("distincts"), row.get("distinct_pct"))
-            min_value = _format_value_cell(row.get("min_val"))
-            max_value = _format_value_cell(row.get("max_val"))
-            confidence_raw = _safe_float(row.get("confidence"))
-            if confidence_raw is not None and confidence_raw <= 1.0:
-                confidence_raw *= 100.0
-            if confidence_raw is not None:
-                confidence_raw = max(0.0, min(confidence_raw, 100.0))
-            whitespace_value = _safe_float(row.get("whitespace_pct"))
-            formatted_rows.append(
-                {
-                    "Suggested": bool(row.get("dq_selected")),
-                    "Column": str(row.get("column_name") or ""),
-                    "Physical Type": str(row.get("data_type") or ""),
-                    "Nulls": nulls_text,
-                    "Distinct": distinct_text,
-                    "Whitespace %": whitespace_value,
-                    "Len (min/avg/max)": _format_length_stats_cell(row),
-                    "Min Value": min_value,
-                    "Max Value": max_value,
-                    "Guessed Type": _format_semantic_label(row.get("semantic_type")),
-                    "Confidence": confidence_raw,
-                    "Note": _compose_note(row),
-                }
-            )
+        display_df_local = display_df.copy()
+        display_df_local["Include"] = (
+            display_df_local.get("dq_selected", False).apply(lambda value: _safe_bool(value) or False)
+        )
+        display_df_local["Include"] = display_df_local["Include"].astype(bool)
+        display_df_local["Column"] = display_df_local.get("column_name", "").fillna("").astype(str)
+        display_df_local["Physical Type"] = (
+            display_df_local.get("data_type", "").fillna("").astype(str)
+        )
+        display_df_local["Nulls"] = display_df_local.apply(
+            lambda row: _format_count_with_pct(row.get("nulls"), row.get("null_pct")), axis=1
+        )
+        display_df_local["Distinct"] = display_df_local.apply(
+            lambda row: _format_count_with_pct(row.get("distincts"), row.get("distinct_pct")), axis=1
+        )
+        display_df_local["Avg Length"] = display_df_local.apply(
+            _format_length_stats_cell, axis=1
+        )
+        display_df_local["Min Value"] = display_df_local["min_val"].apply(_format_value_cell)
+        display_df_local["Max Value"] = display_df_local["max_val"].apply(_format_value_cell)
+        display_df_local["Guessed Type"] = display_df_local["semantic_type"].apply(
+            _format_semantic_label
+        )
+        display_df_local["Whitespace %"] = display_df_local["whitespace_pct"].apply(
+            _format_whitespace_display
+        )
 
-        grid_df = pd.DataFrame(formatted_rows, columns=grid_columns)
-        styler = grid_df.style.format(
+        def _normalize_confidence(raw_value: Any) -> Optional[float]:
+            confidence_raw = _safe_float(raw_value)
+            if confidence_raw is None:
+                return None
+            if confidence_raw <= 1.0:
+                confidence_raw *= 100.0
+            confidence_raw = max(0.0, min(confidence_raw, 100.0))
+            return confidence_raw
+
+        display_df_local["_confidence_pct"] = display_df_local["confidence"].apply(
+            _normalize_confidence
+        )
+        display_df_local["Confidence"] = display_df_local["_confidence_pct"].apply(
+            lambda value: _format_confidence_display(value) or "—"
+        )
+        display_df_local["Note"] = display_df_local.apply(_compose_note, axis=1)
+
+        editor_df = display_df_local[grid_columns].copy()
+        editor_df["Include"] = editor_df["Include"].astype(bool)
+        column_config = {
+            "Include": st.column_config.CheckboxColumn(
+                "Include",
+                help="Toggle to include the column in downstream DQ suggestions.",
+            ),
+            "Column": st.column_config.Column("Column", disabled=True),
+            "Physical Type": st.column_config.Column("Physical Type", disabled=True),
+            "Nulls": st.column_config.Column("Nulls", disabled=True),
+            "Distinct": st.column_config.Column("Distinct", disabled=True),
+            "Avg Length": st.column_config.Column("Avg Length", disabled=True),
+            "Min Value": st.column_config.Column("Min Value", disabled=True),
+            "Max Value": st.column_config.Column("Max Value", disabled=True),
+            "Whitespace %": st.column_config.Column(
+                "Whitespace %",
+                disabled=True,
+                cell_style=_whitespace_cell_style,
+            ),
+            "Guessed Type": st.column_config.Column("Guessed Type", disabled=True),
+            "Confidence": st.column_config.Column(
+                "Confidence",
+                disabled=True,
+                cell_style=_confidence_style,
+            ),
+            "Note": st.column_config.Column("Note", disabled=True),
+        }
+
+        edited = st.data_editor(
+            editor_df,
+            use_container_width=True,
+            hide_index=True,
+            column_config=column_config,
+            key="profile_grid_editor",
+        )
+
+        selected_total = 0
+        include_total = 0
+        include_map: Dict[str, bool] = {}
+        if isinstance(edited, pd.DataFrame) and not edited.empty:
+            include_series = edited.get("Include")
+            column_series = edited.get("Column")
+            if include_series is not None and column_series is not None:
+                include_flags = include_series.fillna(False).astype(bool)
+                include_total = int(include_flags.shape[0])
+                selected_total = int(include_flags.sum())
+                include_map = {
+                    str(column_series.iloc[idx]): bool(include_flags.iloc[idx])
+                    for idx in range(len(include_flags))
+                }
+        st.session_state["profile_selection_counts"] = (selected_total, include_total)
+
+        if include_map and profile_result:
+            for column_payload in profile_result.get("columns", []):
+                column_name = str(column_payload.get("column_name") or "")
+                if column_name in include_map:
+                    column_payload["dq_selected"] = include_map[column_name]
+            st.session_state["profile_results"] = profile_result
+
+    else:
+        empty_df = pd.DataFrame(
             {
-                "Suggested": _format_suggested_display,
-                "Whitespace %": _format_whitespace_display,
-                "Confidence": _format_confidence_display,
+                column: pd.Series(dtype="bool" if column == "Include" else "object")
+                for column in grid_columns
             }
         )
-        styler = styler.applymap(_suggested_chip_style, subset=["Suggested"])
-        styler = styler.applymap(_whitespace_style, subset=["Whitespace %"])
-        styler = styler.applymap(_confidence_style, subset=["Confidence"])
-        st.dataframe(styler, hide_index=True, use_container_width=True)
-    else:
-        st.dataframe(pd.DataFrame(columns=grid_columns), hide_index=True, use_container_width=True)
+        st.data_editor(
+            empty_df,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "Include": st.column_config.CheckboxColumn("Include"),
+            },
+            key="profile_grid_editor",
+        )
+        st.session_state["profile_selection_counts"] = (0, 0)
 
     if filtered_df.empty:
         st.info("No columns matched the selected filters.")
