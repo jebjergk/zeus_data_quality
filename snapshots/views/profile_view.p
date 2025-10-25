@@ -777,7 +777,7 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
         "Physical Type",
         "Nulls",
         "Distinct",
-        "Avg Length",
+        "Len (min/avg/max)",
         "Min Value",
         "Max Value",
         "Guessed Type",
@@ -788,6 +788,26 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
         def _is_string_type_name(type_name: Any) -> bool:
             upper = str(type_name or "").upper()
             return any(token in upper for token in ("CHAR", "STRING", "TEXT", "VARCHAR"))
+
+        def _is_numeric_type_name(type_name: Any) -> bool:
+            upper = str(type_name or "").upper()
+            return any(
+                token in upper
+                for token in (
+                    "NUMBER",
+                    "NUMERIC",
+                    "DECIMAL",
+                    "INT",
+                    "INTEGER",
+                    "BIGINT",
+                    "SMALLINT",
+                    "TINYINT",
+                    "BYTEINT",
+                    "FLOAT",
+                    "DOUBLE",
+                    "REAL",
+                )
+            )
 
         def _format_count_with_pct(count_value: Any, pct_value: Any) -> str:
             count_int = _safe_int(count_value)
@@ -802,13 +822,28 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
                 parts.append(f"({pct_value:.1f}%)")
             return " ".join(parts) if parts else "—"
 
-        def _format_avg_length_cell(row: pd.Series) -> str:
-            if not _is_string_type_name(row.get("data_type")):
+        def _format_length_stats_cell(row: pd.Series) -> str:
+            data_type = row.get("data_type")
+            if not (_is_string_type_name(data_type) or _is_numeric_type_name(data_type)):
                 return "—"
+
+            len_min_value = _safe_float(row.get("len_min"))
             avg_value = _safe_float(row.get("avg_len"))
-            if avg_value is None:
-                return "—"
-            return f"{avg_value:.1f}"
+            len_max_value = _safe_float(row.get("len_max"))
+
+            def _fmt_bound(value: Optional[float]) -> str:
+                if value is None:
+                    return "—"
+                try:
+                    return f"{int(round(value))}"
+                except Exception:
+                    return "—"
+
+            min_display = _fmt_bound(len_min_value)
+            avg_display = f"{avg_value:.1f}" if avg_value is not None else "—"
+            max_display = _fmt_bound(len_max_value)
+
+            return "/".join([min_display, avg_display, max_display])
 
         def _format_value_cell(raw_value: Any) -> str:
             text_value = _stringify_for_display(raw_value)
@@ -874,7 +909,7 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
                     "Physical Type": str(row.get("data_type") or ""),
                     "Nulls": nulls_text,
                     "Distinct": distinct_text,
-                    "Avg Length": _format_avg_length_cell(row),
+                    "Len (min/avg/max)": _format_length_stats_cell(row),
                     "Min Value": min_value,
                     "Max Value": max_value,
                     "Guessed Type": _format_semantic_label(row.get("semantic_type")),
