@@ -377,6 +377,7 @@ def _infer_semantic_type(
     string_stats = signals.get("string_stats", {}) or {}
     date_patterns = signals.get("date_patterns", {}) or {}
     date_parse = signals.get("date_parse", {}) or {}
+    num_date = signals.get("date_parse_numeric") or {}
 
     def _as_float(value: Any) -> Optional[float]:
         try:
@@ -457,6 +458,8 @@ def _infer_semantic_type(
     distincts = column_entry.get("distincts")
     non_nulls = int(column_entry.get("non_nulls") or 0)
     rows_profiled = int(column_entry.get("rows_profiled") or 0)
+    profile_min: Optional[Any] = column_entry.get("min_val")
+    profile_max: Optional[Any] = column_entry.get("max_val")
 
     def _ratio(mapping: Dict[str, Any], key: str) -> float:
         value = mapping.get(key)
@@ -671,6 +674,22 @@ def _infer_semantic_type(
         note_text = "; ".join(part for part in note_parts if part)
         forced_type = "DATE_IN_TEXT"
         forced_rationale_parts = [truncate_note(note_text)]
+
+    if (
+        not forced_type
+        and _is_numeric(data_type)
+        and float(num_date.get("yyyymmdd_ratio") or 0.0) >= 0.6
+    ):
+        forced_type = "DATE_IN_TEXT"
+        forced_confidence = clamp_confidence(0.8, 0.75, 0.95)
+        forced_rationale_parts.append(
+            "numeric column parses as YYYYMMDD ≥ 60%"
+        )
+        payload_min = num_date.get("parsed_min")
+        payload_max = num_date.get("parsed_max")
+        if payload_min or payload_max:
+            profile_min = payload_min or profile_min
+            profile_max = payload_max or profile_max
 
     if not forced_type:
         row_cnt_value = _as_int(column_entry.get("row_cnt"))
@@ -1094,8 +1113,6 @@ def _infer_semantic_type(
             rationales.setdefault(best_type, []).append("defaulting to generic identifier due to lack of stronger signals")
 
     forced_rationale = "; ".join(part for part in forced_rationale_parts if part)
-    profile_min: Optional[Any] = column_entry.get("min_val")
-    profile_max: Optional[Any] = column_entry.get("max_val")
     if best_type == "DATE_IN_TEXT":
         profile_min = parsed_date_min or profile_min
         profile_max = parsed_date_max or profile_max
@@ -1327,12 +1344,32 @@ def run_table_profile(
             f"{distinct_expr.format(col=qcol)} AS DISTINCTS",
             f"SUM(CASE WHEN {qcol} IS NOT NULL THEN 1 ELSE 0 END) AS NON_NULLS_COUNT",
         ]
+        num_date_matches_alias: Optional[str] = None
+        num_date_min_alias: Optional[str] = None
+        num_date_max_alias: Optional[str] = None
         is_numeric = _is_numeric(dtype)
         if is_numeric:
             metrics_sql.extend(
                 [
                     f"MIN({qcol}) AS MIN_VAL",
                     f"MAX({qcol}) AS MAX_VAL",
+                ]
+            )
+            num_date_matches_alias = "NUM_YYYYMMDD_MATCHES"
+            num_date_min_alias = "NUM_YYYYMMDD_MIN"
+            num_date_max_alias = "NUM_YYYYMMDD_MAX"
+            metrics_sql.extend(
+                [
+                    (
+                        "SUM(CASE WHEN TRY_TO_DATE(TO_VARCHAR({col}), 'YYYYMMDD') IS NOT NULL "
+                        "THEN 1 ELSE 0 END) AS {alias}"
+                    ).format(col=qcol, alias=num_date_matches_alias),
+                    (
+                        "MIN(TRY_TO_DATE(TO_VARCHAR({col}), 'YYYYMMDD')) AS {alias}"
+                    ).format(col=qcol, alias=num_date_min_alias),
+                    (
+                        "MAX(TRY_TO_DATE(TO_VARCHAR({col}), 'YYYYMMDD')) AS {alias}"
+                    ).format(col=qcol, alias=num_date_max_alias),
                 ]
             )
         elif _is_temporal(dtype):
@@ -1351,6 +1388,11 @@ def run_table_profile(
             )
         is_string = _is_string_type(dtype)
         if is_string:
+            trimmed_expr = f"TRIM({qcol}::STRING)"
+            sentinel_values = ("'0'", "'00000000'", "'0000-00-00'", "'0000/00/00'")
+            guarded_numeric_expr = (
+                "CASE WHEN {trim} IN ({sentinels}) THEN NULL ELSE TO_VARCHAR({col}) END"
+            ).format(trim=trimmed_expr, sentinels=", ".join(sentinel_values), col=qcol)
             metrics_sql.append(
                 f"SUM(CASE WHEN {qcol} IS NOT NULL AND REGEXP_LIKE({qcol}::STRING, '^\\s|\\s$|\\s{{2,}}') THEN 1 ELSE 0 END) AS WHITESPACE_ROWS"
             )
@@ -1360,10 +1402,29 @@ def run_table_profile(
             metrics_sql.append(
                 f"SUM(CASE WHEN {qcol} IS NOT NULL AND TRIM({qcol}::STRING) = '' THEN 1 ELSE 0 END) AS ONLY_WS_ROWS"
             )
+            num_date_matches_alias = "NUM_YYYYMMDD_MATCHES"
+            num_date_min_alias = "NUM_YYYYMMDD_MIN"
+            num_date_max_alias = "NUM_YYYYMMDD_MAX"
+            metrics_sql.extend(
+                [
+                    (
+                        "SUM(CASE WHEN TRY_TO_DATE({expr}, 'YYYYMMDD') IS NOT NULL THEN 1 ELSE 0 END) AS {alias}"
+                    ).format(expr=guarded_numeric_expr, alias=num_date_matches_alias),
+                    (
+                        "MIN(TRY_TO_DATE({expr}, 'YYYYMMDD')) AS {alias}"
+                    ).format(expr=guarded_numeric_expr, alias=num_date_min_alias),
+                    (
+                        "MAX(TRY_TO_DATE({expr}, 'YYYYMMDD')) AS {alias}"
+                    ).format(expr=guarded_numeric_expr, alias=num_date_max_alias),
+                ]
+            )
         else:
             metrics_sql.append("0 AS WHITESPACE_ROWS")
             metrics_sql.append("0 AS LEAD_TRAIL_WS_ROWS")
             metrics_sql.append("0 AS ONLY_WS_ROWS")
+            num_date_matches_alias = None
+            num_date_min_alias = None
+            num_date_max_alias = None
         length_expr: Optional[str]
         if is_string:
             length_expr = f"LENGTH({qcol}::STRING)"
@@ -1558,11 +1619,50 @@ def run_table_profile(
                     ]
                 )
             if is_string:
-                minimal_metrics.append(
-                    f"SUM(CASE WHEN {qcol} IS NOT NULL AND {qcol}::STRING != TRIM({qcol}::STRING) THEN 1 ELSE 0 END) AS WHITESPACE_ROWS"
+                minimal_metrics.extend(
+                    [
+                        f"SUM(CASE WHEN {qcol} IS NOT NULL AND REGEXP_LIKE({qcol}::STRING, '^\\s|\\s$|\\s{{2,}}') THEN 1 ELSE 0 END) AS WHITESPACE_ROWS",
+                        f"SUM(CASE WHEN {qcol} IS NOT NULL AND {qcol}::STRING != TRIM({qcol}::STRING) THEN 1 ELSE 0 END) AS LEAD_TRAIL_WS_ROWS",
+                        f"SUM(CASE WHEN {qcol} IS NOT NULL AND TRIM({qcol}::STRING) = '' THEN 1 ELSE 0 END) AS ONLY_WS_ROWS",
+                    ]
                 )
             else:
-                minimal_metrics.append("0 AS WHITESPACE_ROWS")
+                minimal_metrics.extend(
+                    [
+                        "0 AS WHITESPACE_ROWS",
+                        "0 AS LEAD_TRAIL_WS_ROWS",
+                        "0 AS ONLY_WS_ROWS",
+                    ]
+                )
+            if num_date_matches_alias:
+                if is_string:
+                    minimal_metrics.extend(
+                        [
+                            (
+                                "SUM(CASE WHEN TRY_TO_DATE({expr}, 'YYYYMMDD') IS NOT NULL THEN 1 ELSE 0 END) AS {alias}"
+                            ).format(expr=guarded_numeric_expr, alias=num_date_matches_alias),
+                            (
+                                "MIN(TRY_TO_DATE({expr}, 'YYYYMMDD')) AS {alias}"
+                            ).format(expr=guarded_numeric_expr, alias=num_date_min_alias),
+                            (
+                                "MAX(TRY_TO_DATE({expr}, 'YYYYMMDD')) AS {alias}"
+                            ).format(expr=guarded_numeric_expr, alias=num_date_max_alias),
+                        ]
+                    )
+                else:
+                    minimal_metrics.extend(
+                        [
+                            (
+                                "SUM(CASE WHEN TRY_TO_DATE(TO_VARCHAR({col}), 'YYYYMMDD') IS NOT NULL THEN 1 ELSE 0 END) AS {alias}"
+                            ).format(col=qcol, alias=num_date_matches_alias),
+                            (
+                                "MIN(TRY_TO_DATE(TO_VARCHAR({col}), 'YYYYMMDD')) AS {alias}"
+                            ).format(col=qcol, alias=num_date_min_alias),
+                            (
+                                "MAX(TRY_TO_DATE(TO_VARCHAR({col}), 'YYYYMMDD')) AS {alias}"
+                            ).format(col=qcol, alias=num_date_max_alias),
+                        ]
+                    )
             if length_expr:
                 minimal_metrics.extend(
                     [
@@ -1660,6 +1760,17 @@ def run_table_profile(
             except Exception:
                 only_ws_rows_int = 0
 
+        num_date_cnt_raw = _extract_row_value(row, num_date_matches_alias or "", 0) if num_date_matches_alias else 0
+        try:
+            num_date_cnt = int(num_date_cnt_raw)
+        except Exception:
+            try:
+                num_date_cnt = int(float(num_date_cnt_raw))
+            except Exception:
+                num_date_cnt = 0
+        num_date_min_raw = _extract_row_value(row, num_date_min_alias or "") if num_date_min_alias else None
+        num_date_max_raw = _extract_row_value(row, num_date_max_alias or "") if num_date_max_alias else None
+
         avg_len_raw = _extract_row_value(row, "AVG_LEN")
         try:
             avg_len_value = float(avg_len_raw) if avg_len_raw is not None else None
@@ -1675,6 +1786,9 @@ def run_table_profile(
         whitespace_ratio = (float(whitespace_rows_int) / float(non_nulls)) if non_nulls else 0.0
         lead_trail_ws_ratio = (float(lead_trail_ws_rows_int) / float(non_nulls)) if non_nulls else 0.0
         only_ws_ratio = (float(only_ws_rows_int) / float(non_nulls)) if non_nulls else 0.0
+        num_date_ratio = (float(num_date_cnt) / float(non_nulls)) if non_nulls else 0.0
+        num_date_min_value = str(num_date_min_raw) if num_date_min_raw is not None else None
+        num_date_max_value = str(num_date_max_raw) if num_date_max_raw is not None else None
         whitespace_pct = whitespace_ratio * 100.0
 
         avg_len_debug_note: Optional[str] = None
@@ -1950,6 +2064,11 @@ def run_table_profile(
             "reference_matches": reference_ratios,
             "hints": hints,
         }
+        signals["date_parse_numeric"] = {
+            "yyyymmdd_ratio": num_date_ratio,
+            "parsed_min": num_date_min_value,
+            "parsed_max": num_date_max_value,
+        }
         if supports_length_stats:
             signals["length"] = {
                 "min": len_min_val,
@@ -2052,91 +2171,130 @@ def run_table_profile(
                     column_entry["profile_max"] = str(numeric_max_raw)
 
         dq_checks: Dict[str, Dict[str, Any]] = {}
-        dq_selected = False
         dq_reason = ""
 
         distinct_ratio_value = float(distinct_pct) if distinct_pct is not None else None
         null_pct_value = float(null_pct)
+        only_ws_ratio_value = float(only_ws_ratio)
+        whitespace_ratio_value = float(whitespace_ratio)
 
-        if (
-            distinct_ratio_value is not None
-            and distinct_ratio_value >= 0.60
-            and nulls_int == 0
-        ):
-            dq_selected = True
-            dq_reason = f"near-unique; {int(round(null_pct_value * 100))}% nulls"
-            dq_checks["UNIQUE"] = {"params": {"ignore_nulls": True}}
-        elif (
-            distincts_int is not None
-            and distincts_int <= 50
-            and (top3_ratio or 0.0) >= 0.80
-        ):
-            dq_selected = True
-            coverage_pct_val = int(round((top3_ratio or 0.0) * 100))
-            dq_reason = f"low-cardinality; top3 cover {coverage_pct_val}%"
-            allowed_values: List[str] = []
-            for entry in top_values:
-                value = entry.get("value")
-                if value is None:
-                    continue
-                allowed_values.append(_stringify(value))
-                if len(allowed_values) >= 20:
-                    break
-            dq_checks["VALUE_DISTRIBUTION"] = {
-                "params": {
-                    "allowed_values_csv": ", ".join(allowed_values),
-                    "min_match_ratio": 0.9,
-                }
-            }
-        elif is_numeric and min_val is not None and max_val is not None:
-            dq_selected = True
-            dq_reason = f"numeric range {min_val}–{max_val}"
-            dq_checks["MIN_MAX"] = {
-                "params": {
-                    "min": _stringify(min_val) if min_val is not None else None,
-                    "max": _stringify(max_val) if max_val is not None else None,
-                }
-            }
-        elif _is_temporal(dtype):
-            dq_selected = True
-            dq_reason = "temporal range profiling"
-            dq_checks["MIN_MAX"] = {
-                "params": {
-                    "min": _stringify(min_val) if min_val is not None else None,
-                    "max": _stringify(max_val) if max_val is not None else None,
-                }
-            }
-        elif (
-            semantic_type == "DATE_IN_TEXT"
-            and (any_parse_ratio or 0.0) >= 0.6
-        ):
-            dq_selected = True
-            success_pct = int(round((any_parse_ratio or 0.0) * 100))
-            dq_reason = f"dates in text; {success_pct}% parse success"
-            best_format_key = best_date_key
-            if best_format_key:
-                config = DATE_PARSE_CONFIG_MAP.get(best_format_key, {})
-                format_label = DATE_PARSE_LABELS.get(best_format_key, best_format_key)
-                regex_value = config.get("regex") or ""
-                dq_checks["FORMAT_DISTRIBUTION"] = {
-                    "params": {"label": format_label, "regex": regex_value}
-                }
-            dq_checks["MIN_MAX"] = {
-                "params": {"min": parsed_date_min, "max": parsed_date_max}
-            }
+        guardrail_skip = False
+        if non_nulls == 0:
+            guardrail_skip = True
+        elif only_ws_ratio_value >= 0.80:
+            guardrail_skip = True
+        elif null_pct_value >= 0.90 and (distincts_int in (None, 0)):
+            guardrail_skip = True
 
-        if dq_selected and is_string and (
-            whitespace_ratio >= 0.05 or only_ws_ratio > 0.0
-        ):
-            dq_checks["WHITESPACE"] = {"params": {"mode": "NO_LEADING_TRAILING"}}
+        if not guardrail_skip:
+            if (
+                distinct_ratio_value is None
+                and distincts_int is not None
+                and non_nulls
+            ):
+                distinct_ratio_value = float(distincts_int) / float(non_nulls)
 
-        if dq_selected and null_pct_value > 0.0:
-            max_nulls_allowed = int(math.ceil(float(row_cnt) * null_pct_value))
-            dq_checks["NULL_COUNT"] = {"params": {"max_nulls": max_nulls_allowed}}
+            if (
+                distinct_ratio_value is not None
+                and distinct_ratio_value >= 0.60
+                and nulls_int == 0
+            ):
+                dq_reason = f"near-unique; {int(round(null_pct_value * 100))}% nulls"
+                dq_checks["UNIQUE"] = {
+                    "severity": "ERROR",
+                    "params": {"ignore_nulls": True},
+                }
+            elif (
+                distincts_int is not None
+                and distincts_int <= 50
+                and (top3_ratio or 0.0) >= 0.80
+            ):
+                coverage_pct_val = int(round((top3_ratio or 0.0) * 100))
+                dq_reason = f"enum-like; top3 {coverage_pct_val}%"
+                allowed_values: List[str] = []
+                for entry in top_values:
+                    value = entry.get("value")
+                    if value is None:
+                        continue
+                    allowed_values.append(_stringify(value))
+                    if len(allowed_values) >= 20:
+                        break
+                dq_checks["VALUE_DISTRIBUTION"] = {
+                    "severity": "WARN",
+                    "params": {
+                        "allowed_values_csv": ", ".join(allowed_values),
+                        "min_match_ratio": 0.9,
+                    },
+                }
+            elif _is_temporal(dtype) and min_val is not None and max_val is not None:
+                dq_reason = f"temporal range {min_val}–{max_val}"
+                dq_checks["MIN_MAX"] = {
+                    "severity": "WARN",
+                    "params": {
+                        "min": _stringify(min_val) if min_val is not None else None,
+                        "max": _stringify(max_val) if max_val is not None else None,
+                    },
+                }
+            elif (
+                semantic_type == "DATE_IN_TEXT"
+                and (
+                    float(any_parse_ratio or 0.0)
+                    if any_parse_ratio not in (None, 0)
+                    else float(num_date_ratio or 0.0)
+                )
+                >= 0.6
+            ):
+                success_ratio = (
+                    float(any_parse_ratio)
+                    if any_parse_ratio not in (None, 0)
+                    else float(num_date_ratio or 0.0)
+                )
+                success_pct = int(round(success_ratio * 100))
+                dq_reason = f"dates in text; {success_pct}% parse success"
+                check_min = parsed_date_min or num_date_min_value
+                check_max = parsed_date_max or num_date_max_value
+                dq_checks["MIN_MAX"] = {
+                    "severity": "WARN",
+                    "params": {"min": check_min, "max": check_max},
+                }
+                best_format_key = best_date_key
+                if best_format_key:
+                    config = DATE_PARSE_CONFIG_MAP.get(best_format_key, {})
+                    format_label = DATE_PARSE_LABELS.get(best_format_key, best_format_key)
+                    regex_value = config.get("regex") or ""
+                    dq_checks["FORMAT_DISTRIBUTION"] = {
+                        "severity": "WARN",
+                        "params": {"label": format_label, "regex": regex_value},
+                    }
+            elif is_numeric and min_val is not None and max_val is not None:
+                dq_reason = f"numeric range {min_val}–{max_val}"
+                dq_checks["MIN_MAX"] = {
+                    "severity": "WARN",
+                    "params": {
+                        "min": _stringify(min_val) if min_val is not None else None,
+                        "max": _stringify(max_val) if max_val is not None else None,
+                    },
+                }
 
-        column_entry["dq_selected"] = dq_selected
+        if dq_checks:
+            if null_pct_value > 0.0:
+                max_nulls_allowed = int(math.ceil(float(row_cnt) * null_pct_value))
+                null_severity = "WARN" if null_pct_value < 0.01 else "ERROR"
+                dq_checks["NULL_COUNT"] = {
+                    "severity": null_severity,
+                    "params": {"max_nulls": max_nulls_allowed},
+                }
+            if is_string and (
+                whitespace_ratio_value >= 0.05 or only_ws_ratio_value > 0.0
+            ):
+                dq_checks["WHITESPACE"] = {
+                    "severity": "WARN",
+                    "params": {"mode": "NO_LEADING_TRAILING"},
+                }
+
+        column_entry["dq_selected"] = bool(dq_checks)
         column_entry["dq_reason"] = dq_reason
-        column_entry["dq_checks"] = dq_checks
+        column_entry["dq_checks"] = dq_checks or None
 
         per_column.append(column_entry)
 
