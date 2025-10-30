@@ -426,12 +426,34 @@ def _infer_semantic_type(
     parsed_date_max = date_parse.get("parsed_max")
     date_valid_count_raw = date_parse.get("valid_count")
     try:
-        date_valid_count = int(date_valid_count_raw) if date_valid_count_raw is not None else 0
+        valid_string_count = int(date_valid_count_raw) if date_valid_count_raw is not None else 0
     except Exception:
         try:
-            date_valid_count = int(float(date_valid_count_raw)) if date_valid_count_raw is not None else 0
+            valid_string_count = int(float(date_valid_count_raw)) if date_valid_count_raw is not None else 0
         except Exception:
-            date_valid_count = 0
+            valid_string_count = 0
+    date_valid_count = valid_string_count
+    best_count_signal = _as_int(date_parse.get("best_count")) or 0
+    text_success_count_signal = _as_int(date_parse.get("success_count")) or 0
+    best_source_signal = str(date_parse.get("best_source") or "").lower()
+    numeric_date_ratio_signal = _as_float(num_date.get("numdate_ratio") or num_date.get("yyyymmdd_ratio"))
+    numeric_date_count_signal = _as_int(num_date.get("numdate_count") or num_date.get("count")) or 0
+    numeric_date_min_signal = (
+        num_date.get("numdate_min")
+        or date_parse.get("numdate_min")
+        or num_date.get("parsed_min")
+    )
+    numeric_date_max_signal = (
+        num_date.get("numdate_max")
+        or date_parse.get("numdate_max")
+        or num_date.get("parsed_max")
+    )
+    if parsed_date_min is None and numeric_date_min_signal is not None:
+        parsed_date_min = numeric_date_min_signal
+    if parsed_date_max is None and numeric_date_max_signal is not None:
+        parsed_date_max = numeric_date_max_signal
+    if numeric_date_ratio_signal is not None:
+        format_ratios.setdefault("yyyymmdd_numeric", numeric_date_ratio_signal)
     pattern_values: List[float] = []
     pattern_ratio_lookup: Dict[str, Optional[float]] = {}
     if isinstance(date_patterns, dict):
@@ -460,6 +482,52 @@ def _infer_semantic_type(
     rows_profiled = int(column_entry.get("rows_profiled") or 0)
     profile_min: Optional[Any] = column_entry.get("min_val")
     profile_max: Optional[Any] = column_entry.get("max_val")
+
+    text_ratio_candidates: List[float] = []
+    for key, value in format_ratios.items():
+        if str(key or "").lower().endswith("_numeric"):
+            continue
+        val = _as_float(value)
+        if val is not None:
+            text_ratio_candidates.append(val)
+    for candidate in (
+        date_success_ratio_signal,
+        overall_success_ratio,
+    ):
+        if candidate is not None:
+            text_ratio_candidates.append(float(candidate))
+    if best_date_ratio is not None and best_source_signal != "numeric":
+        text_ratio_candidates.append(float(best_date_ratio))
+    text_best_ratio = max(text_ratio_candidates) if text_ratio_candidates else 0.0
+    text_success_count = max(best_count_signal, text_success_count_signal, 0)
+    if text_success_count <= 0 and text_best_ratio > 0 and valid_string_count > 0:
+        text_success_count = int(round(text_best_ratio * float(valid_string_count)))
+    if text_success_count <= 0 and text_best_ratio > 0 and non_nulls > 0:
+        text_success_count = int(round(text_best_ratio * float(non_nulls)))
+    numeric_ratio = float(numeric_date_ratio_signal or 0.0)
+    numeric_success_count = max(numeric_date_count_signal, 0)
+    best_success_ratio = text_best_ratio
+    best_success_source = "text"
+    best_success_count = max(text_success_count, 0)
+    if numeric_ratio > 0 and numeric_success_count > 0:
+        if numeric_ratio > best_success_ratio + 1e-6 or (
+            math.isclose(numeric_ratio, best_success_ratio, rel_tol=1e-6, abs_tol=1e-9)
+            and numeric_success_count > best_success_count
+        ):
+            best_success_ratio = numeric_ratio
+            best_success_source = "numeric"
+            best_success_count = numeric_success_count
+    if best_success_source == "numeric":
+        if best_date_format not in {"yyyymmdd", "YYYYMMDD"}:
+            best_date_format = "yyyymmdd"
+        best_date_ratio = numeric_ratio
+        if numeric_date_min_signal is not None:
+            parsed_date_min = numeric_date_min_signal
+        if numeric_date_max_signal is not None:
+            parsed_date_max = numeric_date_max_signal
+    elif best_date_ratio is None and text_best_ratio > 0:
+        best_date_ratio = text_best_ratio
+    date_valid_count = best_success_count
 
     def _ratio(mapping: Dict[str, Any], key: str) -> float:
         value = mapping.get(key)
@@ -541,15 +609,7 @@ def _infer_semantic_type(
     if hints.get("phone"):
         _boost("PHONE", 12.0, "column name references phone")
 
-    date_success_ratio = (
-        date_success_ratio_signal
-        if date_success_ratio_signal is not None
-        else (
-            best_date_ratio
-            if best_date_ratio is not None
-            else overall_success_ratio
-        )
-    )
+    date_success_ratio = best_success_ratio if best_success_ratio > 0 else None
     targeted_patterns = {
         "yyyymmdd",
         "ddmmyyyy",
@@ -627,40 +687,38 @@ def _infer_semantic_type(
             date_span_years = span_days / 365.25
         except Exception:
             date_span_years = None
+    min_year_ok = parsed_min_dt.year >= 1950 and parsed_min_dt.year <= 2100 if parsed_min_dt else False
+    max_year_ok = parsed_max_dt.year >= 1950 and parsed_max_dt.year <= 2100 if parsed_max_dt else False
+    at_least_one_year_ok = min_year_ok or max_year_ok
+    span_ok = True
+    if parsed_min_dt and parsed_max_dt and date_span_years is not None:
+        span_ok = date_span_years <= 200
+    date_range_ok = at_least_one_year_ok and span_ok
 
     sentinel_zero_count = _as_int(column_entry.get("date_sentinel_count")) or 0
-    best_success_ratio = 0.0
-    for candidate in (
-        date_success_ratio,
-        best_date_ratio,
-        overall_success_ratio,
-    ):
-        if candidate is not None and candidate > best_success_ratio:
-            best_success_ratio = float(candidate)
     best_success_ratio = max(0.0, min(best_success_ratio, 1.0))
+    required_majority = max(50, int(math.ceil(0.7 * non_nulls))) if non_nulls else 0
+    if non_nulls:
+        numeric_required_majority = int(math.ceil(0.7 * non_nulls))
+        if non_nulls >= 25:
+            numeric_required_majority = max(numeric_required_majority, 25)
+    else:
+        numeric_required_majority = 0
 
-    if (
+    general_force = (
         not forced_type
-        and best_success_ratio >= 0.8
-        and pattern_max_ratio >= 0.8
-        and date_valid_count > 0
-    ):
+        and best_success_ratio >= 0.85
+        and date_valid_count >= required_majority
+        and date_range_ok
+    )
+    if general_force:
         format_key = str(best_date_format or "").lower()
         label = DATE_PARSE_LABELS.get(
             format_key,
             str(best_date_format or "text date").upper(),
         )
-        high_confidence = (
-            best_success_ratio >= 0.95
-            or (
-                best_success_ratio >= 0.9
-                and (date_span_years or 0.0) >= 5.0
-            )
-        )
-        if high_confidence:
-            forced_confidence = round(min(1.0, max(best_success_ratio, 0.9)), 3)
-        else:
-            forced_confidence = round(min(0.89, max(0.75, best_success_ratio)), 3)
+        forced_type = "DATE_IN_TEXT"
+        forced_confidence = round(min(best_success_ratio, 0.99), 3)
         pct_value = best_success_ratio * 100.0
         if pct_value < 10.0:
             pct_text = f"{pct_value:.1f}%".rstrip("0").rstrip(".")
@@ -669,27 +727,47 @@ def _infer_semantic_type(
         note_parts: List[str] = [f"Parsed as {label} ({pct_text})"]
         if sentinel_zero_count > 0:
             note_parts.append("ignored sentinel zeros")
-        if date_span_years is not None and date_span_years >= 1.0 and high_confidence:
+        if date_span_years is not None and date_span_years >= 1.0:
             note_parts.append(f"span {date_span_years:.1f}y")
-        note_text = "; ".join(part for part in note_parts if part)
-        forced_type = "DATE_IN_TEXT"
-        forced_rationale_parts = [truncate_note(note_text)]
-
-    if (
+        if parsed_date_min or parsed_date_max:
+            note_parts.append(
+                "range {start} → {end}".format(
+                    start=parsed_date_min or "?",
+                    end=parsed_date_max or "?",
+                )
+            )
+        if best_success_source == "numeric":
+            note_parts.append("numeric yyyymmdd parse")
+        forced_rationale_parts = [truncate_note("; ".join(part for part in note_parts if part))]
+        profile_min = parsed_date_min or profile_min
+        profile_max = parsed_date_max or profile_max
+    elif (
         not forced_type
         and _is_numeric(data_type)
-        and float(num_date.get("yyyymmdd_ratio") or 0.0) >= 0.6
+        and numeric_ratio >= 0.9
+        and numeric_success_count >= numeric_required_majority
+        and date_range_ok
     ):
         forced_type = "DATE_IN_TEXT"
-        forced_confidence = clamp_confidence(0.8, 0.75, 0.95)
-        forced_rationale_parts.append(
-            "numeric column parses as YYYYMMDD ≥ 60%"
-        )
-        payload_min = num_date.get("parsed_min")
-        payload_max = num_date.get("parsed_max")
-        if payload_min or payload_max:
-            profile_min = payload_min or profile_min
-            profile_max = payload_max or profile_max
+        forced_confidence = round(min(max(numeric_ratio, 0.9), 0.99), 3)
+        note_parts = [
+            f"numeric YYYYMMDD parse {numeric_ratio:.0%}",
+            "range {start} → {end}".format(
+                start=parsed_date_min or "?",
+                end=parsed_date_max or "?",
+            )
+            if parsed_date_min or parsed_date_max
+            else None,
+        ]
+        if date_span_years is not None:
+            note_parts.append(f"span {date_span_years:.1f}y")
+        forced_rationale_parts = [
+            truncate_note("; ".join(part for part in note_parts if part))
+        ]
+        profile_min = parsed_date_min or profile_min
+        profile_max = parsed_date_max or profile_max
+    elif best_success_ratio >= 0.7 and not forced_type:
+        scores["DATE_IN_TEXT"] = scores.get("DATE_IN_TEXT", 0.0) * 0.5
 
     if not forced_type:
         row_cnt_value = _as_int(column_entry.get("row_cnt"))
@@ -909,13 +987,11 @@ def _infer_semantic_type(
         _boost("CURRENCY_CODE", 6.0, "length compatible with currency codes")
 
     country_code_ref = _ratio(references, "reference_country_code")
-    if country_code_ref > 0:
-        _boost("COUNTRY_CODE/NAME", 80.0 * min(country_code_ref, 1.0), f"{country_code_ref:.0%} values match ISO country codes")
     country_name_ref = _ratio(references, "reference_country_name")
-    if country_name_ref > 0:
-        _boost("COUNTRY_CODE/NAME", 70.0 * min(country_name_ref, 1.0), f"{country_name_ref:.0%} values match known country names")
-    if hints.get("country"):
-        _boost("COUNTRY_CODE/NAME", 15.0, "column name references country")
+    country_name_hint = bool(hints.get("country"))
+    country_selected_mode: Optional[str] = None
+    country_selected_overlap: float = 0.0
+    country_shape_mismatch = False
 
     exchange_ref = _ratio(references, "reference_exchange_code")
     if exchange_ref > 0:
@@ -924,6 +1000,86 @@ def _infer_semantic_type(
     char_alpha = _ratio(char_classes, "alpha")
     char_digit = _ratio(char_classes, "digit")
     char_alnum = _ratio(char_classes, "alnum")
+
+    distinct_ratio_value = max(0.0, min(1.0, float(resolved_distinct_ratio)))
+    numeric_like_ratio = float(numeric_like_ratio_signal or 0.0)
+    length_min_val = length_min if length_min is not None else None
+    length_max_val = length_max if length_max is not None else None
+    length_avg_val = length_avg if length_avg is not None else None
+    code_shape_ok = (
+        country_code_ref >= 0.80
+        and (char_alpha or 0.0) >= 0.95
+        and length_min_val is not None
+        and length_max_val is not None
+        and length_min_val >= 2.0
+        and length_max_val <= 3.0
+        and distinct_ratio_value <= 0.5
+    )
+    name_shape_ok = (
+        country_name_ref >= 0.70
+        and (char_alpha or 0.0) >= 0.60
+        and length_avg_val is not None
+        and length_avg_val >= 4.0
+        and distinct_ratio_value <= 0.8
+        and numeric_like_ratio < 0.2
+    )
+    code_overlap = max(0.0, min(1.0, country_code_ref))
+    name_overlap = max(0.0, min(1.0, country_name_ref))
+    code_score = 80.0 * code_overlap if code_shape_ok else 0.0
+    name_score = 70.0 * name_overlap if name_shape_ok else 0.0
+    country_rationale_parts: List[str] = []
+    if code_shape_ok and code_score >= name_score:
+        country_selected_mode = "code"
+        country_selected_overlap = code_overlap
+        country_score = code_score
+        country_rationale_parts.append(
+            "ref overlap {overlap:.0%}; len 2–3; alpha {alpha:.0%}".format(
+                overlap=code_overlap,
+                alpha=char_alpha or 0.0,
+            )
+        )
+    elif name_shape_ok and name_score > 0:
+        country_selected_mode = "name"
+        country_selected_overlap = name_overlap
+        country_score = name_score
+        avg_hint = f"; avg len {length_avg_val:.0f}" if length_avg_val is not None else ""
+        country_rationale_parts.append(
+            "ref overlap {overlap:.0%}; alpha {alpha:.0%}{extra}".format(
+                overlap=name_overlap,
+                alpha=char_alpha or 0.0,
+                extra=avg_hint,
+            )
+        )
+    else:
+        country_score = 0.0
+        if country_code_ref >= 0.5 or country_name_ref >= 0.5:
+            country_shape_mismatch = True
+
+    if country_score > 0 and country_name_hint:
+        country_score += 10.0
+        country_rationale_parts.append("name hint 'country'")
+
+    country_penalty = False
+    if (
+        length_max_val is not None
+        and length_max_val > 15.0
+        and (char_alpha or 0.0) < 0.6
+    ) or distinct_ratio_value >= 0.6:
+        country_penalty = True
+
+    if country_penalty and country_score > 0:
+        country_score = min(country_score, 5.0)
+        country_shape_mismatch = True
+        country_rationale_parts.append("shape mismatch")
+
+    if country_score > 0:
+        scores["COUNTRY_CODE/NAME"] = country_score
+        rationales["COUNTRY_CODE/NAME"] = [
+            truncate_note(part) for part in country_rationale_parts if part
+        ]
+    elif country_shape_mismatch:
+        scores["COUNTRY_CODE/NAME"] = min(scores.get("COUNTRY_CODE/NAME", 0.0), 1.0)
+        rationales.setdefault("COUNTRY_CODE/NAME", []).append("shape mismatch")
 
     uppercase_matches = 0
     total_matches = 0
@@ -1112,6 +1268,45 @@ def _infer_semantic_type(
             best_score = 10.0
             rationales.setdefault(best_type, []).append("defaulting to generic identifier due to lack of stronger signals")
 
+    if not forced_type:
+        current_confidence_estimate = min(1.0, max(best_score, 0.0) / 100.0)
+        top3_ratio_raw = top3_ratio_signal
+        top3_ratio_eval = float(top3_ratio_raw) if top3_ratio_raw is not None else None
+        distinct_count_numeric = (
+            float(distinct_count_value) if isinstance(distinct_count_value, (int, float)) else None
+        )
+        distincts_high = distinct_ratio_value >= 0.7
+        if (
+            not distincts_high
+            and distinct_count_numeric is not None
+            and non_nulls > 0
+        ):
+            distincts_high = distinct_count_numeric >= (0.7 * float(non_nulls))
+        length_condition = length_avg is None or length_avg >= 8.0
+        top3_condition = (
+            top3_ratio_eval is not None and float(top3_ratio_eval) <= 0.30
+        )
+        if (
+            distincts_high
+            and top3_condition
+            and length_condition
+            and current_confidence_estimate <= 0.85
+        ):
+            account_confidence = max(0.8, min(0.9, 0.75 + distinct_ratio_value * 0.25))
+            account_score = account_confidence * 100.0
+            if account_score > scores.get("ACCOUNT_ID", 0.0):
+                scores["ACCOUNT_ID"] = account_score
+            best_type = "ACCOUNT_ID"
+            best_score = scores.get("ACCOUNT_ID", account_score)
+            rationale_parts = [f"{distinct_ratio_value:.0%} distinct"]
+            if top3_ratio_eval is not None:
+                rationale_parts.append(f"top3 {top3_ratio_eval:.0%}")
+            if length_avg is not None:
+                rationale_parts.append(f"avg len {length_avg:.1f}")
+            rationales.setdefault("ACCOUNT_ID", []).append(
+                truncate_note("; ".join(part for part in rationale_parts if part))
+            )
+
     forced_rationale = "; ".join(part for part in forced_rationale_parts if part)
     if best_type == "DATE_IN_TEXT":
         profile_min = parsed_date_min or profile_min
@@ -1141,6 +1336,31 @@ def _infer_semantic_type(
 
     confidence = min(1.0, max(best_score, 0.0) / 100.0)
     confidence = round(confidence, 3)
+
+    if (
+        best_type == "COUNTRY_CODE/NAME"
+        and country_selected_overlap > 0
+        and not country_shape_mismatch
+    ):
+        if country_selected_mode == "code":
+            threshold = 0.80
+        else:
+            threshold = 0.70
+        base_conf = 0.75
+        target_conf = 0.9
+        upper_overlap = 0.95
+        if country_selected_overlap <= threshold:
+            country_confidence = base_conf
+        else:
+            capped_overlap = min(country_selected_overlap, upper_overlap)
+            if capped_overlap <= threshold:
+                country_confidence = base_conf
+            else:
+                slope = (target_conf - base_conf) / (upper_overlap - threshold)
+                country_confidence = base_conf + slope * (capped_overlap - threshold)
+        if country_selected_overlap >= upper_overlap:
+            country_confidence = target_conf
+        confidence = round(min(0.95, max(base_conf, country_confidence)), 3)
 
     explanations = rationales.get(best_type, [])
     if not explanations:
@@ -1344,9 +1564,10 @@ def run_table_profile(
             f"{distinct_expr.format(col=qcol)} AS DISTINCTS",
             f"SUM(CASE WHEN {qcol} IS NOT NULL THEN 1 ELSE 0 END) AS NON_NULLS_COUNT",
         ]
-        num_date_matches_alias: Optional[str] = None
-        num_date_min_alias: Optional[str] = None
-        num_date_max_alias: Optional[str] = None
+        num_date_matches_alias: Optional[str] = "NUMDATE_PARSE_COUNT"
+        num_date_min_alias: Optional[str] = "NUMDATE_MIN"
+        num_date_max_alias: Optional[str] = "NUMDATE_MAX"
+        num_date_expr_sql: Optional[str] = None
         is_numeric = _is_numeric(dtype)
         if is_numeric:
             metrics_sql.extend(
@@ -1355,23 +1576,15 @@ def run_table_profile(
                     f"MAX({qcol}) AS MAX_VAL",
                 ]
             )
-            num_date_matches_alias = "NUM_YYYYMMDD_MATCHES"
-            num_date_min_alias = "NUM_YYYYMMDD_MIN"
-            num_date_max_alias = "NUM_YYYYMMDD_MAX"
-            metrics_sql.extend(
-                [
-                    (
-                        "SUM(CASE WHEN TRY_TO_DATE(TO_VARCHAR({col}), 'YYYYMMDD') IS NOT NULL "
-                        "THEN 1 ELSE 0 END) AS {alias}"
-                    ).format(col=qcol, alias=num_date_matches_alias),
-                    (
-                        "MIN(TRY_TO_DATE(TO_VARCHAR({col}), 'YYYYMMDD')) AS {alias}"
-                    ).format(col=qcol, alias=num_date_min_alias),
-                    (
-                        "MAX(TRY_TO_DATE(TO_VARCHAR({col}), 'YYYYMMDD')) AS {alias}"
-                    ).format(col=qcol, alias=num_date_max_alias),
-                ]
-            )
+            numeric_string_expr = f"{qcol}::STRING"
+            padded_expr = (
+                "CASE WHEN LENGTH({base}) = 8 THEN {base} "
+                "WHEN LENGTH({base}) < 8 THEN LPAD({base}, 8, '0') ELSE NULL END"
+            ).format(base=numeric_string_expr)
+            num_date_expr_sql = (
+                "CASE WHEN {padded} IS NOT NULL AND {padded} <> '00000000' "
+                "THEN TRY_TO_DATE({padded}, 'YYYYMMDD') ELSE NULL END"
+            ).format(padded=padded_expr)
         elif _is_temporal(dtype):
             metrics_sql.extend(
                 [
@@ -1390,9 +1603,6 @@ def run_table_profile(
         if is_string:
             trimmed_expr = f"TRIM({qcol}::STRING)"
             sentinel_values = ("'0'", "'00000000'", "'0000-00-00'", "'0000/00/00'")
-            guarded_numeric_expr = (
-                "CASE WHEN {trim} IN ({sentinels}) THEN NULL ELSE TO_VARCHAR({col}) END"
-            ).format(trim=trimmed_expr, sentinels=", ".join(sentinel_values), col=qcol)
             metrics_sql.append(
                 f"SUM(CASE WHEN {qcol}::STRING = '' THEN 1 ELSE 0 END) AS EMPTY_STR_ROWS"
             )
@@ -1405,30 +1615,37 @@ def run_table_profile(
             metrics_sql.append(
                 f"SUM(CASE WHEN {qcol} IS NOT NULL AND {qcol}::STRING != TRIM({qcol}::STRING) THEN 1 ELSE 0 END) AS LEAD_TRAIL_WS_ROWS"
             )
-            num_date_matches_alias = "NUM_YYYYMMDD_MATCHES"
-            num_date_min_alias = "NUM_YYYYMMDD_MIN"
-            num_date_max_alias = "NUM_YYYYMMDD_MAX"
-            metrics_sql.extend(
-                [
-                    (
-                        "SUM(CASE WHEN TRY_TO_DATE({expr}, 'YYYYMMDD') IS NOT NULL THEN 1 ELSE 0 END) AS {alias}"
-                    ).format(expr=guarded_numeric_expr, alias=num_date_matches_alias),
-                    (
-                        "MIN(TRY_TO_DATE({expr}, 'YYYYMMDD')) AS {alias}"
-                    ).format(expr=guarded_numeric_expr, alias=num_date_min_alias),
-                    (
-                        "MAX(TRY_TO_DATE({expr}, 'YYYYMMDD')) AS {alias}"
-                    ).format(expr=guarded_numeric_expr, alias=num_date_max_alias),
-                ]
-            )
+            digits_expr = "REGEXP_REPLACE({col}::STRING, '[^0-9]', '')".format(col=qcol)
+            num_date_expr_sql = (
+                "CASE WHEN LENGTH({digits}) = 8 AND {digits} NOT IN ('00000000') "
+                "THEN TRY_TO_DATE({digits}, 'YYYYMMDD') ELSE NULL END"
+            ).format(digits=digits_expr)
         else:
             metrics_sql.append("0 AS EMPTY_STR_ROWS")
             metrics_sql.append("0 AS WS_ONLY_ROWS")
             metrics_sql.append("0 AS WHITESPACE_ROWS")
             metrics_sql.append("0 AS LEAD_TRAIL_WS_ROWS")
-            num_date_matches_alias = None
-            num_date_min_alias = None
-            num_date_max_alias = None
+
+        if num_date_expr_sql and num_date_matches_alias and num_date_min_alias and num_date_max_alias:
+            metrics_sql.extend(
+                [
+                    (
+                        "SUM(CASE WHEN {expr} IS NOT NULL THEN 1 ELSE 0 END) AS {alias}"
+                    ).format(expr=num_date_expr_sql, alias=num_date_matches_alias),
+                    f"MIN({num_date_expr_sql}) AS {num_date_min_alias}",
+                    f"MAX({num_date_expr_sql}) AS {num_date_max_alias}",
+                ]
+            )
+        else:
+            metrics_sql.append(
+                f"0 AS {num_date_matches_alias or 'NUMDATE_PARSE_COUNT'}"
+            )
+            metrics_sql.append(
+                f"NULL AS {num_date_min_alias or 'NUMDATE_MIN'}"
+            )
+            metrics_sql.append(
+                f"NULL AS {num_date_max_alias or 'NUMDATE_MAX'}"
+            )
         length_expr: Optional[str]
         if is_string:
             length_expr = f"LENGTH({qcol}::STRING)"
@@ -1801,7 +2018,7 @@ def run_table_profile(
         whitespace_ratio = (float(whitespace_rows_int) / float(non_nulls)) if non_nulls else 0.0
         lead_trail_ws_ratio = (float(lead_trail_ws_rows_int) / float(non_nulls)) if non_nulls else 0.0
         only_ws_ratio = (float(ws_only_rows_int) / float(non_nulls)) if non_nulls else 0.0
-        num_date_ratio = (float(num_date_cnt) / float(non_nulls)) if non_nulls else 0.0
+        num_date_ratio: float = 0.0
         num_date_min_value = str(num_date_min_raw) if num_date_min_raw is not None else None
         num_date_max_value = str(num_date_max_raw) if num_date_max_raw is not None else None
         whitespace_pct = whitespace_ratio * 100.0
@@ -1900,6 +2117,14 @@ def run_table_profile(
                 except Exception:
                     sentinel_count = 0
         valid_string_count = max((non_nulls or 0) - sentinel_count, 0)
+        if is_string:
+            denominator = float(valid_string_count) if valid_string_count else 0.0
+        else:
+            denominator = float(non_nulls)
+        if denominator:
+            num_date_ratio = float(num_date_cnt) / denominator
+        else:
+            num_date_ratio = 0.0
 
         date_pattern_ratios: Dict[str, Optional[float]] = {}
         for key, alias in date_pattern_aliases.items():
@@ -1934,6 +2159,7 @@ def run_table_profile(
             parsed_max_values[key] = _extract_row_value(row, date_parse_max_aliases.get(key, ""))
 
         any_parse_ratio: Optional[float] = None
+        any_parse_count: Optional[int] = None
         any_parsed_min: Optional[Any] = None
         any_parsed_max: Optional[Any] = None
         if any_parse_alias:
@@ -1942,6 +2168,7 @@ def run_table_profile(
                 any_matches = int(any_matches_raw)
             except Exception:
                 any_matches = 0
+            any_parse_count = any_matches
             denominator = float(valid_string_count) if valid_string_count else float(non_nulls or 0)
             if denominator:
                 any_parse_ratio = float(any_matches) / denominator
@@ -1962,23 +2189,58 @@ def run_table_profile(
 
         parsed_date_min: Optional[str] = None
         parsed_date_max: Optional[str] = None
-        if any_parsed_min is not None or any_parsed_max is not None:
-            parsed_date_min = str(any_parsed_min) if any_parsed_min is not None else None
-            parsed_date_max = str(any_parsed_max) if any_parsed_max is not None else None
-        elif best_date_key:
-            best_min = parsed_min_values.get(best_date_key)
-            best_max = parsed_max_values.get(best_date_key)
-            parsed_date_min = str(best_min) if best_min is not None else None
-            parsed_date_max = str(best_max) if best_max is not None else None
+        best_parse_count = date_parse_counts.get(best_date_key, 0) if best_date_key else 0
+        textual_best_ratio = max(best_date_ratio, float(any_parse_ratio or 0.0))
+        numeric_best = False
+        if num_date_cnt > 0 and num_date_ratio >= textual_best_ratio:
+            numeric_best = True
+            best_date_key = "yyyymmdd"
+            best_date_ratio = num_date_ratio
+            parsed_date_min = num_date_min_value
+            parsed_date_max = num_date_max_value
+            best_parse_count = num_date_cnt
+        else:
+            if any_parsed_min is not None or any_parsed_max is not None:
+                parsed_date_min = str(any_parsed_min) if any_parsed_min is not None else None
+                parsed_date_max = str(any_parsed_max) if any_parsed_max is not None else None
+                if any_parse_count is not None:
+                    best_parse_count = any_parse_count
+            elif best_date_key:
+                best_min = parsed_min_values.get(best_date_key)
+                best_max = parsed_max_values.get(best_date_key)
+                parsed_date_min = str(best_min) if best_min is not None else None
+                parsed_date_max = str(best_max) if best_max is not None else None
+                best_parse_count = date_parse_counts.get(best_date_key, 0)
 
         hints = _derive_name_hints(name)
 
         top_values: List[Dict[str, Any]] = []
         top_coverage = 0
         if top_n_clamped > 0 and rows_profiled:
+            if is_string:
+                val_norm_expr = (
+                    "CASE WHEN {col} IS NULL THEN NULL "
+                    "WHEN REGEXP_REPLACE({col}::STRING, '\\s+', '') = '' THEN '' "
+                    "ELSE {col}::STRING END AS VAL_NORM"
+                ).format(col=qcol)
+            else:
+                val_norm_expr = (
+                    "CASE WHEN {col} IS NULL THEN NULL ELSE {col}::STRING END AS VAL_NORM"
+                ).format(col=qcol)
             top_sql = (
-                f"SELECT {qcol} AS VALUE, COUNT(*) AS CNT FROM {sampled_ref} "
-                f"WHERE {qcol} IS NOT NULL GROUP BY 1 ORDER BY CNT DESC LIMIT {top_n_clamped}"
+                "WITH base AS (\n"
+                f"    SELECT {val_norm_expr}\n"
+                f"    FROM {sampled_ref}\n"
+                "), agg AS (\n"
+                "    SELECT VAL_NORM, COUNT(*) AS CNT\n"
+                "    FROM base\n"
+                "    WHERE VAL_NORM IS NOT NULL\n"
+                "    GROUP BY VAL_NORM\n"
+                ")\n"
+                "SELECT VAL_NORM AS VALUE, CNT\n"
+                "FROM agg\n"
+                "ORDER BY CNT DESC\n"
+                f"LIMIT {top_n_clamped}"
             )
             try:
                 for item in session.sql(top_sql).collect():
@@ -1992,9 +2254,12 @@ def run_table_profile(
                     try:
                         count_int = int(count_raw)
                     except Exception:
-                        count_int = 0
+                        try:
+                            count_int = int(float(count_raw))
+                        except Exception:
+                            count_int = 0
                     top_coverage += count_int
-                    pct = (float(count_int) / non_nulls * 100.0) if non_nulls else 0.0
+                    pct = (float(count_int) / float(non_nulls) * 100.0) if non_nulls else 0.0
                     top_values.append({"value": value, "count": count_int, "pct": pct})
             except Exception:
                 top_values = []
@@ -2036,16 +2301,14 @@ def run_table_profile(
             except Exception:
                 whitespace_length_counts = []
 
-        if nulls_int > 0:
-            pct = (float(nulls_int) / float(row_cnt) * 100.0) if row_cnt else 0.0
-            top_values.append({"value": None, "count": nulls_int, "pct": pct})
-        if is_string and empty_str_rows_int > 0:
-            pct = (float(empty_str_rows_int) / float(non_nulls) * 100.0) if non_nulls else 0.0
-            top_values.append({"value": "", "count": empty_str_rows_int, "pct": pct})
         if is_string and whitespace_length_counts and non_nulls:
             for length_int, count_int in whitespace_length_counts:
                 pct = (float(count_int) / float(non_nulls) * 100.0) if non_nulls else 0.0
                 top_values.append({"value": f"__WS_LEN__:{length_int}", "count": count_int, "pct": pct})
+
+        if nulls_int > 0:
+            pct = (float(nulls_int) / float(row_cnt) * 100.0) if row_cnt else 0.0
+            top_values.append({"value": None, "count": nulls_int, "pct": pct})
 
         coverage_pct = (float(top_coverage) / non_nulls * 100.0) if non_nulls else 0.0
 
@@ -2118,6 +2381,9 @@ def run_table_profile(
                     "parsed_date_max": parsed_date_max,
                 }
             )
+        elif parsed_date_min is not None or parsed_date_max is not None:
+            column_entry["parsed_date_min"] = parsed_date_min
+            column_entry["parsed_date_max"] = parsed_date_max
 
         signals: Dict[str, Any] = {
             "null_pct": null_pct,
@@ -2129,8 +2395,12 @@ def run_table_profile(
         }
         signals["date_parse_numeric"] = {
             "yyyymmdd_ratio": num_date_ratio,
+            "numdate_ratio": num_date_ratio,
+            "count": num_date_cnt,
             "parsed_min": num_date_min_value,
             "parsed_max": num_date_max_value,
+            "numdate_min": num_date_min_value,
+            "numdate_max": num_date_max_value,
         }
         if supports_length_stats:
             signals["length"] = {
@@ -2161,18 +2431,36 @@ def run_table_profile(
                 "whitespace_only_count": ws_only_rows_int,
             }
             signals["date_patterns"] = {str(key): date_pattern_ratios.get(key) for key in date_pattern_ratios}
-            signals["date_parse"] = {
-                "formats": {str(key): date_parse_ratios.get(key) for key in date_parse_ratios},
-                "best_ratio": best_date_ratio if best_date_key else None,
-                "best_format": best_date_key,
-                "success_ratio": any_parse_ratio,
-                "date_success_ratio": best_date_ratio if best_date_key else any_parse_ratio,
-                "format_detected": best_date_key,
-                "valid_count": valid_string_count,
-                "parsed_min": parsed_date_min,
-                "parsed_max": parsed_date_max,
-            }
-
+        date_parse_formats: Dict[str, Optional[float]] = {
+            str(key): date_parse_ratios.get(key) for key in date_parse_ratios
+        }
+        date_parse_formats["yyyymmdd_numeric"] = num_date_ratio if num_date_cnt > 0 else 0.0
+        success_ratio_value: Optional[float]
+        if any_parse_ratio is not None:
+            success_ratio_value = any_parse_ratio
+        elif num_date_cnt > 0:
+            success_ratio_value = num_date_ratio
+        else:
+            success_ratio_value = None
+        date_parse_payload: Dict[str, Any] = {
+            "formats": date_parse_formats,
+            "best_ratio": best_date_ratio if best_date_key else None,
+            "best_format": best_date_key,
+            "success_ratio": success_ratio_value,
+            "date_success_ratio": best_date_ratio if best_date_key else success_ratio_value,
+            "format_detected": best_date_key,
+            "valid_count": valid_string_count if is_string else non_nulls,
+            "parsed_min": parsed_date_min,
+            "parsed_max": parsed_date_max,
+            "success_count": any_parse_count if any_parse_count is not None else (num_date_cnt if num_date_cnt > 0 else None),
+            "best_count": best_parse_count,
+            "numdate_ratio": num_date_ratio,
+            "numdate_min": num_date_min_value,
+            "numdate_max": num_date_max_value,
+            "numdate_count": num_date_cnt,
+            "best_source": "numeric" if numeric_best else "text",
+        }
+        signals["date_parse"] = date_parse_payload
         column_entry["signals"] = signals
 
         (
