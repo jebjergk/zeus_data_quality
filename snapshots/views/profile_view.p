@@ -341,6 +341,35 @@ def _stringify_for_display(value: Any) -> Any:
     return value
 
 
+def _format_top_value_cell(value: Any) -> str:
+    raw_value = value
+    try:
+        if pd.isna(raw_value):
+            raw_value = None
+    except Exception:
+        pass
+
+    if raw_value is None:
+        return "NULL"
+    if isinstance(raw_value, str):
+        if raw_value == "":
+            return '""'
+        ws_prefix = "__WS_LEN__:"
+        if raw_value.startswith(ws_prefix):
+            length_part = raw_value[len(ws_prefix) :].strip()
+            try:
+                length_value = int(length_part)
+            except Exception:
+                length_value = None
+            if length_value is not None:
+                return f"␣×{length_value}"
+
+    formatted = _stringify_for_display(raw_value)
+    if formatted is None:
+        return ""
+    return str(formatted)
+
+
 def _profiles_to_frame(profiles: Iterable[ColumnProfile]) -> pd.DataFrame:
     records = []
     for profile in profiles:
@@ -1197,21 +1226,55 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
 
             # Normalize common column names when present; otherwise fall back gracefully
             rename_map = {}
+            value_column_name: Optional[str] = None
+            for candidate in tv_df.columns:
+                if str(candidate).lower() in {"value", "val", "values"}:
+                    value_column_name = candidate
+                    break
             if "value" in tv_df.columns:
                 rename_map["value"] = "Value"
             if "count" in tv_df.columns:
                 rename_map["count"] = "Count"
             if rename_map:
                 tv_df = tv_df.rename(columns=rename_map)
+                if value_column_name in rename_map:
+                    value_column_name = rename_map[value_column_name]
             elif tv_df.shape[1] == 2:
                 tv_df.columns = ["Value", "Count"]
+                value_column_name = "Value"
+
+            if value_column_name is None and len(tv_df.columns) > 0:
+                value_column_name = tv_df.columns[0]
+
+            nulls = _safe_int(row.get("nulls"))
+            row_cnt = _safe_int(row.get("row_cnt"))
+            null_pct = _safe_float(row.get("null_pct"))
+            is_all_null = False
+            if nulls is not None and row_cnt is not None and row_cnt > 0:
+                is_all_null = nulls >= row_cnt
+            if not is_all_null and null_pct is not None:
+                if math.isclose(null_pct, 1.0, rel_tol=1e-9) or math.isclose(
+                    null_pct, 100.0, rel_tol=1e-9
+                ):
+                    is_all_null = True
+
+            if is_all_null and value_column_name in tv_df.columns:
+                value_series = tv_df[value_column_name]
+                null_mask = value_series.isna()
+                if null_mask.any():
+                    tv_df = tv_df[null_mask].head(1).copy()
+                else:
+                    tv_df = tv_df.head(1).copy()
 
             if "Count" in tv_df.columns:
                 tv_df["Count"] = tv_df["Count"].apply(_format_count)
             for col in tv_df.columns:
                 if col == "Count":
                     continue
-                tv_df[col] = tv_df[col].apply(_stringify_for_display)
+                if value_column_name and col == value_column_name:
+                    tv_df[col] = tv_df[col].apply(_format_top_value_cell)
+                else:
+                    tv_df[col] = tv_df[col].apply(_stringify_for_display)
                 if "pct" in col.lower():
                     tv_df[col] = tv_df[col].apply(_format_percentage)
 
