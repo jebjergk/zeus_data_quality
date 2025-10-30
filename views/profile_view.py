@@ -1354,7 +1354,10 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
 
             tv_df = pd.DataFrame(values)
             if tv_df.empty:
-                st.table(tv_df)
+                if non_nulls_value is not None and non_nulls_value <= 0:
+                    st.info("No non-null values to display.")
+                else:
+                    st.info("No top values available.")
                 continue
 
             # Normalize common column names when present; otherwise fall back gracefully
@@ -1412,9 +1415,20 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
                     tv_df = pd.concat([tv_df, pd.DataFrame([new_row])], ignore_index=True)
 
             if value_column_name and value_column_name in tv_df.columns:
+                null_bucket_mask = tv_df[value_column_name] == "__NULL__"
+                if null_bucket_mask.any():
+                    tv_df = tv_df.loc[~null_bucket_mask].copy()
+                tv_df = tv_df.loc[~tv_df[value_column_name].isna()].copy()
                 tv_df[value_column_name] = tv_df[value_column_name].replace(
                     {"__EMPTY__": '"" (empty/whitespace)'}
                 )
+
+            if tv_df.empty:
+                if non_nulls_value is not None and non_nulls_value <= 0:
+                    st.info("No non-null values to display.")
+                else:
+                    st.info("No top values available.")
+                continue
 
             for pct_col in pct_columns:
                 tv_df[pct_col] = tv_df[pct_col].apply(_safe_float)
