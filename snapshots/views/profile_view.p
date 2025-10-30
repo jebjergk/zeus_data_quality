@@ -7,7 +7,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from numbers import Integral, Real
-from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import pandas as pd
 import streamlit as st
@@ -942,6 +942,22 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
         "Confidence",
         "Note",
     ]
+    confidence_legend_html = """
+    <div style="display:flex; gap:12px; align-items:center; font-size:0.85rem; margin:0.5rem 0;">
+        <span style="display:flex; align-items:center; gap:4px;">
+            <span style="width:12px; height:12px; border-radius:2px; background-color:#2e7d32; display:inline-block;"></span>
+            <span>Green ≥90% (High)</span>
+        </span>
+        <span style="display:flex; align-items:center; gap:4px;">
+            <span style="width:12px; height:12px; border-radius:2px; background-color:#f9a825; display:inline-block;"></span>
+            <span>Amber 75–89% (Medium)</span>
+        </span>
+        <span style="display:flex; align-items:center; gap:4px;">
+            <span style="width:12px; height:12px; border-radius:2px; background-color:#9e9e9e; display:inline-block;"></span>
+            <span>Grey &lt;75% (Low/Unknown)</span>
+        </span>
+    </div>
+    """
     if not display_df.empty:
         def _is_string_type_name(type_name: Any) -> bool:
             upper = str(type_name or "").upper()
@@ -1032,49 +1048,11 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
                 formatted = f"{value:.0f}"
             return f"{formatted}%"
 
-        def _confidence_style(value: Any) -> Dict[str, str]:
-            numeric = _safe_float(value)
-            if numeric is None:
-                if isinstance(value, str) and value.endswith("%"):
-                    numeric = _safe_float(value.replace("%", ""))
-            if numeric is None or math.isnan(float(numeric)):
-                return {}
-            if numeric >= 90.0:
-                return {"backgroundColor": "#2e7d32", "color": "#ffffff"}
-            if numeric >= 75.0:
-                return {"backgroundColor": "#f9a825", "color": "#000000"}
-            return {"backgroundColor": "#9e9e9e", "color": "#ffffff"}
-
         def _format_whitespace_display(value: Any) -> str:
             numeric = _safe_float(value)
             if numeric is None or math.isclose(numeric, 0.0, abs_tol=1e-9):
                 return "—"
             return f"{numeric:.1f}%"
-
-        def _whitespace_cell_style(value: Any) -> Dict[str, str]:
-            numeric = _safe_float(value)
-            if numeric is None:
-                if isinstance(value, str) and value.endswith("%"):
-                    numeric = _safe_float(value.replace("%", ""))
-            if numeric is None or numeric <= 0:
-                return {}
-            if numeric >= 20.0:
-                return {"color": "#c62828", "font-weight": "600"}
-            if numeric >= 5.0:
-                return {"color": "#f9a825", "font-weight": "600"}
-            return {}
-
-        def _column_config_with_optional_style(
-            factory: Callable[..., Any], *args: Any, cell_style: Optional[Callable[[Any], Dict[str, str]]] = None, **kwargs: Any
-        ) -> Any:
-            """Create a column config, gracefully ignoring unsupported cell_style argument."""
-
-            if cell_style is None:
-                return factory(*args, **kwargs)
-            try:
-                return factory(*args, cell_style=cell_style, **kwargs)
-            except TypeError:
-                return factory(*args, **kwargs)
 
         def _compose_note(row: pd.Series) -> str:
             text_value = _stringify_for_display(row.get("dq_reason"))
@@ -1126,55 +1104,31 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
         display_df_local["_confidence_pct"] = display_df_local["confidence"].apply(
             _normalize_confidence
         )
-        display_df_local["Confidence"] = display_df_local["_confidence_pct"].apply(
-            lambda value: _format_confidence_display(value) or "—"
-        )
         display_df_local["Note"] = display_df_local.apply(_compose_note, axis=1)
+        grid_container = st.container()
 
-        editor_df = display_df_local[grid_columns].copy()
-        editor_df["Include"] = editor_df["Include"].astype(bool)
-        column_config = {
-            "Include": st.column_config.CheckboxColumn(
-                "Include",
-                help="Toggle to include the column in downstream DQ suggestions.",
-            ),
-            "Column": st.column_config.Column("Column", disabled=True),
-            "Physical Type": st.column_config.Column("Physical Type", disabled=True),
-            "Nulls": st.column_config.Column("Nulls", disabled=True),
-            "Distinct": st.column_config.Column("Distinct", disabled=True),
-            "Avg Length": st.column_config.Column("Avg Length", disabled=True),
-            "Min Value": st.column_config.Column("Min Value", disabled=True),
-            "Max Value": st.column_config.Column("Max Value", disabled=True),
-            "Whitespace %": _column_config_with_optional_style(
-                st.column_config.TextColumn,
-                "Whitespace %",
-                disabled=True,
-                cell_style=_whitespace_cell_style,
-            ),
-            "Guessed Type": st.column_config.Column("Guessed Type", disabled=True),
-            "Confidence": _column_config_with_optional_style(
-                st.column_config.TextColumn,
-                "Confidence",
-                disabled=True,
-                cell_style=_confidence_style,
-            ),
-            "Note": st.column_config.Column("Note", disabled=True),
-        }
-
-        edited = st.data_editor(
-            editor_df,
+        selection_df = display_df_local[["Column", "Include"]].copy()
+        selection_df["Include"] = selection_df["Include"].fillna(False).astype(bool)
+        selection_editor = st.data_editor(
+            selection_df,
             use_container_width=True,
             hide_index=True,
-            column_config=column_config,
+            column_config={
+                "Include": st.column_config.CheckboxColumn(
+                    "Include",
+                    help="Toggle to include the column in downstream DQ suggestions.",
+                ),
+                "Column": st.column_config.Column("Column", disabled=True),
+            },
             key="profile_grid_editor",
         )
 
         selected_total = 0
         include_total = 0
         include_map: Dict[str, bool] = {}
-        if isinstance(edited, pd.DataFrame) and not edited.empty:
-            include_series = edited.get("Include")
-            column_series = edited.get("Column")
+        if isinstance(selection_editor, pd.DataFrame) and not selection_editor.empty:
+            include_series = selection_editor.get("Include")
+            column_series = selection_editor.get("Column")
             if include_series is not None and column_series is not None:
                 include_flags = include_series.fillna(False).astype(bool)
                 include_total = int(include_flags.shape[0])
@@ -1185,12 +1139,63 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
                 }
         st.session_state["profile_selection_counts"] = (selected_total, include_total)
 
-        if include_map and profile_result:
-            for column_payload in profile_result.get("columns", []):
-                column_name = str(column_payload.get("column_name") or "")
-                if column_name in include_map:
-                    column_payload["dq_selected"] = include_map[column_name]
-            st.session_state["profile_results"] = profile_result
+        if include_map:
+            include_lookup = {**include_map}
+            display_df_local["Include"] = (
+                display_df_local["Column"].map(include_lookup)
+                .fillna(display_df_local["Include"])
+                .fillna(False)
+                .astype(bool)
+            )
+            if profile_result:
+                for column_payload in profile_result.get("columns", []):
+                    column_name = str(column_payload.get("column_name") or "")
+                    if column_name in include_lookup:
+                        column_payload["dq_selected"] = include_lookup[column_name]
+                st.session_state["profile_results"] = profile_result
+
+        confidence_numeric = pd.to_numeric(
+            display_df_local["_confidence_pct"], errors="coerce"
+        ).clip(lower=0.0, upper=100.0)
+        display_df_local["Confidence"] = confidence_numeric
+
+        grid_df = display_df_local[grid_columns].copy()
+        grid_df["Include"] = grid_df["Include"].fillna(False).astype(bool)
+        grid_df["Confidence"] = confidence_numeric
+
+        def _confidence_css(series: pd.Series) -> List[str]:
+            styles: List[str] = []
+            for value in series:
+                numeric_value = _safe_float(value)
+                if numeric_value is None:
+                    styles.append("background-color: #9e9e9e; color: #ffffff;")
+                elif numeric_value >= 90.0:
+                    styles.append("background-color: #2e7d32; color: #ffffff;")
+                elif numeric_value >= 75.0:
+                    styles.append("background-color: #f9a825; color: #000000;")
+                else:
+                    styles.append("background-color: #9e9e9e; color: #ffffff;")
+            return styles
+
+        def _confidence_display(value: Any) -> str:
+            numeric_value = _safe_float(value)
+            if numeric_value is None:
+                return "—"
+            formatted = _format_confidence_display(numeric_value)
+            return formatted or "—"
+
+        grid_styler = (
+            grid_df.style.format({"Confidence": _confidence_display})
+            .apply(_confidence_css, subset=["Confidence"])
+        )
+
+        with grid_container:
+            st.markdown(confidence_legend_html, unsafe_allow_html=True)
+            st.dataframe(
+                grid_styler,
+                use_container_width=True,
+                hide_index=True,
+            )
 
     else:
         empty_df = pd.DataFrame(
@@ -1199,14 +1204,12 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
                 for column in grid_columns
             }
         )
-        st.data_editor(
-            empty_df,
+        empty_styler = empty_df.style
+        st.markdown(confidence_legend_html, unsafe_allow_html=True)
+        st.dataframe(
+            empty_styler,
             use_container_width=True,
             hide_index=True,
-            column_config={
-                "Include": st.column_config.CheckboxColumn("Include"),
-            },
-            key="profile_grid_editor",
         )
         st.session_state["profile_selection_counts"] = (0, 0)
 
