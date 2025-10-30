@@ -1568,6 +1568,7 @@ def run_table_profile(
         num_date_min_alias: Optional[str] = "NUMDATE_MIN"
         num_date_max_alias: Optional[str] = "NUMDATE_MAX"
         num_date_expr_sql: Optional[str] = None
+        guarded_numeric_expr: Optional[str] = None
         is_numeric = _is_numeric(dtype)
         if is_numeric:
             metrics_sql.extend(
@@ -1616,6 +1617,10 @@ def run_table_profile(
                 f"SUM(CASE WHEN {qcol} IS NOT NULL AND {qcol}::STRING != TRIM({qcol}::STRING) THEN 1 ELSE 0 END) AS LEAD_TRAIL_WS_ROWS"
             )
             digits_expr = "REGEXP_REPLACE({col}::STRING, '[^0-9]', '')".format(col=qcol)
+            guarded_numeric_expr = (
+                "CASE WHEN LENGTH({digits}) = 8 AND {digits} NOT IN ('00000000') "
+                "THEN {digits} ELSE NULL END"
+            ).format(digits=digits_expr)
             num_date_expr_sql = (
                 "CASE WHEN LENGTH({digits}) = 8 AND {digits} NOT IN ('00000000') "
                 "THEN TRY_TO_DATE({digits}, 'YYYYMMDD') ELSE NULL END"
