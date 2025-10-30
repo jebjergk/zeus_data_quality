@@ -1155,7 +1155,6 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
                         format="%.1f%%",
                         min_value=0.0,
                         max_value=100.0,
-                        disabled=True,
                     ),
                     "Note": st.column_config.Column("Note", disabled=True),
                 },
