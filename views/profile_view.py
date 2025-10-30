@@ -13,7 +13,13 @@ import pandas as pd
 import streamlit as st
 
 from services.profile import build_profile_suggestion
-from services.profiling import normalize_profile_row, run_table_profile, save_profile_results
+from services.profiling import (
+    list_saved_profiles,
+    load_profile_run,
+    normalize_profile_row,
+    run_table_profile,
+    save_profile_results,
+)
 from utils.meta import get_table_row_count
 from views.table_picker import session_cache_token, stateless_table_picker
 
@@ -568,6 +574,46 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
         st.session_state["profile_target_fqn"] = selected_fqn
 
     st.divider()
+
+    def _format_saved_run_label(run: Dict[str, Any]) -> str:
+        run_at = run.get("run_at")
+        if isinstance(run_at, datetime):
+            run_at_display = run_at.strftime("%Y-%m-%d %H:%M")
+        else:
+            run_at_display = str(run_at) if run_at else "Unknown time"
+        summary_payload = run.get("summary") or {}
+        if isinstance(summary_payload, dict):
+            target_table = summary_payload.get("target_table") or summary_payload.get("table")
+            top_n_raw = summary_payload.get("top_n")
+            try:
+                top_n = int(float(top_n_raw)) if top_n_raw is not None else None
+            except Exception:
+                top_n = None
+        else:
+            target_table = None
+            top_n = None
+        table_display = str(target_table or "Unknown table")
+        run_id_value = str(run.get("run_id") or "")
+        short_id = run_id_value[:8] if run_id_value else "—"
+        top_n_suffix = f" (Top {top_n})" if isinstance(top_n, (int, float)) else ""
+        return f"{run_at_display} — {table_display}{top_n_suffix} — {short_id}"
+
+    saved_profiles_enabled = bool(session and meta_db and meta_schema)
+    saved_profile_runs: List[Dict[str, Any]] = []
+    if saved_profiles_enabled:
+        saved_profile_runs = list_saved_profiles(session, meta_db, meta_schema)
+
+    saved_run_lookup: Dict[str, str] = {}
+    saved_run_labels: List[str] = []
+    for run in saved_profile_runs:
+        run_id_value = run.get("run_id")
+        if not run_id_value:
+            continue
+        run_id_str = str(run_id_value)
+        label = _format_saved_run_label(run)
+        saved_run_lookup[label] = run_id_str
+        saved_run_labels.append(label)
+
     controls = st.columns(3)
     suggested_pct = 10.0
     row_count: Optional[int] = None
@@ -620,12 +666,70 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
             step=1,
             help=f"Collect up to {MAX_TOP_N} of the most common values per column.",
         )
+    load_selected_run_id: Optional[str] = None
+    load_button_clicked = False
     with controls[2]:
-        save_profile = st.button("💾 Save Profile", disabled=True, help="Coming soon")
-        if save_profile:
-            st.info("Saving profiles is not yet supported.")
+        if saved_run_labels:
+            load_options = ["— Select a saved run —"] + saved_run_labels
+            selected_option = st.selectbox(
+                "Load saved profile",
+                options=load_options,
+                key="profile_load_select",
+                disabled=not saved_profiles_enabled,
+            )
+            if selected_option in saved_run_lookup:
+                load_selected_run_id = saved_run_lookup[selected_option]
+        else:
+            st.selectbox(
+                "Load saved profile",
+                options=["— No saved profiles —"],
+                key="profile_load_select",
+                disabled=True,
+            )
+        load_button_clicked = st.button(
+            "Load",
+            key="profile_load_button",
+            disabled=not (saved_profiles_enabled and load_selected_run_id),
+        )
+        if not saved_profiles_enabled:
+            st.caption(
+                "Connect to Snowflake and configure metadata targets to enable loading saved profiles."
+            )
+        elif not saved_run_labels:
+            st.caption("No saved profiles found in metadata tables yet.")
+
+    if load_button_clicked:
+        if not saved_profiles_enabled:
+            st.warning("Loading profiles requires a Snowflake connection and metadata configuration.")
+        elif not load_selected_run_id:
+            st.warning("Select a saved run to load.")
+        else:
+            try:
+                loaded_profile = load_profile_run(
+                    session=session,
+                    meta_db=meta_db,
+                    meta_schema=meta_schema,
+                    run_id=load_selected_run_id,
+                )
+            except Exception as exc:  # pragma: no cover - Snowflake specific
+                st.error(f"Failed to load saved profile: {exc}")
+            else:
+                if not loaded_profile:
+                    st.warning("Saved profile was not found or is empty.")
+                else:
+                    st.session_state["profile_results"] = loaded_profile
+                    st.session_state["profile_loaded_run_id"] = load_selected_run_id
+                    target_table = loaded_profile.get("target_table")
+                    if target_table:
+                        st.session_state["profile_target_fqn"] = target_table
+                    st.success(f"Loaded saved profile {load_selected_run_id}.")
+                    st.rerun()
 
     stored_profile_result = st.session_state.get("profile_results")
+    loaded_run_id = st.session_state.get("profile_loaded_run_id")
+    if loaded_run_id and not stored_profile_result:
+        st.session_state.pop("profile_loaded_run_id", None)
+        loaded_run_id = None
     selection_state_raw = st.session_state.get("profile_select")
     if isinstance(selection_state_raw, dict):
         selection_state: Dict[str, bool] = dict(selection_state_raw)
@@ -683,8 +787,9 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
     )
 
     button_cols = st.columns([1, 1, 2])
+    run_disabled = bool(loaded_run_id)
     with button_cols[0]:
-        run_profile = st.button("▶️ Run Profile", type="primary")
+        run_profile = st.button("▶️ Run Profile", type="primary", disabled=run_disabled)
     with button_cols[1]:
         suggest_cfg = st.button(
             "✨ Suggest DQ Config",
@@ -692,9 +797,24 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
             disabled=not stored_profile_result,
         )
 
+    clear_loaded = False
+    if loaded_run_id:
+        with button_cols[2]:
+            st.info("Viewing a saved profile.")
+            clear_loaded = st.button("Clear loaded profile", key="profile_clear_loaded")
+    else:
+        button_cols[2].empty()
+
+    if clear_loaded:
+        st.session_state.pop("profile_loaded_run_id", None)
+        loaded_run_id = None
+        st.rerun()
+
     profile_result = stored_profile_result
 
     if run_profile:
+        st.session_state.pop("profile_loaded_run_id", None)
+        loaded_run_id = None
         if not session:
             st.error("No active Snowpark session — unable to profile tables.")
         elif not selected_fqn:
