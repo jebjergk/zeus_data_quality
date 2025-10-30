@@ -1394,13 +1394,16 @@ def run_table_profile(
                 "CASE WHEN {trim} IN ({sentinels}) THEN NULL ELSE TO_VARCHAR({col}) END"
             ).format(trim=trimmed_expr, sentinels=", ".join(sentinel_values), col=qcol)
             metrics_sql.append(
+                f"SUM(CASE WHEN {qcol}::STRING = '' THEN 1 ELSE 0 END) AS EMPTY_STR_ROWS"
+            )
+            metrics_sql.append(
+                f"SUM(CASE WHEN {qcol} IS NOT NULL AND REGEXP_LIKE({qcol}::STRING, '^\\s+$') THEN 1 ELSE 0 END) AS WS_ONLY_ROWS"
+            )
+            metrics_sql.append(
                 f"SUM(CASE WHEN {qcol} IS NOT NULL AND REGEXP_LIKE({qcol}::STRING, '^\\s|\\s$|\\s{{2,}}') THEN 1 ELSE 0 END) AS WHITESPACE_ROWS"
             )
             metrics_sql.append(
                 f"SUM(CASE WHEN {qcol} IS NOT NULL AND {qcol}::STRING != TRIM({qcol}::STRING) THEN 1 ELSE 0 END) AS LEAD_TRAIL_WS_ROWS"
-            )
-            metrics_sql.append(
-                f"SUM(CASE WHEN {qcol} IS NOT NULL AND TRIM({qcol}::STRING) = '' THEN 1 ELSE 0 END) AS ONLY_WS_ROWS"
             )
             num_date_matches_alias = "NUM_YYYYMMDD_MATCHES"
             num_date_min_alias = "NUM_YYYYMMDD_MIN"
@@ -1419,9 +1422,10 @@ def run_table_profile(
                 ]
             )
         else:
+            metrics_sql.append("0 AS EMPTY_STR_ROWS")
+            metrics_sql.append("0 AS WS_ONLY_ROWS")
             metrics_sql.append("0 AS WHITESPACE_ROWS")
             metrics_sql.append("0 AS LEAD_TRAIL_WS_ROWS")
-            metrics_sql.append("0 AS ONLY_WS_ROWS")
             num_date_matches_alias = None
             num_date_min_alias = None
             num_date_max_alias = None
@@ -1621,17 +1625,19 @@ def run_table_profile(
             if is_string:
                 minimal_metrics.extend(
                     [
+                        f"SUM(CASE WHEN {qcol}::STRING = '' THEN 1 ELSE 0 END) AS EMPTY_STR_ROWS",
+                        f"SUM(CASE WHEN {qcol} IS NOT NULL AND REGEXP_LIKE({qcol}::STRING, '^\\s+$') THEN 1 ELSE 0 END) AS WS_ONLY_ROWS",
                         f"SUM(CASE WHEN {qcol} IS NOT NULL AND REGEXP_LIKE({qcol}::STRING, '^\\s|\\s$|\\s{{2,}}') THEN 1 ELSE 0 END) AS WHITESPACE_ROWS",
                         f"SUM(CASE WHEN {qcol} IS NOT NULL AND {qcol}::STRING != TRIM({qcol}::STRING) THEN 1 ELSE 0 END) AS LEAD_TRAIL_WS_ROWS",
-                        f"SUM(CASE WHEN {qcol} IS NOT NULL AND TRIM({qcol}::STRING) = '' THEN 1 ELSE 0 END) AS ONLY_WS_ROWS",
                     ]
                 )
             else:
                 minimal_metrics.extend(
                     [
+                        "0 AS EMPTY_STR_ROWS",
+                        "0 AS WS_ONLY_ROWS",
                         "0 AS WHITESPACE_ROWS",
                         "0 AS LEAD_TRAIL_WS_ROWS",
-                        "0 AS ONLY_WS_ROWS",
                     ]
                 )
             if num_date_matches_alias:
@@ -1733,7 +1739,18 @@ def run_table_profile(
             min_val = _stringify(min_val_raw) if min_val_raw is not None else None
             max_val = _stringify(max_val_raw) if max_val_raw is not None else None
 
+        empty_str_rows = _extract_row_value(row, "EMPTY_STR_ROWS", 0)
         whitespace_rows = _extract_row_value(row, "WHITESPACE_ROWS", 0)
+        try:
+            empty_str_rows_int = int(empty_str_rows)
+        except Exception:
+            try:
+                empty_str_rows_int = int(float(empty_str_rows))
+            except Exception:
+                empty_str_rows_int = 0
+
+        lead_trail_ws_rows = _extract_row_value(row, "LEAD_TRAIL_WS_ROWS", 0)
+        ws_only_rows = _extract_row_value(row, "WS_ONLY_ROWS", 0)
         try:
             whitespace_rows_int = int(whitespace_rows)
         except Exception:
@@ -1742,7 +1759,6 @@ def run_table_profile(
             except Exception:
                 whitespace_rows_int = 0
 
-        lead_trail_ws_rows = _extract_row_value(row, "LEAD_TRAIL_WS_ROWS", 0)
         try:
             lead_trail_ws_rows_int = int(lead_trail_ws_rows)
         except Exception:
@@ -1751,14 +1767,13 @@ def run_table_profile(
             except Exception:
                 lead_trail_ws_rows_int = 0
 
-        only_ws_rows = _extract_row_value(row, "ONLY_WS_ROWS", 0)
         try:
-            only_ws_rows_int = int(only_ws_rows)
+            ws_only_rows_int = int(ws_only_rows)
         except Exception:
             try:
-                only_ws_rows_int = int(float(only_ws_rows))
+                ws_only_rows_int = int(float(ws_only_rows))
             except Exception:
-                only_ws_rows_int = 0
+                ws_only_rows_int = 0
 
         num_date_cnt_raw = _extract_row_value(row, num_date_matches_alias or "", 0) if num_date_matches_alias else 0
         try:
@@ -1785,7 +1800,7 @@ def run_table_profile(
             distinct_pct = None
         whitespace_ratio = (float(whitespace_rows_int) / float(non_nulls)) if non_nulls else 0.0
         lead_trail_ws_ratio = (float(lead_trail_ws_rows_int) / float(non_nulls)) if non_nulls else 0.0
-        only_ws_ratio = (float(only_ws_rows_int) / float(non_nulls)) if non_nulls else 0.0
+        only_ws_ratio = (float(ws_only_rows_int) / float(non_nulls)) if non_nulls else 0.0
         num_date_ratio = (float(num_date_cnt) / float(non_nulls)) if non_nulls else 0.0
         num_date_min_value = str(num_date_min_raw) if num_date_min_raw is not None else None
         num_date_max_value = str(num_date_max_raw) if num_date_max_raw is not None else None
@@ -1984,6 +1999,54 @@ def run_table_profile(
             except Exception:
                 top_values = []
                 top_coverage = 0
+
+        whitespace_length_counts: List[Tuple[int, int]] = []
+        if is_string and ws_only_rows_int > 0 and rows_profiled:
+            ws_len_sql = (
+                f"SELECT LENGTH({qcol}::STRING) AS WS_LEN, COUNT(*) AS CNT FROM {sampled_ref} "
+                f"WHERE {qcol} IS NOT NULL AND REGEXP_LIKE({qcol}::STRING, '^\\s+$') "
+                "GROUP BY 1 ORDER BY 1"
+            )
+            try:
+                for item in session.sql(ws_len_sql).collect():
+                    if hasattr(item, "asDict"):
+                        data = item.asDict()
+                        length_raw = data.get("WS_LEN") if "WS_LEN" in data else data.get("ws_len")
+                        count_raw = data.get("CNT") if "CNT" in data else data.get("cnt")
+                    else:
+                        length_raw = item[0]
+                        count_raw = item[1] if len(item) > 1 else 0
+                    try:
+                        length_int = int(length_raw) if length_raw is not None else None
+                    except Exception:
+                        try:
+                            length_int = int(float(length_raw)) if length_raw is not None else None
+                        except Exception:
+                            length_int = None
+                    try:
+                        count_int = int(count_raw)
+                    except Exception:
+                        try:
+                            count_int = int(float(count_raw))
+                        except Exception:
+                            count_int = 0
+                    if length_int is None:
+                        continue
+                    whitespace_length_counts.append((length_int, count_int))
+            except Exception:
+                whitespace_length_counts = []
+
+        if nulls_int > 0:
+            pct = (float(nulls_int) / float(row_cnt) * 100.0) if row_cnt else 0.0
+            top_values.append({"value": None, "count": nulls_int, "pct": pct})
+        if is_string and empty_str_rows_int > 0:
+            pct = (float(empty_str_rows_int) / float(non_nulls) * 100.0) if non_nulls else 0.0
+            top_values.append({"value": "", "count": empty_str_rows_int, "pct": pct})
+        if is_string and whitespace_length_counts and non_nulls:
+            for length_int, count_int in whitespace_length_counts:
+                pct = (float(count_int) / float(non_nulls) * 100.0) if non_nulls else 0.0
+                top_values.append({"value": f"__WS_LEN__:{length_int}", "count": count_int, "pct": pct})
+
         coverage_pct = (float(top_coverage) / non_nulls * 100.0) if non_nulls else 0.0
 
         top1_ratio = None
@@ -2094,6 +2157,8 @@ def run_table_profile(
                 "whitespace_ratio": whitespace_ratio,
                 "lead_trail_ws_ratio": lead_trail_ws_ratio,
                 "only_ws_ratio": only_ws_ratio,
+                "empty_str_count": empty_str_rows_int,
+                "whitespace_only_count": ws_only_rows_int,
             }
             signals["date_patterns"] = {str(key): date_pattern_ratios.get(key) for key in date_pattern_ratios}
             signals["date_parse"] = {
