@@ -1219,35 +1219,85 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
     st.subheader("Top values by column", anchor=False)
     for _, row in filtered_df.iterrows():
         values = row.get("top_values", [])
-        if not values:
-            continue
-        with st.expander(f"{row['column_name']} ({len(values)} values)"):
+        non_nulls_value = _safe_int(row.get("non_nulls"))
+        label_suffix = f"{len(values)} values"
+        with st.expander(f"{row['column_name']} ({label_suffix})"):
+            if not values:
+                if non_nulls_value is not None and non_nulls_value <= 0:
+                    st.info("No non-null values to display.")
+                else:
+                    st.info("No top values available.")
+                continue
+
             tv_df = pd.DataFrame(values)
             if tv_df.empty:
                 st.table(tv_df)
                 continue
 
             # Normalize common column names when present; otherwise fall back gracefully
-            rename_map = {}
+            rename_map: Dict[Any, str] = {}
             value_column_name: Optional[str] = None
+            count_column_name: Optional[str] = None
             for candidate in tv_df.columns:
-                if str(candidate).lower() in {"value", "val", "values"}:
+                lowered = str(candidate).lower()
+                if lowered in {"value", "val", "values"} and value_column_name is None:
                     value_column_name = candidate
-                    break
-            if "value" in tv_df.columns:
-                rename_map["value"] = "Value"
-            if "count" in tv_df.columns:
-                rename_map["count"] = "Count"
+                if lowered in {"count", "cnt"} and count_column_name is None:
+                    count_column_name = candidate
+            if value_column_name is not None:
+                rename_map[value_column_name] = "Value"
+            if count_column_name is not None:
+                rename_map[count_column_name] = "Count"
             if rename_map:
                 tv_df = tv_df.rename(columns=rename_map)
-                if value_column_name in rename_map:
-                    value_column_name = rename_map[value_column_name]
+                if value_column_name is not None:
+                    value_column_name = "Value"
+                if count_column_name is not None:
+                    count_column_name = "Count"
             elif tv_df.shape[1] == 2:
                 tv_df.columns = ["Value", "Count"]
                 value_column_name = "Value"
+                count_column_name = "Count"
 
             if value_column_name is None and len(tv_df.columns) > 0:
                 value_column_name = tv_df.columns[0]
+            if count_column_name is None and "Count" in tv_df.columns:
+                count_column_name = "Count"
+
+            pct_columns = [col for col in tv_df.columns if "pct" in str(col).lower()]
+
+            if value_column_name and count_column_name:
+                empty_mask = tv_df[value_column_name] == "__EMPTY__"
+                if empty_mask.any():
+                    total_empty = (
+                        tv_df.loc[empty_mask, count_column_name]
+                        .apply(lambda x: _safe_int(x) or 0)
+                        .sum()
+                    )
+                    tv_df = tv_df.loc[~empty_mask].copy()
+                    new_row = {col: None for col in tv_df.columns}
+                    new_row[value_column_name] = "__EMPTY__"
+                    new_row[count_column_name] = total_empty
+                    if pct_columns:
+                        denom_raw = non_nulls_value
+                        if denom_raw is None or denom_raw <= 0:
+                            pct_value = 0.0
+                        else:
+                            pct_value = (float(total_empty) / float(denom_raw)) * 100.0
+                        for pct_col in pct_columns:
+                            new_row[pct_col] = pct_value
+                    tv_df = pd.concat([tv_df, pd.DataFrame([new_row])], ignore_index=True)
+
+            if value_column_name and value_column_name in tv_df.columns:
+                tv_df[value_column_name] = tv_df[value_column_name].replace(
+                    {"__EMPTY__": '"" (empty/whitespace)'}
+                )
+
+            for pct_col in pct_columns:
+                tv_df[pct_col] = tv_df[pct_col].apply(_safe_float)
+                tv_df[pct_col] = tv_df[pct_col].apply(
+                    lambda x: None if x is None else min(100.0, max(0.0, x))
+                )
 
             nulls = _safe_int(row.get("nulls"))
             row_cnt = _safe_int(row.get("row_cnt"))
@@ -1269,10 +1319,10 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
                 else:
                     tv_df = tv_df.head(1).copy()
 
-            if "Count" in tv_df.columns:
-                tv_df["Count"] = tv_df["Count"].apply(_format_count)
+            if count_column_name and count_column_name in tv_df.columns:
+                tv_df[count_column_name] = tv_df[count_column_name].apply(_format_count)
             for col in tv_df.columns:
-                if col == "Count":
+                if count_column_name and col == count_column_name:
                     continue
                 if value_column_name and col == value_column_name:
                     tv_df[col] = tv_df[col].apply(_format_top_value_cell)

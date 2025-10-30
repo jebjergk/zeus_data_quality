@@ -2221,29 +2221,23 @@ def run_table_profile(
 
         top_values: List[Dict[str, Any]] = []
         top_coverage = 0
-        if top_n_clamped > 0 and rows_profiled:
-            if is_string:
-                val_norm_expr = (
-                    "CASE WHEN {col} IS NULL THEN NULL "
-                    "WHEN REGEXP_REPLACE({col}::STRING, '\\s+', '') = '' THEN '' "
-                    "ELSE {col}::STRING END AS VAL_NORM"
-                ).format(col=qcol)
-            else:
-                val_norm_expr = (
-                    "CASE WHEN {col} IS NULL THEN NULL ELSE {col}::STRING END AS VAL_NORM"
-                ).format(col=qcol)
+        denom_non_nulls = max(1, int(non_nulls or 0))
+        if top_n_clamped > 0 and rows_profiled and non_nulls:
             top_sql = (
                 "WITH base AS (\n"
-                f"    SELECT {val_norm_expr}\n"
+                f"    SELECT {qcol}::STRING AS s\n"
                 f"    FROM {sampled_ref}\n"
-                "), agg AS (\n"
-                "    SELECT VAL_NORM, COUNT(*) AS CNT\n"
+                "), bucketed AS (\n"
+                "    SELECT CASE\n"
+                "        WHEN s IS NULL THEN '__NULL__'\n"
+                "        WHEN REGEXP_LIKE(s, '^\\s*$') THEN '__EMPTY__'\n"
+                "        ELSE s\n"
+                "    END AS BUCKET\n"
                 "    FROM base\n"
-                "    WHERE VAL_NORM IS NOT NULL\n"
-                "    GROUP BY VAL_NORM\n"
                 ")\n"
-                "SELECT VAL_NORM AS VALUE, CNT\n"
-                "FROM agg\n"
+                "SELECT BUCKET AS VALUE, COUNT(*) AS CNT\n"
+                "FROM bucketed\n"
+                "GROUP BY 1\n"
                 "ORDER BY CNT DESC\n"
                 f"LIMIT {top_n_clamped}"
             )
@@ -2263,8 +2257,10 @@ def run_table_profile(
                             count_int = int(float(count_raw))
                         except Exception:
                             count_int = 0
+                    if value == "__NULL__":
+                        continue
                     top_coverage += count_int
-                    pct = (float(count_int) / float(non_nulls) * 100.0) if non_nulls else 0.0
+                    pct = (float(count_int) / float(denom_non_nulls) * 100.0)
                     top_values.append({"value": value, "count": count_int, "pct": pct})
             except Exception:
                 top_values = []
@@ -2308,12 +2304,8 @@ def run_table_profile(
 
         if is_string and whitespace_length_counts and non_nulls:
             for length_int, count_int in whitespace_length_counts:
-                pct = (float(count_int) / float(non_nulls) * 100.0) if non_nulls else 0.0
+                pct = (float(count_int) / float(denom_non_nulls) * 100.0)
                 top_values.append({"value": f"__WS_LEN__:{length_int}", "count": count_int, "pct": pct})
-
-        if nulls_int > 0:
-            pct = (float(nulls_int) / float(row_cnt) * 100.0) if row_cnt else 0.0
-            top_values.append({"value": None, "count": nulls_int, "pct": pct})
 
         coverage_pct = (float(top_coverage) / non_nulls * 100.0) if non_nulls else 0.0
 
