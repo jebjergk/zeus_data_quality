@@ -74,7 +74,7 @@ def _is_string_type(data_type: str) -> bool:
 
 SEMANTIC_REGEX_PATTERNS: Dict[str, str] = {
     "email": r"^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$",
-    "iban": r"^[A-Z]{2}[0-9A-Z]{13,32}$",
+    "iban": r"^[A-Z]{2}\d{2}[0-9A-Z]{11,30}$",
     "isin": r"^[A-Z]{2}[A-Z0-9]{9}[0-9]$",
     "bic": r"^[A-Z]{4}[A-Z]{2}[A-Z0-9]{2}([A-Z0-9]{3})?$",
     "uuid": r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
@@ -570,12 +570,6 @@ def _infer_semantic_type(
         _boost("EMAIL", 20.0, "column name references email")
 
     iban_ratio = _ratio(regex, "iban")
-    if iban_ratio > 0:
-        _boost("IBAN", 90.0 * min(iban_ratio, 1.0), f"{iban_ratio:.0%} values look like IBANs")
-    if hints.get("iban"):
-        _boost("IBAN", 20.0, "column name references IBAN")
-    if length_min is not None and length_max is not None and 15 <= length_min <= 34 and length_max <= 34:
-        _boost("IBAN", 10.0, "length range matches IBAN expectation")
 
     isin_ratio = _ratio(regex, "isin")
     if isin_ratio > 0:
@@ -1103,6 +1097,38 @@ def _infer_semantic_type(
             boolean_candidates.add(text.upper())
 
     uppercase_ratio = (float(uppercase_matches) / float(total_matches)) if total_matches else 0.0
+
+    iban_negative_prior = False
+    top3_ratio_value = (
+        float(top3_ratio_signal)
+        if top3_ratio_signal is not None
+        else None
+    )
+    if (
+        (top3_ratio_value is not None and top3_ratio_value >= 0.9)
+        or (length_spread is not None and length_spread > 4.0)
+    ):
+        iban_negative_prior = True
+
+    iban_length_ok = (
+        length_min is not None
+        and length_max is not None
+        and length_min >= 15.0
+        and length_max <= 34.0
+    )
+    if (
+        not iban_negative_prior
+        and iban_length_ok
+        and iban_ratio >= 0.80
+        and uppercase_ratio >= 0.6
+    ):
+        _boost(
+            "IBAN",
+            90.0 * min(iban_ratio, 1.0),
+            f"{iban_ratio:.0%} values look like IBANs",
+        )
+        if hints.get("iban"):
+            _boost("IBAN", 10.0, "column name references IBAN")
 
     if hints.get("ticker"):
         _boost("TICKER/SYMBOL", 30.0, "column name references ticker/symbol")
