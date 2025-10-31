@@ -1,31 +1,7 @@
 {
-  "buttons": [
-    "Load",
-    "▶️ Run Profile",
-    "✨ Suggest DQ Config",
-    "Clear loaded profile"
-  ],
-  "captions": [
-    "Profile a table to explore null rates, distinct counts, ranges, and common values before defining data quality checks.",
-    "Connect to Snowflake and configure metadata targets to enable loading saved profiles.",
-    "No saved profiles found in metadata tables yet."
-  ],
-  "grid_columns": [
-    "Select",
-    "Column",
-    "Physical Type",
-    "Nulls",
-    "Distinct",
-    "Avg Length",
-    "Min Value",
-    "Max Value",
-    "Whitespace %",
-    "Guessed Type",
-    "Confidence",
-    "Note"
-  ],
-  "headers": [
-    "🧪 Profile Table"
-  ],
-  "include_column_alias": "Select"
+  "buttons": [],
+  "captions": [],
+  "grid_columns": null,
+  "headers": [],
+  "include_column_alias": null
 }
