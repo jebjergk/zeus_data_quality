@@ -23,20 +23,19 @@ Forbidden patterns:
 from __future__ import annotations
 
 from typing import Tuple
-import os
 
 import streamlit as st
 
 from utils.meta import _q
 
-_CONTRACT_ENV_FLAG = "UI_CONTRACT_STRICT"
+from ui import strings as ui_strings
+from utils.flags import DEMO_LOCK, UI_CONTRACT_STRICT
 
 
 def _contract_message(message: str) -> None:
     """Display contract feedback as warning or error based on strict mode."""
 
-    strict = os.getenv(_CONTRACT_ENV_FLAG, "0") == "1"
-    if strict:
+    if UI_CONTRACT_STRICT or DEMO_LOCK:
         st.error(message)
     else:
         st.warning(message)
@@ -68,23 +67,12 @@ def render_docs(
     run_results_table: str,
 ) -> None:
     """Render the documentation tabs for the Streamlit application."""
-    st.header("Zeus Data Quality documentation")
+    st.header(ui_strings.DOCS_HEADER)
 
-    tabs = st.tabs(
-        [
-            "User Guide",
-            "Profiling",
-            "DQ Framework",
-            "Technical Overview",
-            "Data Governance",
-            "Version History",
-        ]
-    )
+    tabs = st.tabs(ui_strings.DOCS_EXPECTED_TABS)
 
     if len(tabs) != 6:
-        _contract_message(
-            "UI contract violation in documentation view: expected 6 tabs."
-        )
+        _contract_message(ui_strings.DOCS_CONTRACT_TAB_COUNT)
         return
 
     cfg_tbl_display = _safe_quote(configs_table)

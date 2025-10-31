@@ -1,5 +1,10 @@
 # Zeus Data Quality
 
+[![CI](https://img.shields.io/badge/CI-GitHub%20Actions-blue)](.github/workflows/ci.yml)
+[![Lint](https://img.shields.io/badge/Lint-sqlfluff-green)](.github/workflows/sqlfluff.yml)
+[![Snapshots](https://img.shields.io/badge/Snapshots-mirror-orange)](.github/workflows/mirror-snapshots.yml)
+[![UI Contract](https://img.shields.io/badge/UI--Contract-guarded-purple)](docs/ui_change_guidance.md)
+
 Zeus Data Quality brings monitoring, profiling, and remediation workflows directly into Snowflake so data owners can spot and resolve issues before they affect reporting.
 
 ## Product snapshot
@@ -85,3 +90,12 @@ Outputs include mirrored files under `/snapshots` and a generated `snapshots/SOU
 - Operators see which model assisted, review prompt hashes, and approve guidance before it becomes active.
 
 Zeus Data Quality provides a shared foundation for compliance, risk, and business teams to monitor critical Snowflake assets without moving data out of the platform.
+
+## Governance
+
+- [CONTRIBUTING](CONTRIBUTING.md)
+- [ARCHITECTURE](ARCHITECTURE.md)
+- [UI Contracts](docs/ui_change_guidance.md)
+- [PR Template](.github/pull_request_template.md)
+- No unsolicited UI/UX refactors; gate experiments behind flags.
+- Snapshot updates require explicit intent; set `UPDATE_SNAPSHOTS=1` when regenerating.
