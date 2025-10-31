@@ -1197,6 +1197,12 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
             allowed_types.update(semantic_filter_map.get(key, set()))
         filtered_df = filtered_df[filtered_df["semantic_type"].isin(allowed_types)]
     display_df = filtered_df.copy()
+    for dup in [
+        c
+        for c in display_df.columns
+        if c and c.strip().lower() in {"include", "include "}
+    ]:
+        display_df.drop(columns=[dup], inplace=True, errors="ignore")
     grid_columns = ["Include"] + [
         column
         for column in ui_strings.PROFILE_GRID_COLUMNS
@@ -1324,6 +1330,12 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
             return note
 
         display_df_local = display_df.copy()
+        for dup in [
+            c
+            for c in display_df_local.columns
+            if c and c.strip().lower() in {"include", "include "}
+        ]:
+            display_df_local.drop(columns=[dup], inplace=True, errors="ignore")
         display_df_local["Column"] = display_df_local.get("column_name", "").fillna("").astype(str)
         display_df_local["Physical Type"] = (
             display_df_local.get("data_type", "").fillna("").astype(str)
@@ -1367,12 +1379,13 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
         selection_state: Dict[str, Dict[str, bool]] = st.session_state.setdefault(
             PROFILE_SELECTED_COLS_STATE, {}
         )
-        table_key = str(target_table or "")
-        table_snapshot = dict(selection_state.get(table_key) or {})
-        include_flags: List[bool] = []
-        column_order: List[str] = [
-            str(record.get("Column") or "") for record in records
-        ]
+        selection_table_key = str(
+            target_table or selected_fqn or current_target_fqn or ""
+        )
+        table_snapshot = dict(selection_state.get(selection_table_key) or {})
+        widget_table_key = str(selected_fqn or selection_table_key)
+        active_columns: List[str] = []
+        include_values: List[bool] = []
         grid_container = st.container()
         with grid_container:
             st.markdown(confidence_legend_html, unsafe_allow_html=True)
@@ -1381,34 +1394,45 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
                 include_col, table_col = st.columns([1, 24])
                 with include_col:
                     st.markdown("**Include**")
-                    for column_name, record in zip(column_order, records):
-                        widget_key = (
-                            f"profile_include::{table_key}::{column_name}" if column_name else f"profile_include::{table_key}::"
+                    for record in records:
+                        column_label = str(record.get("Column") or "")
+                        column_name = str(
+                            record.get("column_name") or column_label
                         )
+                        active_columns.append(column_name)
                         cached_value = table_snapshot.get(column_name)
                         if cached_value is None:
                             suggested_default = _safe_bool(record.get("suggested"))
-                            cached_value = bool(suggested_default) if suggested_default is not None else False
+                            cached_value = (
+                                bool(suggested_default)
+                                if suggested_default is not None
+                                else False
+                            )
                         checkbox_value = st.checkbox(
-                            column_name or "(blank)",
+                            "",
                             value=bool(cached_value),
-                            key=widget_key,
+                            key=(
+                                f"profile_include::{widget_table_key}::{column_label}"
+                                if column_label
+                                else f"profile_include::{widget_table_key}::"
+                            ),
+                            label_visibility="hidden",
                         )
-                        include_flags.append(bool(checkbox_value))
+                        include_values.append(bool(checkbox_value))
                         table_snapshot[column_name] = bool(checkbox_value)
 
-                selection_state[table_key] = {
-                    name: bool(value) for name, value in table_snapshot.items()
+                filtered_snapshot = {
+                    name: bool(table_snapshot.get(name, False))
+                    for name in active_columns
                 }
+                selection_state[selection_table_key] = filtered_snapshot
                 st.session_state[PROFILE_SELECTED_COLS_STATE] = selection_state
 
-                if len(include_flags) < len(records):
-                    include_flags.extend([False] * (len(records) - len(include_flags)))
-
-                display_df_local["Include"] = include_flags
-                display_df_local["Include"] = (
-                    display_df_local["Include"].fillna(False).astype(bool)
-                )
+                if include_values:
+                    display_df_local.insert(0, "Include", include_values)
+                    display_df_local["Include"] = (
+                        display_df_local["Include"].fillna(False).astype(bool)
+                    )
                 grid_df = display_df_local[grid_columns].copy()
                 grid_render_allowed = _validate_grid_columns(
                     grid_df.columns, grid_columns, ui_strings.PROFILE_GRID_NAME
