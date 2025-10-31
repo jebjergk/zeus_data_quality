@@ -1,0 +1,12 @@
+labels:
+  - name: ui-contract
+    color: '0E8A16'
+    description: Changes affecting UI contract or view components.
+
+rules:
+  - name: Require ui-contract label for view updates
+    applies_to:
+      paths:
+        - 'views/**'
+    requires:
+      - ui-contract
