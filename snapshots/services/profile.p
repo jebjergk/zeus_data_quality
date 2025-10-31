@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 
 
 def _stringify(value: Any) -> str:
@@ -26,13 +26,29 @@ def _is_string(data_type: str) -> bool:
     return any(token in upper for token in ("CHAR", "STRING", "TEXT", "VARCHAR"))
 
 
-def build_profile_suggestion(profile_result: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+def build_profile_suggestion(
+    profile_result: Dict[str, Any],
+    allowed_columns: Optional[Set[str]] = None,
+) -> Optional[Dict[str, Any]]:
     """Generate heuristic DQ suggestions from a profile result."""
 
     if not profile_result:
         return None
 
     columns: List[Dict[str, Any]] = profile_result.get("columns") or []
+    if allowed_columns:
+        normalized_allowed = {
+            str(column_name)
+            for column_name in allowed_columns
+            if str(column_name or "").strip()
+        }
+        if normalized_allowed:
+            columns = [
+                column
+                for column in columns
+                if str(column.get("name") or column.get("column_name") or "")
+                in normalized_allowed
+            ]
     summary: Dict[str, Any] = profile_result.get("summary") or {}
     rows_profiled = int(summary.get("rows_profiled") or 0)
 

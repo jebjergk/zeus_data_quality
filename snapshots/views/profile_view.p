@@ -37,7 +37,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from numbers import Integral, Real
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 import pandas as pd
 import streamlit as st
@@ -60,12 +60,14 @@ from utils.flags import (
     UI_CONTRACT_STRICT,
 )
 from utils.meta import get_table_row_count
-from utils.state import bulk_set_includes, get_include_map, prune_includes, set_include
 from views.table_picker import session_cache_token, stateless_table_picker
 
 
 FULL_SCAN_WARNING_THRESHOLD = 1_000_000
 MAX_TOP_N = 10
+
+
+PROFILE_SELECTED_COLS_STATE = "profile_selected_cols"
 
 
 def _safe_int(value: Any) -> Optional[int]:
@@ -133,16 +135,6 @@ def _safe_bool(value: Any) -> Optional[bool]:
         if normalized in {"false", "f", "no", "n", "0"}:
             return False
     return None
-
-
-def _selection_key(table_fqn: str, column_name: str) -> str:
-    table_str = str(table_fqn or "")
-    column_str = str(column_name or "")
-    if table_str:
-        return f"{table_str}::{column_str}"
-    return column_str
-
-
 def _contract_message(message: str) -> None:
     """Emit a contract warning or error depending on env configuration."""
 
@@ -166,23 +158,6 @@ def _validate_grid_columns(
         )
         return False
     return True
-
-
-def _detect_secondary_selector_keys(base_key: str) -> List[str]:
-    """Return suspicious session-state keys that hint at duplicate selectors."""
-
-    suspicious: List[str] = []
-    for key in list(st.session_state.keys()):
-        if not isinstance(key, str) or key == base_key:
-            continue
-        if not key.startswith(base_key):
-            continue
-        remainder = key[len(base_key) :]
-        if remainder and remainder[0] in {"_", "-", ":", "."}:
-            suspicious.append(key)
-    return suspicious
-
-
 @dataclass
 class ColumnProfile:
     name: str
@@ -224,6 +199,7 @@ class ColumnProfile:
     semantic_type: Optional[str] = None
     confidence: Optional[float] = None
     rationale: Optional[str] = None
+    suggested: Optional[bool] = None
     dq_selected: Optional[bool] = None
     dq_reason: Optional[str] = None
 
@@ -310,6 +286,7 @@ def _column_profile_from_payload(column: Dict[str, Any]) -> ColumnProfile:
         confidence=_safe_float(normalized.get("confidence")),
         rationale=normalized.get("rationale"),
         whitespace_only_pct=_safe_float(normalized.get("whitespace_only_pct")),
+        suggested=_safe_bool(normalized.get("suggested")),
         dq_selected=_safe_bool(normalized.get("dq_selected")),
         dq_reason=_stringify_for_display(normalized.get("dq_reason")),
     )
@@ -520,6 +497,9 @@ def _profiles_to_frame(profiles: Iterable[ColumnProfile]) -> pd.DataFrame:
                 "semantic_type": profile.semantic_type,
                 "confidence": profile.confidence,
                 "rationale": profile.rationale,
+                "suggested": bool(profile.suggested)
+                if profile.suggested is not None
+                else False,
                 "dq_selected": bool(profile.dq_selected)
                 if profile.dq_selected is not None
                 else False,
@@ -833,30 +813,36 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
         columns_payload = profile_payload.get("columns", [])
         selected = 0
         total = 0
-        active_keys: set[str] = set()
-        state_snapshot = get_include_map()
+        selection_state: Dict[str, Dict[str, bool]] = st.session_state.setdefault(
+            PROFILE_SELECTED_COLS_STATE, {}
+        )
+        table_key = str(table_fqn or "")
+        table_snapshot = dict(selection_state.get(table_key) or {})
+        active_columns: List[str] = []
         for column_payload in columns_payload:
             column_name = str(column_payload.get("column_name") or "")
             if not column_name:
                 continue
-            key = _selection_key(table_fqn, column_name)
-            active_keys.add(key)
-            if initialize_missing and key not in state_snapshot:
-                set_include(key, _safe_bool(column_payload.get("dq_selected")) or False)
-                state_snapshot = get_include_map()
-            column_selected = bool(state_snapshot.get(key, False))
+            active_columns.append(column_name)
+            if initialize_missing and column_name not in table_snapshot:
+                suggested_default = _safe_bool(column_payload.get("suggested"))
+                if suggested_default is None:
+                    suggested_default = False
+                table_snapshot[column_name] = bool(suggested_default)
+            column_selected = bool(table_snapshot.get(column_name, False))
             column_payload["dq_selected"] = column_selected
             if column_selected:
                 selected += 1
             total += 1
-        prefix = f"{table_fqn}::" if table_fqn else ""
-        if prefix:
-            keep_keys = {
-                key
-                for key in state_snapshot.keys()
-                if not key.startswith(prefix) or key in active_keys
+        if active_columns:
+            filtered_snapshot = {
+                name: bool(table_snapshot.get(name, False))
+                for name in active_columns
             }
-            prune_includes(keep_keys)
+        else:
+            filtered_snapshot = {}
+        selection_state[table_key] = filtered_snapshot
+        st.session_state[PROFILE_SELECTED_COLS_STATE] = selection_state
         return (selected, total)
 
     selection_counts = _apply_selection_state(
@@ -956,8 +942,14 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
                 st.session_state[ui_keys.PROFILE_RESULTS_STATE] = profile_result
                 st.rerun()
 
-    def _load_suggestion(profile_payload: Dict[str, Any], success_message: str) -> None:
-        suggestion = build_profile_suggestion(profile_payload)
+    def _load_suggestion(
+        profile_payload: Dict[str, Any],
+        success_message: str,
+        allowed_columns: Optional[Set[str]] = None,
+    ) -> None:
+        suggestion = build_profile_suggestion(
+            profile_payload, allowed_columns=allowed_columns
+        )
         if not suggestion:
             st.info(ui_strings.PROFILE_SUGGEST_EMPTY)
             return
@@ -978,27 +970,43 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
         st.success(success_message)
         st.rerun()
 
-    def _selected_columns(profile_payload: Dict[str, Any]) -> List[Dict[str, Any]]:
-        selected: List[Dict[str, Any]] = []
-        for column_payload in profile_payload.get("columns", []):
-            if _safe_bool(column_payload.get("dq_selected")):
-                selected.append(column_payload)
-        return selected
-
     if suggest_cfg and profile_result:
-        selected_columns = _selected_columns(profile_result)
-        if not selected_columns:
+        table_fqn = str(
+            profile_result.get("target_table") or current_target_fqn or ""
+        )
+        selection_state = st.session_state.get(PROFILE_SELECTED_COLS_STATE, {}) or {}
+        table_selection = selection_state.get(table_fqn, {}) or {}
+        allowed_columns = {
+            str(column_name)
+            for column_name, is_selected in table_selection.items()
+            if is_selected
+        }
+        if not allowed_columns:
             st.warning(ui_strings.PROFILE_SUGGEST_WARNING_EMPTY)
         else:
-            filtered_profile = dict(profile_result)
-            filtered_summary = dict(filtered_profile.get("summary") or {})
-            filtered_summary["columns"] = len(selected_columns)
-            filtered_profile["summary"] = filtered_summary
-            filtered_profile["columns"] = selected_columns
-            _load_suggestion(
-                filtered_profile,
-                ui_strings.PROFILE_SUGGEST_SUCCESS,
-            )
+            filtered_columns = [
+                column_payload
+                for column_payload in profile_result.get("columns", [])
+                if str(
+                    column_payload.get("column_name")
+                    or column_payload.get("name")
+                    or ""
+                )
+                in allowed_columns
+            ]
+            if not filtered_columns:
+                st.warning(ui_strings.PROFILE_SUGGEST_WARNING_EMPTY)
+            else:
+                filtered_profile = dict(profile_result)
+                filtered_summary = dict(filtered_profile.get("summary") or {})
+                filtered_summary["columns"] = len(filtered_columns)
+                filtered_profile["summary"] = filtered_summary
+                filtered_profile["columns"] = filtered_columns
+                _load_suggestion(
+                    filtered_profile,
+                    ui_strings.PROFILE_SUGGEST_SUCCESS,
+                    allowed_columns=allowed_columns,
+                )
 
     if not profile_result:
         return
@@ -1189,7 +1197,11 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
             allowed_types.update(semantic_filter_map.get(key, set()))
         filtered_df = filtered_df[filtered_df["semantic_type"].isin(allowed_types)]
     display_df = filtered_df.copy()
-    grid_columns = ui_strings.PROFILE_GRID_COLUMNS
+    grid_columns = ["Include"] + [
+        column
+        for column in ui_strings.PROFILE_GRID_COLUMNS
+        if column != "Select"
+    ]
     confidence_legend_html = ui_strings.PROFILE_CONFIDENCE_LEGEND_HTML
 
     def _format_confidence_display(value):
@@ -1313,13 +1325,6 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
 
         display_df_local = display_df.copy()
         display_df_local["Column"] = display_df_local.get("column_name", "").fillna("").astype(str)
-        include_snapshot = get_include_map()
-        display_df_local["Select"] = display_df_local["Column"].apply(
-            lambda name: bool(
-                include_snapshot.get(_selection_key(target_table, name), False)
-            )
-        )
-        display_df_local["Select"] = display_df_local["Select"].astype(bool)
         display_df_local["Physical Type"] = (
             display_df_local.get("data_type", "").fillna("").astype(str)
         )
@@ -1354,107 +1359,71 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
             _normalize_confidence
         )
         display_df_local["Note"] = display_df_local.apply(_compose_note, axis=1)
-        grid_container = st.container()
-
         confidence_numeric = pd.to_numeric(
             display_df_local["_confidence_pct"], errors="coerce"
         ).clip(lower=0.0, upper=100.0)
         display_df_local["Confidence"] = confidence_numeric
-
-        formatted_rows: List[List[Any]] = []
-        for _, row in display_df_local.iterrows():
-            formatted_rows.append(
-                [
-                    bool(row.get("Select", False)),
-                    row.get("Column"),
-                    row.get("Physical Type"),
-                    row.get("Nulls"),
-                    row.get("Distinct"),
-                    row.get("Avg Length"),
-                    row.get("Min Value"),
-                    row.get("Max Value"),
-                    row.get("Whitespace %"),
-                    row.get("Guessed Type"),
-                    row.get("Confidence"),
-                    row.get("Note"),
-                ]
-            )
-
-        grid_df = pd.DataFrame(formatted_rows, columns=grid_columns)
-        grid_render_allowed = _validate_grid_columns(
-            grid_df.columns, grid_columns, ui_strings.PROFILE_GRID_NAME
+        records = display_df_local.to_dict("records")
+        selection_state: Dict[str, Dict[str, bool]] = st.session_state.setdefault(
+            PROFILE_SELECTED_COLS_STATE, {}
         )
-        if grid_render_allowed:
-            grid_df["Select"] = grid_df["Select"].fillna(False).astype(bool)
-            grid_df["Confidence"] = grid_df["Confidence"].apply(_safe_float)
-
+        table_key = str(target_table or "")
+        table_snapshot = dict(selection_state.get(table_key) or {})
+        include_flags: List[bool] = []
+        column_order: List[str] = [
+            str(record.get("Column") or "") for record in records
+        ]
+        grid_container = st.container()
         with grid_container:
             st.markdown(confidence_legend_html, unsafe_allow_html=True)
-            include_map: Dict[str, bool] = {}
-            selection_editor: Optional[pd.DataFrame] = None
-            if grid_render_allowed and not grid_df.empty:
-                selection_editor_df = grid_df[["Select", "Column"]].copy()
-                selection_render_allowed = _validate_grid_columns(
-                    selection_editor_df.columns,
-                    ui_strings.PROFILE_SELECTION_EDITOR_COLUMNS,
-                    ui_strings.PROFILE_SELECTION_EDITOR_NAME,
+            grid_df: Optional[pd.DataFrame] = None
+            if records:
+                include_col, table_col = st.columns([1, 24])
+                with include_col:
+                    st.markdown("**Include**")
+                    for column_name, record in zip(column_order, records):
+                        widget_key = (
+                            f"profile_include::{table_key}::{column_name}" if column_name else f"profile_include::{table_key}::"
+                        )
+                        cached_value = table_snapshot.get(column_name)
+                        if cached_value is None:
+                            suggested_default = _safe_bool(record.get("suggested"))
+                            cached_value = bool(suggested_default) if suggested_default is not None else False
+                        checkbox_value = st.checkbox(
+                            column_name or "(blank)",
+                            value=bool(cached_value),
+                            key=widget_key,
+                        )
+                        include_flags.append(bool(checkbox_value))
+                        table_snapshot[column_name] = bool(checkbox_value)
+
+                selection_state[table_key] = {
+                    name: bool(value) for name, value in table_snapshot.items()
+                }
+                st.session_state[PROFILE_SELECTED_COLS_STATE] = selection_state
+
+                if len(include_flags) < len(records):
+                    include_flags.extend([False] * (len(records) - len(include_flags)))
+
+                display_df_local["Include"] = include_flags
+                display_df_local["Include"] = (
+                    display_df_local["Include"].fillna(False).astype(bool)
                 )
-                if selection_render_allowed:
-                    selection_editor_df["Select"] = (
-                        selection_editor_df["Select"].fillna(False).astype(bool)
+                grid_df = display_df_local[grid_columns].copy()
+                grid_render_allowed = _validate_grid_columns(
+                    grid_df.columns, grid_columns, ui_strings.PROFILE_GRID_NAME
+                )
+                if grid_render_allowed:
+                    grid_df["Include"] = grid_df["Include"].fillna(False).astype(bool)
+                    grid_df["Confidence"] = grid_df["Confidence"].apply(_safe_float)
+                    styler = grid_df.style.format(
+                        {"Confidence": _format_confidence_display}
                     )
-                    suspicious_keys = _detect_secondary_selector_keys(
-                        ui_keys.PROFILE_SELECTION_EDITOR
-                    )
-                    if suspicious_keys:
-                        _contract_message(
-                            ui_strings.PROFILE_SELECTION_SECONDARY_SELECTOR.format(
-                                keys=", ".join(sorted(suspicious_keys))
-                            )
-                        )
-                    else:
-                        selection_editor = st.data_editor(
-                            selection_editor_df,
-                            use_container_width=True,
-                            hide_index=True,
-                            column_config={
-                                "Select": st.column_config.CheckboxColumn(
-                                    ui_strings.PROFILE_SELECTION_EDITOR_COLUMNS[0],
-                                    help=ui_strings.PROFILE_SELECTION_EDITOR_HELP,
-                                ),
-                                "Column": st.column_config.Column(
-                                    ui_strings.PROFILE_SELECTION_EDITOR_COLUMNS[1],
-                                    disabled=True,
-                                ),
-                            },
-                            disabled=[ui_strings.PROFILE_SELECTION_EDITOR_COLUMNS[1]],
-                            key=ui_keys.PROFILE_SELECTION_EDITOR,
-                        )
-
-            if (
-                grid_render_allowed
-                and isinstance(selection_editor, pd.DataFrame)
-                and not selection_editor.empty
-            ):
-                select_series = selection_editor.get("Select")
-                column_series = selection_editor.get("Column")
-                if select_series is not None and column_series is not None:
-                    select_flags = select_series.fillna(False).astype(bool)
-                    include_map = {
-                        str(column_series.iloc[idx]): bool(select_flags.iloc[idx])
-                        for idx in range(len(select_flags))
-                    }
-
-            if grid_render_allowed and include_map:
-                for column_name, selected_flag in include_map.items():
-                    key = _selection_key(target_table, column_name)
-                    set_include(key, selected_flag)
-                    grid_df.loc[grid_df["Column"] == column_name, "Select"] = selected_flag
-
-            if grid_render_allowed:
-                styler = grid_df.style.format({"Confidence": _format_confidence_display})
-                styler = styler.applymap(_confidence_style, subset=["Confidence"])
-                st.dataframe(styler, hide_index=True, use_container_width=True)
+                    styler = styler.applymap(_confidence_style, subset=["Confidence"])
+                    with table_col:
+                        st.dataframe(styler, hide_index=True, use_container_width=True)
+                else:
+                    grid_df = None
 
         selection_counts = _apply_selection_state(
             profile_result,
@@ -1467,7 +1436,7 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
     else:
         empty_df = pd.DataFrame(
             {
-                column: pd.Series(dtype="bool" if column == "Select" else "object")
+                column: pd.Series(dtype="bool" if column == "Include" else "object")
                 for column in grid_columns
             }
         )
@@ -1614,7 +1583,7 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
     if DEBUG_PROFILING and profile_result:
         with st.expander(ui_strings.PROFILE_DEBUG_PAYLOAD_TITLE, expanded=False):
             st.json(profile_result)
-        include_snapshot = get_include_map()
+        include_snapshot = st.session_state.get(PROFILE_SELECTED_COLS_STATE)
         if include_snapshot:
             with st.expander(
                 ui_strings.PROFILE_DEBUG_INCLUDE_MAP_TITLE, expanded=False
