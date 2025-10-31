@@ -2614,6 +2614,7 @@ def run_table_profile(
             "null_cnt": nulls_int,
             "error": error_message,
         }
+        column_entry["suggested"] = False
         if not is_string:
             column_entry["date_valid_count"] = (
                 valid_numeric_count if is_numeric else non_nulls
@@ -2839,45 +2840,48 @@ def run_table_profile(
                 parse_success_ratio = None
 
         suggested = False
+        has_non_nulls = non_nulls is not None and non_nulls > 0
+        date_parse_success_ratio = parse_success_ratio
+
         if (
-            distincts_int is not None
-            and non_nulls
+            nulls_int == 0
+            and distincts_int is not None
+            and has_non_nulls
             and distincts_int >= non_nulls
-            and nulls_int == 0
         ):
             suggested = True
         elif (
-            null_pct_value <= 0.05
-            and (
-                is_numeric
-                or _is_temporal(dtype)
-                or (
-                    is_string
-                    and effective_distinct_ratio is not None
-                    and 0.05 <= effective_distinct_ratio <= 0.70
-                )
-            )
+            semantic_type_upper in {"ACCOUNT_ID", "ORDER_ID", "TRADE_ID", "UUID"}
+            and nulls_int == 0
+            and effective_distinct_ratio is not None
+            and effective_distinct_ratio >= 0.70
         ):
             suggested = True
-        elif is_string and whitespace_pct >= 5.0:
-            suggested = True
-        elif is_string and parse_success_ratio is not None and parse_success_ratio >= 0.60:
+        elif (
+            semantic_type_upper == "REF_CODE"
+            and (
+                (distincts_int is not None and distincts_int <= 200)
+                or (top3_ratio is not None and top3_ratio >= 0.60)
+            )
+        ):
             suggested = True
         elif (
             is_string
-            and semantic_type_upper == "REF_CODE"
-            and (
-                (distincts_int is not None and distincts_int <= 200)
-                or (top3_ratio or 0.0) >= 0.60
-            )
+            and whitespace_pct is not None
+            and whitespace_pct >= 5.0
         ):
             suggested = True
         elif (
-            semantic_type_upper
-            in {"ACCOUNT_ID", "ORDER_ID", "TRADE_ID", "UUID"}
-            and effective_distinct_ratio is not None
-            and effective_distinct_ratio >= 0.60
-            and nulls_int == 0
+            is_string
+            and date_parse_success_ratio is not None
+            and date_parse_success_ratio >= 0.60
+        ):
+            suggested = True
+        elif (
+            (is_numeric or _is_temporal(dtype))
+            and min_val is not None
+            and max_val is not None
+            and null_pct_value <= 0.05
         ):
             suggested = True
 
