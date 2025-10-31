@@ -7,6 +7,7 @@ import logging
 import math
 import os
 import random
+import re
 from datetime import datetime
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 from uuid import uuid4
@@ -85,6 +86,8 @@ SEMANTIC_REGEX_PATTERNS: Dict[str, str] = {
     "phone_e164": r"^\+[1-9][0-9]{1,14}$",
 }
 
+_IBAN_REGEX = re.compile(SEMANTIC_REGEX_PATTERNS["iban"])
+
 
 CHAR_CLASS_PATTERNS: Dict[str, str] = {
     "digit": r"^[0-9]+$",
@@ -92,6 +95,42 @@ CHAR_CLASS_PATTERNS: Dict[str, str] = {
     "alnum": r"^[0-9A-Za-z]+$",
     "whitespace": r".*\s.*",
 }
+
+
+def _normalize_iban_candidate(value: Any) -> str:
+    """Return an uppercase alphanumeric IBAN candidate without whitespace."""
+
+    if value is None:
+        return ""
+    text = str(value).strip()
+    if not text:
+        return ""
+    cleaned = "".join(ch for ch in text if ch.isalnum())
+    return cleaned.upper()
+
+
+def _iban_mod97(value: str) -> bool:
+    """Validate an IBAN using the ISO 13616 mod-97 checksum."""
+
+    if not value:
+        return False
+    if len(value) < 15 or len(value) > 34:
+        return False
+    rearranged = value[4:] + value[:4]
+    remainder = 0
+    for ch in rearranged:
+        if ch.isdigit():
+            digit_seq = ch
+        elif ch.isalpha():
+            digit_seq = str(ord(ch.upper()) - 55)
+        else:
+            return False
+        for digit in digit_seq:
+            try:
+                remainder = (remainder * 10 + int(digit)) % 97
+            except Exception:
+                return False
+    return remainder == 1
 
 
 DATE_PARSE_CONFIGS: Tuple[Dict[str, str], ...] = (
@@ -622,7 +661,7 @@ def _infer_semantic_type(
             pattern_max_ratio = ratio_val
     if (
         date_success_ratio is not None
-        and date_success_ratio >= 0.6
+        and date_success_ratio >= 0.8
         and date_valid_count > 0
     ):
         format_key = str(best_date_format or "").lower()
@@ -651,7 +690,7 @@ def _infer_semantic_type(
             ddmmyyyy_pattern_ratio or 0.0,
             pattern_ratio_fallback,
         )
-        if pattern_ratio >= 0.7:
+        if pattern_ratio >= 0.8 and (parsed_date_min or parsed_date_max):
             _boost(
                 "DATE_IN_TEXT",
                 40.0 * pattern_ratio,
@@ -692,37 +731,50 @@ def _infer_semantic_type(
     date_range_ok = at_least_one_year_ok and span_ok
 
     sentinel_zero_count = _as_int(column_entry.get("date_sentinel_count")) or 0
+    numeric_zero_signal = _as_int(column_entry.get("numeric_zero_count")) or 0
     best_success_ratio = max(0.0, min(best_success_ratio, 1.0))
-    required_majority = max(50, int(math.ceil(0.7 * non_nulls))) if non_nulls else 0
-    if non_nulls:
-        numeric_required_majority = int(math.ceil(0.7 * non_nulls))
-        if non_nulls >= 25:
-            numeric_required_majority = max(numeric_required_majority, 25)
-    else:
-        numeric_required_majority = 0
-
-    general_force = (
+    ratio_threshold = 0.9 if best_success_source == "numeric" else 0.8
+    ratio_ok = (
         not forced_type
-        and best_success_ratio >= 0.85
-        and date_valid_count >= required_majority
+        and best_success_ratio >= ratio_threshold
+        and best_success_count > 0
         and date_range_ok
     )
-    if general_force:
-        format_key = str(best_date_format or "").lower()
-        label = DATE_PARSE_LABELS.get(
-            format_key,
-            str(best_date_format or "text date").upper(),
-        )
+    pattern_ratio = max(
+        iso_pattern_ratio or 0.0,
+        yyyymmdd_pattern_ratio or 0.0,
+        ddmmyyyy_pattern_ratio or 0.0,
+        pattern_ratio_fallback,
+    )
+    pattern_ok = (
+        not forced_type
+        and not ratio_ok
+        and pattern_ratio >= 0.8
+        and parsed_min_dt is not None
+        and parsed_max_dt is not None
+        and date_range_ok
+    )
+    if ratio_ok or pattern_ok:
         forced_type = "DATE_IN_TEXT"
-        forced_confidence = round(min(best_success_ratio, 0.99), 3)
-        pct_value = best_success_ratio * 100.0
-        if pct_value < 10.0:
-            pct_text = f"{pct_value:.1f}%".rstrip("0").rstrip(".")
-        else:
-            pct_text = f"{pct_value:.0f}%"
-        note_parts: List[str] = [f"Parsed as {label} ({pct_text})"]
+        confidence_basis = best_success_ratio if ratio_ok else pattern_ratio
+        forced_confidence = round(min(max(confidence_basis, 0.8), 0.99), 3)
+        note_parts: List[str] = []
+        if ratio_ok:
+            if best_success_source == "numeric":
+                note_parts.append(f"numeric YYYYMMDD parse {best_success_ratio:.0%}")
+            else:
+                format_key = str(best_date_format or "").lower()
+                label = DATE_PARSE_LABELS.get(
+                    format_key,
+                    str(best_date_format or "text date").upper(),
+                )
+                note_parts.append(f"Parsed as {label} ({best_success_ratio:.0%})")
+        if pattern_ok:
+            note_parts.append(f"{pattern_ratio:.0%} date pattern match")
         if sentinel_zero_count > 0:
             note_parts.append("ignored sentinel zeros")
+        if numeric_zero_signal > 0 and best_success_source == "numeric":
+            note_parts.append("ignored numeric zeros")
         if date_span_years is not None and date_span_years >= 1.0:
             note_parts.append(f"span {date_span_years:.1f}y")
         if parsed_date_min or parsed_date_max:
@@ -732,31 +784,6 @@ def _infer_semantic_type(
                     end=parsed_date_max or "?",
                 )
             )
-        if best_success_source == "numeric":
-            note_parts.append("numeric yyyymmdd parse")
-        forced_rationale_parts = [truncate_note("; ".join(part for part in note_parts if part))]
-        profile_min = parsed_date_min or profile_min
-        profile_max = parsed_date_max or profile_max
-    elif (
-        not forced_type
-        and _is_numeric(data_type)
-        and numeric_ratio >= 0.9
-        and numeric_success_count >= numeric_required_majority
-        and date_range_ok
-    ):
-        forced_type = "DATE_IN_TEXT"
-        forced_confidence = round(min(max(numeric_ratio, 0.9), 0.99), 3)
-        note_parts = [
-            f"numeric YYYYMMDD parse {numeric_ratio:.0%}",
-            "range {start} → {end}".format(
-                start=parsed_date_min or "?",
-                end=parsed_date_max or "?",
-            )
-            if parsed_date_min or parsed_date_max
-            else None,
-        ]
-        if date_span_years is not None:
-            note_parts.append(f"span {date_span_years:.1f}y")
         forced_rationale_parts = [
             truncate_note("; ".join(part for part in note_parts if part))
         ]
@@ -1080,6 +1107,8 @@ def _infer_semantic_type(
     uppercase_matches = 0
     total_matches = 0
     boolean_candidates: Set[str] = set()
+    iban_candidate_samples: List[str] = []
+    iban_sample_seen: Set[str] = set()
     for entry in top_values:
         value = entry.get("value")
         if value is None:
@@ -1097,8 +1126,31 @@ def _infer_semantic_type(
             if text.upper() == text and any(c.isalpha() for c in text):
                 uppercase_matches += count_int
             boolean_candidates.add(text.upper())
+        iban_candidate = _normalize_iban_candidate(value)
+        if (
+            iban_candidate
+            and len(iban_candidate_samples) < 20
+            and _IBAN_REGEX.fullmatch(iban_candidate)
+            and iban_candidate not in iban_sample_seen
+        ):
+            iban_candidate_samples.append(iban_candidate)
+            iban_sample_seen.add(iban_candidate)
 
     uppercase_ratio = (float(uppercase_matches) / float(total_matches)) if total_matches else 0.0
+
+    iban_checksum_checked = False
+    iban_checksum_ok = False
+    iban_confidence_cap = 1.0
+    iban_notes: List[str] = []
+    if iban_candidate_samples:
+        iban_checksum_checked = True
+        for candidate in iban_candidate_samples:
+            if _iban_mod97(candidate):
+                iban_checksum_ok = True
+                break
+    elif iban_ratio >= 0.9:
+        iban_confidence_cap = min(iban_confidence_cap, 0.5)
+        iban_notes.append("insufficient IBAN samples for checksum validation")
 
     iban_negative_prior = False
     top3_ratio_value = (
@@ -1118,19 +1170,52 @@ def _infer_semantic_type(
         and length_min >= 15.0
         and length_max <= 34.0
     )
+    if hints.get("iban"):
+        _boost("IBAN", 10.0, "column name references IBAN")
+
     if (
         not iban_negative_prior
         and iban_length_ok
-        and iban_ratio >= 0.80
         and uppercase_ratio >= 0.6
     ):
-        _boost(
-            "IBAN",
-            90.0 * min(iban_ratio, 1.0),
-            f"{iban_ratio:.0%} values look like IBANs",
-        )
-        if hints.get("iban"):
-            _boost("IBAN", 10.0, "column name references IBAN")
+        if iban_ratio >= 0.9:
+            if iban_checksum_ok:
+                _boost(
+                    "IBAN",
+                    95.0 * min(iban_ratio, 1.0),
+                    f"{iban_ratio:.0%} values look like IBANs; checksum ok",
+                )
+                iban_notes.append("checksum verified on sampled values")
+            else:
+                if iban_checksum_checked:
+                    _boost(
+                        "IBAN",
+                        30.0 * min(iban_ratio, 1.0),
+                        "IBAN regex matches but checksum failed",
+                    )
+                    iban_confidence_cap = min(iban_confidence_cap, 0.5)
+                    iban_notes.append("checksum mismatch on sampled values")
+                else:
+                    _boost(
+                        "IBAN",
+                        35.0 * min(iban_ratio, 1.0),
+                        "IBAN regex matches; checksum not verified",
+                    )
+                    iban_confidence_cap = min(iban_confidence_cap, 0.7)
+                    iban_notes.append("checksum not verified")
+        elif iban_ratio >= 0.8:
+            _boost(
+                "IBAN",
+                25.0 * min(iban_ratio, 1.0),
+                f"{iban_ratio:.0%} values resemble IBAN structure",
+            )
+            iban_confidence_cap = min(iban_confidence_cap, 0.7)
+
+    if iban_notes:
+        existing_notes = rationales.setdefault("IBAN", [])
+        for note in iban_notes:
+            if note not in existing_notes:
+                existing_notes.append(note)
 
     if hints.get("ticker"):
         _boost("TICKER/SYMBOL", 30.0, "column name references ticker/symbol")
@@ -1355,6 +1440,13 @@ def _infer_semantic_type(
             confidence = forced_confidence
         else:
             confidence = round(min(1.0, max(best_score, 0.0) / 100.0), 3)
+        if best_type == "IBAN":
+            confidence = round(min(confidence, iban_confidence_cap), 3)
+            if iban_confidence_cap < 1.0 and not iban_checksum_ok:
+                cap_msg = "checksum mismatch on sampled values" if iban_checksum_checked else "checksum not verified"
+                forced_rationale = truncate_note(
+                    f"{forced_rationale}; {cap_msg}" if forced_rationale else cap_msg
+                )
         if not forced_rationale:
             if forced_type == "DATE_IN_TEXT" and date_success_ratio >= 0.9:
                 forced_rationale = f"{date_success_ratio:.0%} of values parse successfully"
@@ -1364,6 +1456,14 @@ def _infer_semantic_type(
 
     confidence = min(1.0, max(best_score, 0.0) / 100.0)
     confidence = round(confidence, 3)
+
+    if best_type == "IBAN":
+        confidence = round(min(confidence, iban_confidence_cap), 3)
+        if iban_confidence_cap < 1.0 and not iban_checksum_ok:
+            msg = "checksum mismatch on sampled values" if iban_checksum_checked else "checksum not verified"
+            existing_notes = rationales.setdefault("IBAN", [])
+            if msg not in existing_notes:
+                existing_notes.append(msg)
 
     if (
         best_type == "COUNTRY_CODE/NAME"
@@ -1403,7 +1503,13 @@ def _infer_semantic_type(
 
 
 def normalize_profile_row(row: Dict[str, Any]) -> Dict[str, Any]:
-    """Return a normalized copy of a per-column profile row."""
+    """Return a normalized copy of a per-column profile row.
+
+    Legacy payloads may lack the newer whitespace, numeric, or length metrics, so this
+    helper fills in defaults and coerces values to sensible Python primitives. This
+    keeps downstream consumers aligned regardless of whether the source profile was
+    generated before or after the expanded metrics rollout.
+    """
 
     payload = dict(row or {})
     name_value = payload.get("column_name") or payload.get("name") or ""
@@ -1423,6 +1529,62 @@ def normalize_profile_row(row: Dict[str, Any]) -> Dict[str, Any]:
         payload["top_values"] = normalized_top_values
     else:
         payload["top_values"] = []
+
+    count_defaults = {
+        "empty_string_count": 0,
+        "whitespace_only_count": 0,
+        "whitespace_row_count": 0,
+        "lead_trail_whitespace_count": 0,
+        "numeric_zero_count": 0,
+    }
+    for key, default in count_defaults.items():
+        value = payload.get(key)
+        if value is None:
+            payload[key] = default
+            continue
+        try:
+            payload[key] = int(value)
+        except Exception:
+            payload[key] = default
+
+    metric_defaults = {
+        "avg_len": None,
+        "len_min": None,
+        "len_max": None,
+        "len_spread": None,
+        "len_stddev": None,
+        "top_coverage_pct": 0.0,
+    }
+    for key, default in metric_defaults.items():
+        if key not in payload:
+            payload[key] = default
+
+    float_fields = (
+        "avg_len",
+        "len_min",
+        "len_max",
+        "len_spread",
+        "len_stddev",
+        "top_coverage_pct",
+    )
+    for key in float_fields:
+        value = payload.get(key)
+        if value is None:
+            continue
+        try:
+            payload[key] = float(value)
+        except Exception:
+            if key == "top_coverage_pct":
+                payload[key] = 0.0
+            else:
+                payload[key] = None
+
+    if "date_valid_count" not in payload:
+        payload["date_valid_count"] = payload.get("non_nulls") or 0
+    try:
+        payload["date_valid_count"] = int(payload.get("date_valid_count") or 0)
+    except Exception:
+        payload["date_valid_count"] = 0
 
     return payload
 
@@ -1569,8 +1731,13 @@ def run_table_profile(
     sample_pct: Optional[float] = 10.0,
     top_n: int = 10,
 ) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
-    """Profile a table and return summary plus per-column metrics."""
+    """Profile a table and return summary plus per-column metrics.
 
+    The per-column payload includes counts for nulls, empty strings, whitespace-only
+    values, and numeric zeros alongside min/max/average length statistics. Top value
+    coverage, semantic inference signals, and parsed date ranges are also returned so
+    that downstream consumers can render consistent UI without additional queries.
+    """
     if not session or not fqn:
         return {}, []
 
@@ -1629,11 +1796,22 @@ def run_table_profile(
         dtype = meta.get("data_type") or ""
         qcol = _quote_identifier(name)
         distinct_expr = "APPROX_COUNT_DISTINCT({col})" if rows_profiled > approx_threshold else "COUNT(DISTINCT {col})"
+        string_expr = f"TO_VARCHAR({qcol})"
+        length_expr = f"LENGTH({string_expr})"
+
         metrics_sql = [
             "COUNT(*) AS ROW_CNT",
             f"SUM(CASE WHEN {qcol} IS NULL THEN 1 ELSE 0 END) AS NULLS",
             f"{distinct_expr.format(col=qcol)} AS DISTINCTS",
             f"SUM(CASE WHEN {qcol} IS NOT NULL THEN 1 ELSE 0 END) AS NON_NULLS_COUNT",
+            (
+                "SUM(CASE WHEN {col} IS NOT NULL AND {str_expr} = '' THEN 1 ELSE 0 END)"
+                " AS EMPTY_STRINGS"
+            ).format(col=qcol, str_expr=string_expr),
+            (
+                "SUM(CASE WHEN {col} IS NOT NULL AND REGEXP_LIKE({str_expr}, '^[[:space:]]+$') THEN 1 ELSE 0 END)"
+                " AS WHITESPACE_ONLY_ROWS"
+            ).format(col=qcol, str_expr=string_expr),
         ]
         num_date_matches_alias: Optional[str] = "NUMDATE_PARSE_COUNT"
         num_date_min_alias: Optional[str] = "NUMDATE_MIN"
@@ -1647,6 +1825,9 @@ def run_table_profile(
                     f"MIN({qcol}) AS MIN_VAL",
                     f"MAX({qcol}) AS MAX_VAL",
                 ]
+            )
+            metrics_sql.append(
+                f"SUM(CASE WHEN {qcol} = 0 THEN 1 ELSE 0 END) AS NUMERIC_ZERO_ROWS"
             )
             numeric_string_expr = f"{qcol}::STRING"
             padded_expr = (
@@ -1671,36 +1852,33 @@ def run_table_profile(
                     f"MAX(TO_VARCHAR({qcol})) AS MAX_VAL",
                 ]
             )
+            metrics_sql.append("0 AS NUMERIC_ZERO_ROWS")
         is_string = _is_string_type(dtype)
         if is_string:
             trimmed_expr = f"TRIM({qcol}::STRING)"
             sentinel_values = ("'0'", "'00000000'", "'0000-00-00'", "'0000/00/00'")
             metrics_sql.append(
-                f"SUM(CASE WHEN {qcol}::STRING = '' THEN 1 ELSE 0 END) AS EMPTY_STR_ROWS"
+                f"SUM(CASE WHEN {qcol} IS NOT NULL AND REGEXP_LIKE({string_expr}, '^\\s|\\s$|\\s{{2,}}') THEN 1 ELSE 0 END) AS WHITESPACE_ROWS"
             )
             metrics_sql.append(
-                f"SUM(CASE WHEN {qcol} IS NOT NULL AND REGEXP_LIKE({qcol}::STRING, '^\\s+$') THEN 1 ELSE 0 END) AS WS_ONLY_ROWS"
+                f"SUM(CASE WHEN {qcol} IS NOT NULL AND REGEXP_LIKE({string_expr}, '^\\s|\\s$') THEN 1 ELSE 0 END) AS LEAD_TRAIL_WS_ROWS"
             )
-            metrics_sql.append(
-                f"SUM(CASE WHEN {qcol} IS NOT NULL AND REGEXP_LIKE({qcol}::STRING, '^\\s|\\s$|\\s{{2,}}') THEN 1 ELSE 0 END) AS WHITESPACE_ROWS"
-            )
-            metrics_sql.append(
-                f"SUM(CASE WHEN {qcol} IS NOT NULL AND {qcol}::STRING != TRIM({qcol}::STRING) THEN 1 ELSE 0 END) AS LEAD_TRAIL_WS_ROWS"
-            )
-            digits_expr = "REGEXP_REPLACE({col}::STRING, '[^0-9]', '')".format(col=qcol)
+            digits_only_expr = f"TRIM({qcol}::STRING)"
             guarded_numeric_expr = (
-                "CASE WHEN LENGTH({digits}) = 8 AND {digits} NOT IN ('00000000') "
-                "THEN {digits} ELSE NULL END"
-            ).format(digits=digits_expr)
+                "CASE WHEN REGEXP_LIKE({expr}, '^[0-9]{{8}}$') AND {expr} <> '00000000' "
+                "THEN {expr} ELSE NULL END"
+            ).format(expr=digits_only_expr)
             num_date_expr_sql = (
-                "CASE WHEN LENGTH({digits}) = 8 AND {digits} NOT IN ('00000000') "
-                "THEN TRY_TO_DATE({digits}, 'YYYYMMDD') ELSE NULL END"
-            ).format(digits=digits_expr)
+                "CASE WHEN REGEXP_LIKE({expr}, '^[0-9]{{8}}$') AND {expr} <> '00000000' "
+                "THEN TRY_TO_DATE({expr}, 'YYYYMMDD') ELSE NULL END"
+            ).format(expr=digits_only_expr)
         else:
-            metrics_sql.append("0 AS EMPTY_STR_ROWS")
-            metrics_sql.append("0 AS WS_ONLY_ROWS")
-            metrics_sql.append("0 AS WHITESPACE_ROWS")
-            metrics_sql.append("0 AS LEAD_TRAIL_WS_ROWS")
+            metrics_sql.append(
+                f"SUM(CASE WHEN {qcol} IS NOT NULL AND REGEXP_LIKE({string_expr}, '^\\s|\\s$|\\s{{2,}}') THEN 1 ELSE 0 END) AS WHITESPACE_ROWS"
+            )
+            metrics_sql.append(
+                f"SUM(CASE WHEN {qcol} IS NOT NULL AND REGEXP_LIKE({string_expr}, '^\\s|\\s$') THEN 1 ELSE 0 END) AS LEAD_TRAIL_WS_ROWS"
+            )
 
         if num_date_expr_sql and num_date_matches_alias and num_date_min_alias and num_date_max_alias:
             metrics_sql.extend(
@@ -1722,19 +1900,13 @@ def run_table_profile(
             metrics_sql.append(
                 f"NULL AS {num_date_max_alias or 'NUMDATE_MAX'}"
             )
-        length_expr: Optional[str]
         if is_string:
-            length_expr = f"LENGTH({qcol}::STRING)"
-        elif is_numeric:
+            length_expr: Optional[str] = f"LENGTH({qcol}::STRING)"
+        else:
             length_expr = f"LENGTH(TO_VARCHAR({qcol}))"
-        else:
-            length_expr = None
-        if length_expr:
-            metrics_sql.append(
-                f"AVG(CASE WHEN {qcol} IS NOT NULL THEN {length_expr} END) AS AVG_LEN"
-            )
-        else:
-            metrics_sql.append("NULL AS AVG_LEN")
+        metrics_sql.append(
+            f"AVG(CASE WHEN {qcol} IS NOT NULL THEN {length_expr} END) AS AVG_LEN"
+        )
 
         char_pattern_aliases: Dict[str, str] = {}
         regex_aliases: Dict[str, str] = {}
@@ -1766,7 +1938,7 @@ def run_table_profile(
                 alias = f"REGEX_{key.upper()}_MATCHES"
                 pattern_sql = pattern.replace("\\", "\\\\")
                 metrics_sql.append(
-                    f"SUM(CASE WHEN {qcol} IS NOT NULL AND REGEXP_LIKE({qcol}::STRING, '{pattern_sql}') THEN 1 ELSE 0 END) AS {alias}"
+                    f"SUM(CASE WHEN {qcol} IS NOT NULL AND REGEXP_LIKE({string_expr}, '{pattern_sql}') THEN 1 ELSE 0 END) AS {alias}"
                 )
                 regex_aliases[key] = alias
             trimmed_expr = f"TRIM({qcol}::STRING)"
@@ -1797,8 +1969,8 @@ def run_table_profile(
                     continue
                 alias = f"REF_{ref_key.upper()}_MATCHES"
                 metrics_sql.append(
-                    "SUM(CASE WHEN {col} IS NOT NULL AND UPPER({col}::STRING) IN ({clause}) "
-                    "THEN 1 ELSE 0 END) AS {alias}".format(col=qcol, clause=clause, alias=alias)
+                    "SUM(CASE WHEN {col} IS NOT NULL AND UPPER({string_expr}) IN ({clause}) "
+                    "THEN 1 ELSE 0 END) AS {alias}".format(col=qcol, string_expr=string_expr, clause=clause, alias=alias)
                 )
                 signal_key = REFERENCE_SIGNAL_NAMES.get(ref_key, ref_key)
                 ref_match_aliases[signal_key] = alias
@@ -1806,7 +1978,7 @@ def run_table_profile(
             numeric_like_alias = "STRING_NUMERIC_LIKE_ROWS"
             numeric_like_pattern = r"^\d+(\.\d+)?$".replace("\\", "\\\\")
             metrics_sql.append(
-                f"SUM(CASE WHEN {qcol} IS NOT NULL AND REGEXP_LIKE({qcol}::STRING, '{numeric_like_pattern}') THEN 1 ELSE 0 END) AS {numeric_like_alias}"
+                f"SUM(CASE WHEN {qcol} IS NOT NULL AND REGEXP_LIKE({string_expr}, '{numeric_like_pattern}') THEN 1 ELSE 0 END) AS {numeric_like_alias}"
             )
 
             coalesce_terms: List[str] = []
@@ -1899,6 +2071,7 @@ def run_table_profile(
                     [
                         f"MIN({qcol}) AS MIN_VAL",
                         f"MAX({qcol}) AS MAX_VAL",
+                        f"SUM(CASE WHEN {qcol} = 0 THEN 1 ELSE 0 END) AS NUMERIC_ZERO_ROWS",
                     ]
                 )
             elif _is_temporal(dtype):
@@ -1906,6 +2079,7 @@ def run_table_profile(
                     [
                         f"MIN({qcol}) AS MIN_VAL",
                         f"MAX({qcol}) AS MAX_VAL",
+                        "0 AS NUMERIC_ZERO_ROWS",
                     ]
                 )
             else:
@@ -1913,26 +2087,29 @@ def run_table_profile(
                     [
                         f"MIN(TO_VARCHAR({qcol})) AS MIN_VAL",
                         f"MAX(TO_VARCHAR({qcol})) AS MAX_VAL",
+                        "0 AS NUMERIC_ZERO_ROWS",
                     ]
                 )
-            if is_string:
-                minimal_metrics.extend(
-                    [
-                        f"SUM(CASE WHEN {qcol}::STRING = '' THEN 1 ELSE 0 END) AS EMPTY_STR_ROWS",
-                        f"SUM(CASE WHEN {qcol} IS NOT NULL AND REGEXP_LIKE({qcol}::STRING, '^\\s+$') THEN 1 ELSE 0 END) AS WS_ONLY_ROWS",
-                        f"SUM(CASE WHEN {qcol} IS NOT NULL AND REGEXP_LIKE({qcol}::STRING, '^\\s|\\s$|\\s{{2,}}') THEN 1 ELSE 0 END) AS WHITESPACE_ROWS",
-                        f"SUM(CASE WHEN {qcol} IS NOT NULL AND {qcol}::STRING != TRIM({qcol}::STRING) THEN 1 ELSE 0 END) AS LEAD_TRAIL_WS_ROWS",
-                    ]
-                )
-            else:
-                minimal_metrics.extend(
-                    [
-                        "0 AS EMPTY_STR_ROWS",
-                        "0 AS WS_ONLY_ROWS",
-                        "0 AS WHITESPACE_ROWS",
-                        "0 AS LEAD_TRAIL_WS_ROWS",
-                    ]
-                )
+            minimal_metrics.extend(
+                [
+                    (
+                        "SUM(CASE WHEN {col} IS NOT NULL AND {str_expr} = '' THEN 1 ELSE 0 END)"
+                        " AS EMPTY_STRINGS"
+                    ).format(col=qcol, str_expr=string_expr),
+                    (
+                        "SUM(CASE WHEN {col} IS NOT NULL AND REGEXP_LIKE({str_expr}, '^[[:space:]]+$') THEN 1 ELSE 0 END)"
+                        " AS WHITESPACE_ONLY_ROWS"
+                    ).format(col=qcol, str_expr=string_expr),
+                    (
+                        "SUM(CASE WHEN {col} IS NOT NULL AND REGEXP_LIKE({str_expr}, '^\\s|\\s$|\\s{{2,}}') THEN 1 ELSE 0 END)"
+                        " AS WHITESPACE_ROWS"
+                    ).format(col=qcol, str_expr=string_expr),
+                    (
+                        "SUM(CASE WHEN {col} IS NOT NULL AND REGEXP_LIKE({str_expr}, '^\\s|\\s$') THEN 1 ELSE 0 END)"
+                        " AS LEAD_TRAIL_WS_ROWS"
+                    ).format(col=qcol, str_expr=string_expr),
+                ]
+            )
             if num_date_matches_alias:
                 if is_string:
                     minimal_metrics.extend(
@@ -1962,24 +2139,14 @@ def run_table_profile(
                             ).format(col=qcol, alias=num_date_max_alias),
                         ]
                     )
-            if length_expr:
-                minimal_metrics.extend(
-                    [
-                        f"AVG(CASE WHEN {qcol} IS NOT NULL THEN {length_expr} END) AS AVG_LEN",
-                        f"MIN({length_expr}) AS LEN_MIN",
-                        f"MAX({length_expr}) AS LEN_MAX",
-                        f"STDDEV_SAMP({length_expr}) AS LEN_STDDEV",
-                    ]
-                )
-            else:
-                minimal_metrics.extend(
-                    [
-                        "NULL AS AVG_LEN",
-                        "NULL AS LEN_MIN",
-                        "NULL AS LEN_MAX",
-                        "NULL AS LEN_STDDEV",
-                    ]
-                )
+            minimal_metrics.extend(
+                [
+                    f"AVG(CASE WHEN {qcol} IS NOT NULL THEN {length_expr} END) AS AVG_LEN",
+                    f"MIN({length_expr}) AS LEN_MIN",
+                    f"MAX({length_expr}) AS LEN_MAX",
+                    f"STDDEV_SAMP({length_expr}) AS LEN_STDDEV",
+                ]
+            )
             minimal_sql = "SELECT " + ", ".join(minimal_metrics) + f" FROM {sampled_ref}"
             try:
                 row = _collect_single_row(session, minimal_sql)
@@ -2032,18 +2199,31 @@ def run_table_profile(
             min_val = _stringify(min_val_raw) if min_val_raw is not None else None
             max_val = _stringify(max_val_raw) if max_val_raw is not None else None
 
-        empty_str_rows = _extract_row_value(row, "EMPTY_STR_ROWS", 0)
+        empty_string_raw = _extract_row_value(row, "EMPTY_STRINGS", 0)
+        if empty_string_raw in (None, 0):
+            empty_string_raw = _extract_row_value(row, "EMPTY_STR_ROWS", empty_string_raw)
         whitespace_rows = _extract_row_value(row, "WHITESPACE_ROWS", 0)
+        whitespace_only_raw = _extract_row_value(row, "WHITESPACE_ONLY_ROWS", 0)
+        if whitespace_only_raw in (None, 0):
+            whitespace_only_raw = _extract_row_value(row, "WS_ONLY_ROWS", whitespace_only_raw)
+        numeric_zero_raw = _extract_row_value(row, "NUMERIC_ZERO_ROWS", 0)
         try:
-            empty_str_rows_int = int(empty_str_rows)
+            empty_str_rows_int = int(empty_string_raw or 0)
         except Exception:
             try:
-                empty_str_rows_int = int(float(empty_str_rows))
+                empty_str_rows_int = int(float(empty_string_raw)) if empty_string_raw is not None else 0
             except Exception:
                 empty_str_rows_int = 0
 
         lead_trail_ws_rows = _extract_row_value(row, "LEAD_TRAIL_WS_ROWS", 0)
-        ws_only_rows = _extract_row_value(row, "WS_ONLY_ROWS", 0)
+        ws_only_rows = whitespace_only_raw
+        try:
+            numeric_zero_rows_int = int(numeric_zero_raw)
+        except Exception:
+            try:
+                numeric_zero_rows_int = int(float(numeric_zero_raw))
+            except Exception:
+                numeric_zero_rows_int = 0
         try:
             whitespace_rows_int = int(whitespace_rows)
         except Exception:
@@ -2100,48 +2280,43 @@ def run_table_profile(
         whitespace_pct = whitespace_ratio * 100.0
 
         avg_len_debug_note: Optional[str] = None
-        if is_string:
-            if avg_len_value is None:
-                if non_nulls > 0:
-                    logger.warning("avg_len metric missing for column %s", name)
-                    if PROFILE_DEBUG:
-                        avg_len_debug_note = "avg_len missing; replaced FILTER with CASE"
-                avg_len_final: Optional[float] = 0.0
-            else:
-                avg_len_final = float(avg_len_value)
-                if (
-                    PROFILE_DEBUG
-                    and non_nulls > 0
-                    and math.isclose(avg_len_final, 0.0, rel_tol=0.0, abs_tol=1e-9)
-                ):
-                    logger.warning("avg_len value zero for column %s", name)
+        if avg_len_value is None:
+            avg_len_final: Optional[float] = None
+            if is_string and non_nulls > 0:
+                logger.warning("avg_len metric missing for column %s", name)
+                if PROFILE_DEBUG:
                     avg_len_debug_note = "avg_len missing; replaced FILTER with CASE"
-        elif is_numeric:
-            avg_len_final = float(avg_len_value) if avg_len_value is not None else None
         else:
-            avg_len_final = None
+            avg_len_final = float(avg_len_value)
+            if (
+                is_string
+                and PROFILE_DEBUG
+                and non_nulls > 0
+                and math.isclose(avg_len_final, 0.0, rel_tol=0.0, abs_tol=1e-9)
+            ):
+                logger.warning("avg_len value zero for column %s", name)
+                avg_len_debug_note = "avg_len missing; replaced FILTER with CASE"
 
         len_min_val: Optional[float] = None
         len_max_val: Optional[float] = None
         len_stddev_val: Optional[float] = None
-        supports_length_stats = length_expr is not None
-        if supports_length_stats:
-            len_min_raw = _extract_row_value(row, "LEN_MIN")
-            len_max_raw = _extract_row_value(row, "LEN_MAX")
+        supports_length_stats = True
+        len_min_raw = _extract_row_value(row, "LEN_MIN")
+        len_max_raw = _extract_row_value(row, "LEN_MAX")
+        try:
+            len_min_val = float(len_min_raw) if len_min_raw is not None else None
+        except Exception:
+            len_min_val = None
+        try:
+            len_max_val = float(len_max_raw) if len_max_raw is not None else None
+        except Exception:
+            len_max_val = None
+        if len_stddev_alias:
+            len_stddev_raw = _extract_row_value(row, len_stddev_alias)
             try:
-                len_min_val = float(len_min_raw) if len_min_raw is not None else None
+                len_stddev_val = float(len_stddev_raw) if len_stddev_raw is not None else None
             except Exception:
-                len_min_val = None
-            try:
-                len_max_val = float(len_max_raw) if len_max_raw is not None else None
-            except Exception:
-                len_max_val = None
-            if len_stddev_alias:
-                len_stddev_raw = _extract_row_value(row, len_stddev_alias)
-                try:
-                    len_stddev_val = float(len_stddev_raw) if len_stddev_raw is not None else None
-                except Exception:
-                    len_stddev_val = None
+                len_stddev_val = None
 
         regex_ratios: Dict[str, Optional[float]] = {}
         for key, alias in regex_aliases.items():
@@ -2193,8 +2368,11 @@ def run_table_profile(
                 except Exception:
                     sentinel_count = 0
         valid_string_count = max((non_nulls or 0) - sentinel_count, 0)
+        valid_numeric_count = max((non_nulls or 0) - numeric_zero_rows_int, 0)
         if is_string:
             denominator = float(valid_string_count) if valid_string_count else 0.0
+        elif is_numeric:
+            denominator = float(valid_numeric_count) if valid_numeric_count else 0.0
         else:
             denominator = float(non_nulls)
         if denominator:
@@ -2293,49 +2471,47 @@ def run_table_profile(
         top_values: List[Dict[str, Any]] = []
         top_coverage = 0
         denom_non_nulls = max(1, int(non_nulls or 0))
-        if top_n_clamped > 0 and rows_profiled and non_nulls:
-            top_sql = (
-                "WITH base AS (\n"
-                f"    SELECT {qcol}::STRING AS s\n"
-                f"    FROM {sampled_ref}\n"
-                "), bucketed AS (\n"
-                "    SELECT CASE\n"
-                "        WHEN s IS NULL THEN '__NULL__'\n"
-                "        WHEN REGEXP_LIKE(s, '^\\s*$') THEN '__EMPTY__'\n"
-                "        ELSE s\n"
-                "    END AS BUCKET\n"
-                "    FROM base\n"
-                ")\n"
-                "SELECT BUCKET AS VALUE, COUNT(*) AS CNT\n"
-                "FROM bucketed\n"
-                "GROUP BY 1\n"
-                "ORDER BY CNT DESC\n"
-                f"LIMIT {top_n_clamped}"
-            )
-            try:
-                for item in session.sql(top_sql).collect():
-                    if hasattr(item, "asDict"):
-                        data = item.asDict()
-                        value = data.get("VALUE") if "VALUE" in data else data.get("value")
-                        count_raw = data.get("CNT") if "CNT" in data else data.get("cnt")
-                    else:
-                        value = item[0]
-                        count_raw = item[1] if len(item) > 1 else 0
-                    try:
-                        count_int = int(count_raw)
-                    except Exception:
+        if top_n_clamped > 0 and rows_profiled:
+            if non_nulls <= 0:
+                top_values = [
+                    {"value": None, "count": int(rows_profiled), "pct": 100.0 if rows_profiled else 0.0}
+                ]
+            else:
+                top_sql = (
+                    f"SELECT {qcol} AS VALUE, COUNT(*) AS CNT "
+                    f"FROM {sampled_ref} "
+                    f"WHERE {qcol} IS NOT NULL "
+                    f"GROUP BY 1 ORDER BY CNT DESC FETCH NEXT {top_n_clamped} ROWS ONLY"
+                )
+                try:
+                    seen_value_keys: Set[Tuple[str, str]] = set()
+                    for item in session.sql(top_sql).collect():
+                        if hasattr(item, "asDict"):
+                            data = item.asDict()
+                            value = data.get("VALUE") if "VALUE" in data else data.get("value")
+                            count_raw = data.get("CNT") if "CNT" in data else data.get("cnt")
+                        else:
+                            value = item[0]
+                            count_raw = item[1] if len(item) > 1 else 0
                         try:
-                            count_int = int(float(count_raw))
+                            count_int = int(count_raw)
                         except Exception:
-                            count_int = 0
-                    if value == "__NULL__":
-                        continue
-                    top_coverage += count_int
-                    pct = (float(count_int) / float(denom_non_nulls) * 100.0)
-                    top_values.append({"value": value, "count": count_int, "pct": pct})
-            except Exception:
-                top_values = []
-                top_coverage = 0
+                            try:
+                                count_int = int(float(count_raw))
+                            except Exception:
+                                count_int = 0
+                        if value is None:
+                            continue
+                        key = (type(value).__name__, repr(value))
+                        if key in seen_value_keys:
+                            continue
+                        seen_value_keys.add(key)
+                        top_coverage += count_int
+                        pct = (float(count_int) / float(denom_non_nulls) * 100.0)
+                        top_values.append({"value": value, "count": count_int, "pct": pct})
+                except Exception:
+                    top_values = []
+                    top_coverage = 0
 
         whitespace_length_counts: List[Tuple[int, int]] = []
         if is_string and ws_only_rows_int > 0 and rows_profiled:
@@ -2399,9 +2575,14 @@ def run_table_profile(
             "distinct_pct": float(distinct_pct) if distinct_pct is not None else None,
             "min_val": min_val,
             "max_val": max_val,
-            "avg_len": avg_len_final if supports_length_stats else None,
+            "avg_len": avg_len_final,
             "whitespace_pct": whitespace_pct,
             "whitespace_only_pct": only_ws_ratio * 100.0,
+            "empty_string_count": empty_str_rows_int,
+            "whitespace_only_count": ws_only_rows_int,
+            "whitespace_row_count": whitespace_rows_int,
+            "lead_trail_whitespace_count": lead_trail_ws_rows_int,
+            "numeric_zero_count": numeric_zero_rows_int,
             "top_values": top_values,
             "top_coverage_pct": coverage_pct,
             "rows_profiled": row_cnt,
@@ -2410,6 +2591,10 @@ def run_table_profile(
             "null_cnt": nulls_int,
             "error": error_message,
         }
+        if not is_string:
+            column_entry["date_valid_count"] = (
+                valid_numeric_count if is_numeric else non_nulls
+            )
         if avg_len_debug_note:
             existing_note = column_entry.get("note")
             if existing_note:
@@ -2417,9 +2602,10 @@ def run_table_profile(
             else:
                 column_entry["note"] = avg_len_debug_note
 
-        column_entry["len_min"] = len_min_val if supports_length_stats else None
-        column_entry["len_max"] = len_max_val if supports_length_stats else None
-        if supports_length_stats and len_min_val is not None and len_max_val is not None:
+        column_entry["len_min"] = len_min_val
+        column_entry["len_max"] = len_max_val
+        column_entry["len_stddev"] = len_stddev_val
+        if len_min_val is not None and len_max_val is not None:
             column_entry["len_spread"] = float(len_max_val) - float(len_min_val)
         else:
             column_entry["len_spread"] = None
@@ -2469,6 +2655,8 @@ def run_table_profile(
             "parsed_max": num_date_max_value,
             "numdate_min": num_date_min_value,
             "numdate_max": num_date_max_value,
+            "valid_count": valid_numeric_count,
+            "numeric_zero_count": numeric_zero_rows_int,
         }
         if supports_length_stats:
             signals["length"] = {
@@ -2495,7 +2683,7 @@ def run_table_profile(
                 "whitespace_ratio": whitespace_ratio,
                 "lead_trail_ws_ratio": lead_trail_ws_ratio,
                 "only_ws_ratio": only_ws_ratio,
-                "empty_str_count": empty_str_rows_int,
+                "empty_string_count": empty_str_rows_int,
                 "whitespace_only_count": ws_only_rows_int,
             }
             signals["date_patterns"] = {str(key): date_pattern_ratios.get(key) for key in date_pattern_ratios}
@@ -2510,6 +2698,11 @@ def run_table_profile(
             success_ratio_value = num_date_ratio
         else:
             success_ratio_value = None
+        valid_base_count = (
+            valid_string_count
+            if is_string
+            else valid_numeric_count if is_numeric else non_nulls
+        )
         date_parse_payload: Dict[str, Any] = {
             "formats": date_parse_formats,
             "best_ratio": best_date_ratio if best_date_key else None,
@@ -2517,7 +2710,7 @@ def run_table_profile(
             "success_ratio": success_ratio_value,
             "date_success_ratio": best_date_ratio if best_date_key else success_ratio_value,
             "format_detected": best_date_key,
-            "valid_count": valid_string_count if is_string else non_nulls,
+            "valid_count": valid_base_count,
             "parsed_min": parsed_date_min,
             "parsed_max": parsed_date_max,
             "success_count": any_parse_count if any_parse_count is not None else (num_date_cnt if num_date_cnt > 0 else None),
@@ -2527,6 +2720,7 @@ def run_table_profile(
             "numdate_max": num_date_max_value,
             "numdate_count": num_date_cnt,
             "best_source": "numeric" if numeric_best else "text",
+            "numeric_zero_count": numeric_zero_rows_int,
         }
         signals["date_parse"] = date_parse_payload
         column_entry["signals"] = signals
