@@ -1091,6 +1091,27 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
         </span>
     </div>
     """
+
+    def _format_confidence_display(value):
+        if value is None or (isinstance(value, float) and math.isnan(value)):
+            return ""
+        v = float(value)
+        if v < 10.0:
+            s = f"{v:.1f}".rstrip("0").rstrip(".")
+        else:
+            s = f"{v:.0f}"
+        return f"{s}%"
+
+    def _confidence_style(value):
+        if value is None or (isinstance(value, float) and math.isnan(value)):
+            return ""
+        v = float(value)
+        if v >= 90.0:
+            return "background-color: #2e7d32; color: #ffffff;"
+        if v >= 75.0:
+            return "background-color: #f9a825; color: #000000;"
+        return "background-color: #9e9e9e; color: #ffffff;"
+
     target_table = str(profile_result.get("target_table") or current_target_fqn)
     if not display_df.empty:
         def _is_string_type_name(type_name: Any) -> bool:
@@ -1173,15 +1194,6 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
             normalized = text_value.replace("_", " ")
             return normalized.title()
 
-        def _format_confidence_display(value: Optional[float]) -> str:
-            if value is None or math.isnan(value):
-                return ""
-            if value < 10.0:
-                formatted = f"{value:.1f}".rstrip("0").rstrip(".")
-            else:
-                formatted = f"{value:.0f}"
-            return f"{formatted}%"
-
         def _format_whitespace_display(value: Any) -> str:
             numeric = _safe_float(value)
             if numeric is None or math.isclose(numeric, 0.0, abs_tol=1e-9):
@@ -1246,61 +1258,72 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
         ).clip(lower=0.0, upper=100.0)
         display_df_local["Confidence"] = confidence_numeric
 
-        grid_df = display_df_local[grid_columns].copy()
-        grid_df["Select"] = grid_df["Select"].fillna(False).astype(bool)
-        grid_df["Confidence"] = confidence_numeric
-        with grid_container:
-            st.markdown(confidence_legend_html, unsafe_allow_html=True)
-            grid_editor = st.data_editor(
-                grid_df,
-                use_container_width=True,
-                hide_index=True,
-                column_config={
-                    "Select": st.column_config.CheckboxColumn(
-                        "Select",
-                        help="Toggle to include the column in downstream DQ suggestions.",
-                    ),
-                    "Column": st.column_config.Column("Column", disabled=True),
-                    "Physical Type": st.column_config.Column("Physical Type", disabled=True),
-                    "Nulls": st.column_config.Column("Nulls", disabled=True),
-                    "Distinct": st.column_config.Column("Distinct", disabled=True),
-                    "Avg Length": st.column_config.Column("Avg Length", disabled=True),
-                    "Min Value": st.column_config.Column("Min Value", disabled=True),
-                    "Max Value": st.column_config.Column("Max Value", disabled=True),
-                    "Whitespace %": st.column_config.Column("Whitespace %", disabled=True),
-                    "Guessed Type": st.column_config.Column("Guessed Type", disabled=True),
-                    "Confidence": st.column_config.ProgressColumn(
-                        "Confidence",
-                        help="Model confidence in the semantic type.",
-                        format="%.1f%%",
-                        min_value=0.0,
-                        max_value=100.0,
-                    ),
-                    "Note": st.column_config.Column("Note", disabled=True),
-                },
-                disabled=[
-                    column
-                    for column in grid_df.columns
-                    if column not in {"Select"}
-                ],
-                key="profile_results_grid",
+        formatted_rows: List[List[Any]] = []
+        for _, row in display_df_local.iterrows():
+            formatted_rows.append(
+                [
+                    bool(row.get("Select", False)),
+                    row.get("Column"),
+                    row.get("Physical Type"),
+                    row.get("Nulls"),
+                    row.get("Distinct"),
+                    row.get("Avg Length"),
+                    row.get("Min Value"),
+                    row.get("Max Value"),
+                    row.get("Whitespace %"),
+                    row.get("Guessed Type"),
+                    row.get("Confidence"),
+                    row.get("Note"),
+                ]
             )
 
-        include_map: Dict[str, bool] = {}
-        if isinstance(grid_editor, pd.DataFrame) and not grid_editor.empty:
-            select_series = grid_editor.get("Select")
-            column_series = grid_editor.get("Column")
-            if select_series is not None and column_series is not None:
-                select_flags = select_series.fillna(False).astype(bool)
-                include_map = {
-                    str(column_series.iloc[idx]): bool(select_flags.iloc[idx])
-                    for idx in range(len(select_flags))
-                }
+        grid_df = pd.DataFrame(formatted_rows, columns=grid_columns)
+        grid_df["Select"] = grid_df["Select"].fillna(False).astype(bool)
+        grid_df["Confidence"] = grid_df["Confidence"].apply(_safe_float)
 
-        if include_map:
-            for column_name, selected_flag in include_map.items():
-                key = _selection_key(target_table, column_name)
-                selection_state[key] = selected_flag
+        with grid_container:
+            st.markdown(confidence_legend_html, unsafe_allow_html=True)
+            include_map: Dict[str, bool] = {}
+            selection_editor: Optional[pd.DataFrame] = None
+            if not grid_df.empty:
+                selection_editor_df = grid_df[["Select", "Column"]].copy()
+                selection_editor_df["Select"] = (
+                    selection_editor_df["Select"].fillna(False).astype(bool)
+                )
+                selection_editor = st.data_editor(
+                    selection_editor_df,
+                    use_container_width=True,
+                    hide_index=True,
+                    column_config={
+                        "Select": st.column_config.CheckboxColumn(
+                            "Select",
+                            help="Toggle to include the column in downstream DQ suggestions.",
+                        ),
+                        "Column": st.column_config.Column("Column", disabled=True),
+                    },
+                    disabled=["Column"],
+                    key="profile_results_selection",
+                )
+
+            if isinstance(selection_editor, pd.DataFrame) and not selection_editor.empty:
+                select_series = selection_editor.get("Select")
+                column_series = selection_editor.get("Column")
+                if select_series is not None and column_series is not None:
+                    select_flags = select_series.fillna(False).astype(bool)
+                    include_map = {
+                        str(column_series.iloc[idx]): bool(select_flags.iloc[idx])
+                        for idx in range(len(select_flags))
+                    }
+
+            if include_map:
+                for column_name, selected_flag in include_map.items():
+                    key = _selection_key(target_table, column_name)
+                    selection_state[key] = selected_flag
+                    grid_df.loc[grid_df["Column"] == column_name, "Select"] = selected_flag
+
+            styler = grid_df.style.format({"Confidence": _format_confidence_display})
+            styler = styler.applymap(_confidence_style, subset=["Confidence"])
+            st.dataframe(styler, hide_index=True, use_container_width=True)
 
         selection_counts = _apply_selection_state(
             profile_result,
@@ -1318,23 +1341,9 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
             }
         )
         st.markdown(confidence_legend_html, unsafe_allow_html=True)
-        st.data_editor(
-            empty_df,
-            use_container_width=True,
-            hide_index=True,
-            column_config={
-                "Select": st.column_config.CheckboxColumn("Select", disabled=True),
-                "Confidence": st.column_config.ProgressColumn(
-                    "Confidence",
-                    format="%.1f%%",
-                    min_value=0.0,
-                    max_value=100.0,
-                    disabled=True,
-                ),
-            },
-            disabled=grid_columns,
-            key="profile_results_grid_empty",
-        )
+        empty_styler = empty_df.style.format({"Confidence": _format_confidence_display})
+        empty_styler = empty_styler.applymap(_confidence_style, subset=["Confidence"])
+        st.dataframe(empty_styler, hide_index=True, use_container_width=True)
 
     if filtered_df.empty:
         st.info("No columns matched the selected filters.")
