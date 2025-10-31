@@ -32,12 +32,13 @@ from __future__ import annotations
 import html
 import json
 import math
+import os
 import textwrap
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from numbers import Integral, Real
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import pandas as pd
 import streamlit as st
@@ -56,6 +57,8 @@ from views.table_picker import session_cache_token, stateless_table_picker
 
 FULL_SCAN_WARNING_THRESHOLD = 1_000_000
 MAX_TOP_N = 10
+
+_CONTRACT_ENV_FLAG = "UI_CONTRACT_STRICT"
 
 
 def _safe_int(value: Any) -> Optional[int]:
@@ -131,6 +134,47 @@ def _selection_key(table_fqn: str, column_name: str) -> str:
     if table_str:
         return f"{table_str}::{column_str}"
     return column_str
+
+
+def _contract_message(message: str) -> None:
+    """Emit a contract warning or error depending on env configuration."""
+
+    strict = os.getenv(_CONTRACT_ENV_FLAG, "0") == "1"
+    if strict:
+        st.error(message)
+    else:
+        st.warning(message)
+
+
+def _validate_grid_columns(
+    actual: Sequence[str], expected: Sequence[str], grid_name: str
+) -> bool:
+    """Ensure a rendered grid exposes the expected columns and ordering."""
+
+    actual_list = list(actual)
+    expected_list = list(expected)
+    if actual_list != expected_list:
+        _contract_message(
+            "UI contract violation in "
+            f"{grid_name}: expected columns {expected_list} but found {actual_list}."
+        )
+        return False
+    return True
+
+
+def _detect_secondary_selector_keys(base_key: str) -> List[str]:
+    """Return suspicious session-state keys that hint at duplicate selectors."""
+
+    suspicious: List[str] = []
+    for key in list(st.session_state.keys()):
+        if not isinstance(key, str) or key == base_key:
+            continue
+        if not key.startswith(base_key):
+            continue
+        remainder = key[len(base_key) :]
+        if remainder and remainder[0] in {"_", "-", ":", "."}:
+            suspicious.append(key)
+    return suspicious
 
 
 @dataclass
@@ -1308,34 +1352,57 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
             )
 
         grid_df = pd.DataFrame(formatted_rows, columns=grid_columns)
-        grid_df["Select"] = grid_df["Select"].fillna(False).astype(bool)
-        grid_df["Confidence"] = grid_df["Confidence"].apply(_safe_float)
+        grid_render_allowed = _validate_grid_columns(
+            grid_df.columns, grid_columns, "profile results grid"
+        )
+        if grid_render_allowed:
+            grid_df["Select"] = grid_df["Select"].fillna(False).astype(bool)
+            grid_df["Confidence"] = grid_df["Confidence"].apply(_safe_float)
 
         with grid_container:
             st.markdown(confidence_legend_html, unsafe_allow_html=True)
             include_map: Dict[str, bool] = {}
             selection_editor: Optional[pd.DataFrame] = None
-            if not grid_df.empty:
+            if grid_render_allowed and not grid_df.empty:
                 selection_editor_df = grid_df[["Select", "Column"]].copy()
-                selection_editor_df["Select"] = (
-                    selection_editor_df["Select"].fillna(False).astype(bool)
+                selection_render_allowed = _validate_grid_columns(
+                    selection_editor_df.columns,
+                    ["Select", "Column"],
+                    "profile selection editor",
                 )
-                selection_editor = st.data_editor(
-                    selection_editor_df,
-                    use_container_width=True,
-                    hide_index=True,
-                    column_config={
-                        "Select": st.column_config.CheckboxColumn(
-                            "Select",
-                            help="Toggle to include the column in downstream DQ suggestions.",
-                        ),
-                        "Column": st.column_config.Column("Column", disabled=True),
-                    },
-                    disabled=["Column"],
-                    key="profile_results_selection",
-                )
+                if selection_render_allowed:
+                    selection_editor_df["Select"] = (
+                        selection_editor_df["Select"].fillna(False).astype(bool)
+                    )
+                    suspicious_keys = _detect_secondary_selector_keys(
+                        "profile_results_selection"
+                    )
+                    if suspicious_keys:
+                        _contract_message(
+                            "UI contract violation: secondary selector state detected "
+                            f"({', '.join(sorted(suspicious_keys))}). Skipping selector."
+                        )
+                    else:
+                        selection_editor = st.data_editor(
+                            selection_editor_df,
+                            use_container_width=True,
+                            hide_index=True,
+                            column_config={
+                                "Select": st.column_config.CheckboxColumn(
+                                    "Select",
+                                    help="Toggle to include the column in downstream DQ suggestions.",
+                                ),
+                                "Column": st.column_config.Column("Column", disabled=True),
+                            },
+                            disabled=["Column"],
+                            key="profile_results_selection",
+                        )
 
-            if isinstance(selection_editor, pd.DataFrame) and not selection_editor.empty:
+            if (
+                grid_render_allowed
+                and isinstance(selection_editor, pd.DataFrame)
+                and not selection_editor.empty
+            ):
                 select_series = selection_editor.get("Select")
                 column_series = selection_editor.get("Column")
                 if select_series is not None and column_series is not None:
@@ -1345,15 +1412,16 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
                         for idx in range(len(select_flags))
                     }
 
-            if include_map:
+            if grid_render_allowed and include_map:
                 for column_name, selected_flag in include_map.items():
                     key = _selection_key(target_table, column_name)
                     selection_state[key] = selected_flag
                     grid_df.loc[grid_df["Column"] == column_name, "Select"] = selected_flag
 
-            styler = grid_df.style.format({"Confidence": _format_confidence_display})
-            styler = styler.applymap(_confidence_style, subset=["Confidence"])
-            st.dataframe(styler, hide_index=True, use_container_width=True)
+            if grid_render_allowed:
+                styler = grid_df.style.format({"Confidence": _format_confidence_display})
+                styler = styler.applymap(_confidence_style, subset=["Confidence"])
+                st.dataframe(styler, hide_index=True, use_container_width=True)
 
         selection_counts = _apply_selection_state(
             profile_result,

@@ -82,6 +82,7 @@ from utils.configs import get_metadata_namespace, get_proc_name
 from views.profile_view import render_profile
 from views.table_picker import stateless_table_picker, session_cache_token
 from views.docs_view import render_docs as render_docs_view
+from views.config_editor import render_row_count_preview
 
 ALLOWED_PAGES = {"home", "cfg", "profile", "monitor", "docs"}
 
@@ -1036,7 +1037,7 @@ def render_config_editor():
         except Exception as exc:
             st.error(f"Failed to preview row counts: {exc}")
         else:
-            st.dataframe(df, use_container_width=True, hide_index=True, height=320)
+            render_row_count_preview(df)
 
     # After submit
     if apply_now or save_draft or run_now_btn or delete_btn:
