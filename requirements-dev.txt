@@ -4,6 +4,4 @@ ruff==0.1.9
 pytest
 pandas
 streamlit
-sqlfluff==2.3.5
-sqlfluff-templater-jinja
 jinja2
