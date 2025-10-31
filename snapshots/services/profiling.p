@@ -7,6 +7,7 @@ import logging
 import math
 import os
 import random
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 from uuid import uuid4
@@ -27,6 +28,67 @@ __all__ = [
 
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class _StringColumnSqlFragments:
+    """Precomputed SQL snippets used when profiling string columns."""
+
+    empty_expr: str
+    whitespace_only_expr: str
+    whitespace_expr: str
+    lead_trail_expr: str
+    numeric_guard_expr: str
+    numeric_date_expr: str
+
+
+def _string_column_sql_fragments(qcol: str) -> _StringColumnSqlFragments:
+    """Return reusable SQL fragments for profiling a string column."""
+
+    digits_expr = "REGEXP_REPLACE({col}::STRING, '[^0-9]', '')".format(col=qcol)
+    numeric_guard_expr = (
+        "CASE WHEN LENGTH({digits}) = 8 AND {digits} NOT IN ('00000000') "
+        "THEN {digits} ELSE NULL END"
+    ).format(digits=digits_expr)
+    numeric_date_expr = (
+        "CASE WHEN LENGTH({digits}) = 8 AND {digits} NOT IN ('00000000') "
+        "THEN TRY_TO_DATE({digits}, 'YYYYMMDD') ELSE NULL END"
+    ).format(digits=digits_expr)
+    return _StringColumnSqlFragments(
+        empty_expr=f"SUM(CASE WHEN {qcol}::STRING = '' THEN 1 ELSE 0 END) AS EMPTY_STR_ROWS",
+        whitespace_only_expr=(
+            f"SUM(CASE WHEN {qcol} IS NOT NULL AND REGEXP_LIKE({qcol}::STRING, '^\\\\s+$') "
+            "THEN 1 ELSE 0 END) AS WS_ONLY_ROWS"
+        ),
+        whitespace_expr=(
+            f"SUM(CASE WHEN {qcol} IS NOT NULL AND REGEXP_LIKE({qcol}::STRING, "
+            "'^\\\\s|\\\\s$|\\\\s{{2,}}') THEN 1 ELSE 0 END) AS WHITESPACE_ROWS"
+        ),
+        lead_trail_expr=(
+            f"SUM(CASE WHEN {qcol} IS NOT NULL AND {qcol}::STRING != TRIM({qcol}::STRING) "
+            "THEN 1 ELSE 0 END) AS LEAD_TRAIL_WS_ROWS"
+        ),
+        numeric_guard_expr=numeric_guard_expr,
+        numeric_date_expr=numeric_date_expr,
+    )
+
+
+def _column_length_expression(
+    qcol: str, *, is_string: bool, is_numeric: bool
+) -> Optional[str]:
+    """Return the expression used to compute column value lengths."""
+
+    if is_string:
+        return f"LENGTH({qcol}::STRING)"
+    if is_numeric:
+        return f"LENGTH(TO_VARCHAR({qcol}))"
+    return None
+
+
+def _avg_length_metric(qcol: str, length_expr: str) -> str:
+    """Return the AVG length metric for the provided column expression."""
+
+    return f"AVG(CASE WHEN {qcol} IS NOT NULL THEN {length_expr} END) AS AVG_LEN"
 
 
 def _env_flag(name: str, default: bool = False) -> bool:
@@ -1675,27 +1737,17 @@ def run_table_profile(
         if is_string:
             trimmed_expr = f"TRIM({qcol}::STRING)"
             sentinel_values = ("'0'", "'00000000'", "'0000-00-00'", "'0000/00/00'")
-            metrics_sql.append(
-                f"SUM(CASE WHEN {qcol}::STRING = '' THEN 1 ELSE 0 END) AS EMPTY_STR_ROWS"
+            fragments = _string_column_sql_fragments(qcol)
+            metrics_sql.extend(
+                [
+                    fragments.empty_expr,
+                    fragments.whitespace_only_expr,
+                    fragments.whitespace_expr,
+                    fragments.lead_trail_expr,
+                ]
             )
-            metrics_sql.append(
-                f"SUM(CASE WHEN {qcol} IS NOT NULL AND REGEXP_LIKE({qcol}::STRING, '^\\s+$') THEN 1 ELSE 0 END) AS WS_ONLY_ROWS"
-            )
-            metrics_sql.append(
-                f"SUM(CASE WHEN {qcol} IS NOT NULL AND REGEXP_LIKE({qcol}::STRING, '^\\s|\\s$|\\s{{2,}}') THEN 1 ELSE 0 END) AS WHITESPACE_ROWS"
-            )
-            metrics_sql.append(
-                f"SUM(CASE WHEN {qcol} IS NOT NULL AND {qcol}::STRING != TRIM({qcol}::STRING) THEN 1 ELSE 0 END) AS LEAD_TRAIL_WS_ROWS"
-            )
-            digits_expr = "REGEXP_REPLACE({col}::STRING, '[^0-9]', '')".format(col=qcol)
-            guarded_numeric_expr = (
-                "CASE WHEN LENGTH({digits}) = 8 AND {digits} NOT IN ('00000000') "
-                "THEN {digits} ELSE NULL END"
-            ).format(digits=digits_expr)
-            num_date_expr_sql = (
-                "CASE WHEN LENGTH({digits}) = 8 AND {digits} NOT IN ('00000000') "
-                "THEN TRY_TO_DATE({digits}, 'YYYYMMDD') ELSE NULL END"
-            ).format(digits=digits_expr)
+            guarded_numeric_expr = fragments.numeric_guard_expr
+            num_date_expr_sql = fragments.numeric_date_expr
         else:
             metrics_sql.append("0 AS EMPTY_STR_ROWS")
             metrics_sql.append("0 AS WS_ONLY_ROWS")
@@ -1722,17 +1774,9 @@ def run_table_profile(
             metrics_sql.append(
                 f"NULL AS {num_date_max_alias or 'NUMDATE_MAX'}"
             )
-        length_expr: Optional[str]
-        if is_string:
-            length_expr = f"LENGTH({qcol}::STRING)"
-        elif is_numeric:
-            length_expr = f"LENGTH(TO_VARCHAR({qcol}))"
-        else:
-            length_expr = None
+        length_expr = _column_length_expression(qcol, is_string=is_string, is_numeric=is_numeric)
         if length_expr:
-            metrics_sql.append(
-                f"AVG(CASE WHEN {qcol} IS NOT NULL THEN {length_expr} END) AS AVG_LEN"
-            )
+            metrics_sql.append(_avg_length_metric(qcol, length_expr))
         else:
             metrics_sql.append("NULL AS AVG_LEN")
 

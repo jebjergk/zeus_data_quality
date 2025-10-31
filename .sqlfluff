@@ -1,0 +1,8 @@
+[sqlfluff]
+dialect = snowflake
+exclude_rules = L031,L032
+max_line_length = 120
+
+[lint]
+ignore =
+    templates/
