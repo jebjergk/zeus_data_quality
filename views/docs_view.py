@@ -18,9 +18,9 @@ Forbidden patterns:
 • Do not add new alerts, buttons, or accordions to any tab without explicit approval.
 """
 
-"""Documentation view rendering helpers."""
-
 from __future__ import annotations
+
+"""Documentation view rendering helpers."""
 
 from typing import Tuple
 
