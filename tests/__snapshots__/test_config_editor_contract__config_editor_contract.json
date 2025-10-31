@@ -1,0 +1,37 @@
+{
+  "buttons": [
+    "⬅ Back"
+  ],
+  "checkboxes": [
+    "UNIQUE",
+    "Ignore NULLs",
+    "NULL_COUNT",
+    "MIN_MAX",
+    "WHITESPACE",
+    "FORMAT_DISTRIBUTION",
+    "VALUE_DISTRIBUTION",
+    "Enable daily task"
+  ],
+  "form_buttons": [
+    "Preview last 60 days row counts",
+    "Save & Apply",
+    "Save as Draft",
+    "Run Now",
+    "Delete"
+  ],
+  "headers": [
+    "Edit Configuration",
+    "Create Configuration"
+  ],
+  "include_mentions": [
+    "Table-level checks **FRESHNESS** and **ROW_COUNT_ANOMALY** are automatically included.",
+    "### Table-level checks (always included)"
+  ],
+  "multiselects": [
+    "Columns to check"
+  ],
+  "subheaders": [
+    "Target",
+    "Configuration"
+  ]
+}
