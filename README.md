@@ -1,6 +1,18 @@
 # Zeus Data Quality
 
+[![CI](https://github.com/Zeus-Labs/zeus_data_quality/actions/workflows/ci.yml/badge.svg)](https://github.com/Zeus-Labs/zeus_data_quality/actions/workflows/ci.yml)
+[![Lint](https://github.com/Zeus-Labs/zeus_data_quality/actions/workflows/ci.yml/badge.svg?label=Lint)](https://github.com/Zeus-Labs/zeus_data_quality/actions/workflows/ci.yml)
+[![Snapshots](https://github.com/Zeus-Labs/zeus_data_quality/actions/workflows/ci.yml/badge.svg?label=Snapshots)](https://github.com/Zeus-Labs/zeus_data_quality/actions/workflows/ci.yml)
+[![UI Contract](https://github.com/Zeus-Labs/zeus_data_quality/actions/workflows/ci.yml/badge.svg?label=UI%20Contract)](https://github.com/Zeus-Labs/zeus_data_quality/actions/workflows/ci.yml)
+
 Zeus Data Quality brings monitoring, profiling, and remediation workflows directly into Snowflake so data owners can spot and resolve issues before they affect reporting.
+
+## Governance
+
+- Review [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request; follow the [pull request template](.github/pull_request_template.md) and squash via the automation workflow.
+- Architectural decisions live in [ARCHITECTURE.md](ARCHITECTURE.md); align changes with the documented boundaries and module responsibilities.
+- UI contracts are defined in [docs/ui_contract_docs.md](docs/ui_contract_docs.md). Do not change layout, labels, or snapshots without explicit approval.
+- Experimental UI features must be gated behind environment flags from `utils/flags.py`. Snapshots are updated only when intentional UI changes are approved.
 
 ## Product snapshot
 - **Use case**: Centralise data quality rules for business-critical tables without exporting data.

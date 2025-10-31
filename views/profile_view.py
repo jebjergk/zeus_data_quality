@@ -29,10 +29,10 @@ Forbidden patterns:
 """
 
 from __future__ import annotations
+
 import html
 import json
 import math
-import os
 import textwrap
 import time
 from dataclasses import dataclass, field
@@ -51,15 +51,30 @@ from services.profiling import (
     run_table_profile,
     save_profile_results,
 )
+from ui.keys import (
+    PROFILE_CLEAR_LOADED,
+    PROFILE_LOAD_BUTTON,
+    PROFILE_LOAD_SELECT,
+    PROFILE_RESULTS_SELECTION,
+    PROFILE_SAMPLE_PCT,
+    PROFILE_SAMPLE_TARGET,
+    PROFILE_SAVE_TOGGLE,
+)
+from ui.strings import ProfileStrings as PS
+from utils.flags import (
+    DEBUG_PROFILING,
+    DEMO_LOCK,
+    PROFILE_INLINE_SELECT,
+    PROFILE_TOP_VALUES_NULLS,
+    UI_CONTRACT_STRICT,
+)
 from utils.meta import get_table_row_count
+from utils.state import bulk_set_includes, get_include_map, set_include
 from views.table_picker import session_cache_token, stateless_table_picker
 
 
 FULL_SCAN_WARNING_THRESHOLD = 1_000_000
 MAX_TOP_N = 10
-
-_CONTRACT_ENV_FLAG = "UI_CONTRACT_STRICT"
-
 
 def _safe_int(value: Any) -> Optional[int]:
     """Convert a numeric-like value to an int when possible."""
@@ -139,7 +154,7 @@ def _selection_key(table_fqn: str, column_name: str) -> str:
 def _contract_message(message: str) -> None:
     """Emit a contract warning or error depending on env configuration."""
 
-    strict = os.getenv(_CONTRACT_ENV_FLAG, "0") == "1"
+    strict = UI_CONTRACT_STRICT or DEMO_LOCK
     if strict:
         st.error(message)
     else:
@@ -637,10 +652,8 @@ def _render_metric_card(
     st.markdown(card_html, unsafe_allow_html=True)
 
 def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: ARG001 - interface matches requirement
-    st.header("🧪 Profile Table")
-    st.caption(
-        "Profile a table to explore null rates, distinct counts, ranges, and common values before defining data quality checks."
-    )
+    st.header(PS.HEADER)
+    st.caption(PS.CAPTION)
 
     base_selection = st.session_state.get("profile_target_fqn")
     _db_sel, _sch_sel, _tbl_sel, selected_fqn = _table_picker(session, base_selection)
@@ -691,15 +704,13 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
     controls = st.columns(3)
     suggested_pct = 10.0
     row_count: Optional[int] = None
-    selected_reason = (
-        "Defaulting to a 10% sample. Enter 0 for a full table scan."
-    )
+    selected_reason = PS.SAMPLE_DEFAULT_REASON
     if selected_fqn:
         row_count = _load_table_row_count(session, selected_fqn)
         suggested_pct, selected_reason = _recommend_sample_pct(row_count)
 
-    sample_pct_state_key = "profile_sample_pct"
-    sample_target_key = "profile_sample_target"
+    sample_pct_state_key = PROFILE_SAMPLE_PCT
+    sample_target_key = PROFILE_SAMPLE_TARGET
     if st.session_state.get(sample_target_key) != selected_fqn:
         st.session_state[sample_target_key] = selected_fqn
         st.session_state[sample_pct_state_key] = float(suggested_pct)
@@ -712,71 +723,71 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
 
     reason_parts = [selected_reason]
     if row_count is not None:
-        reason_parts.append(f"Table metadata reports approximately {row_count:,} rows.")
+        reason_parts.append(
+            PS.SAMPLE_REASON_TABLE_ROWS.format(rows=row_count)
+        )
     if approx_rows:
-        reason_parts.append(f"This sample size profiles about {approx_rows:,} rows.")
-    reason_parts.append(
-        "The suggested value relies on Snowflake metadata only, so it doesn't trigger an extra table scan."
-    )
-    reason_parts.append("Enter 0 for a full table scan.")
+        reason_parts.append(
+            PS.SAMPLE_REASON_APPROX_ROWS.format(rows=approx_rows)
+        )
+    reason_parts.append(PS.SAMPLE_REASON_METADATA)
+    reason_parts.append(PS.SAMPLE_REASON_FULL_SCAN)
     sample_help_text = "\n".join(reason_parts)
 
     with controls[0]:
         sample_pct_input = st.number_input(
-            "Sample %",
+            PS.SAMPLE_LABEL,
             min_value=0.0,
             max_value=100.0,
             step=1.0,
             help=sample_help_text,
-            key=sample_pct_state_key,
+            key=PROFILE_SAMPLE_PCT,
         )
         sample_pct = None if math.isclose(sample_pct_input, 0.0, abs_tol=1e-6) else sample_pct_input
     with controls[1]:
         top_n = st.number_input(
-            "Top N values",
+            PS.TOP_N_LABEL,
             min_value=1,
             max_value=MAX_TOP_N,
             value=min(10, MAX_TOP_N),
             step=1,
-            help=f"Collect up to {MAX_TOP_N} of the most common values per column.",
+            help=PS.TOP_N_HELP_TEMPLATE.format(max_top=MAX_TOP_N),
         )
     load_selected_run_id: Optional[str] = None
     load_button_clicked = False
     with controls[2]:
         if saved_run_labels:
-            load_options = ["— Select a saved run —"] + saved_run_labels
+            load_options = [PS.LOAD_SAVED_PLACEHOLDER] + saved_run_labels
             selected_option = st.selectbox(
-                "Load saved profile",
+                PS.LOAD_SAVED_LABEL,
                 options=load_options,
-                key="profile_load_select",
+                key=PROFILE_LOAD_SELECT,
                 disabled=not saved_profiles_enabled,
             )
             if selected_option in saved_run_lookup:
                 load_selected_run_id = saved_run_lookup[selected_option]
         else:
             st.selectbox(
-                "Load saved profile",
-                options=["— No saved profiles —"],
-                key="profile_load_select",
+                PS.LOAD_SAVED_LABEL,
+                options=[PS.LOAD_SAVED_EMPTY],
+                key=PROFILE_LOAD_SELECT,
                 disabled=True,
             )
         load_button_clicked = st.button(
-            "Load",
-            key="profile_load_button",
+            PS.LOAD_BUTTON,
+            key=PROFILE_LOAD_BUTTON,
             disabled=not (saved_profiles_enabled and load_selected_run_id),
         )
         if not saved_profiles_enabled:
-            st.caption(
-                "Connect to Snowflake and configure metadata targets to enable loading saved profiles."
-            )
+            st.caption(PS.LOAD_CAPTION_NEEDS_CONNECTION)
         elif not saved_run_labels:
-            st.caption("No saved profiles found in metadata tables yet.")
+            st.caption(PS.LOAD_CAPTION_NO_SAVED)
 
     if load_button_clicked:
         if not saved_profiles_enabled:
-            st.warning("Loading profiles requires a Snowflake connection and metadata configuration.")
+            st.warning(PS.WARNING_NO_CONNECTION)
         elif not load_selected_run_id:
-            st.warning("Select a saved run to load.")
+            st.warning(PS.WARNING_SELECT_PROFILE)
         else:
             try:
                 loaded_profile = load_profile_run(
@@ -786,17 +797,17 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
                     run_id=load_selected_run_id,
                 )
             except Exception as exc:  # pragma: no cover - Snowflake specific
-                st.error(f"Failed to load saved profile: {exc}")
+                st.error(PS.LOAD_ERROR.format(error=exc))
             else:
                 if not loaded_profile:
-                    st.warning("Saved profile was not found or is empty.")
+                    st.warning(PS.INFO_NO_SAVED_PROFILE)
                 else:
                     st.session_state["profile_results"] = loaded_profile
                     st.session_state["profile_loaded_run_id"] = load_selected_run_id
                     target_table = loaded_profile.get("target_table")
                     if target_table:
                         st.session_state["profile_target_fqn"] = target_table
-                    st.success(f"Loaded saved profile {load_selected_run_id}.")
+                    st.success(PS.SUCCESS_LOADED_PROFILE.format(run_id=load_selected_run_id))
                     st.rerun()
 
     stored_profile_result = st.session_state.get("profile_results")
@@ -857,16 +868,19 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
     st.session_state["profile_selection_counts"] = selection_counts
 
     st.caption(
-        f"Suggested: {int(selection_counts[0])} of {int(selection_counts[1])} columns selected"
+        PS.SAMPLE_CAPTION.format(
+            selected=int(selection_counts[0]),
+            total=int(selection_counts[1]),
+        )
     )
 
     button_cols = st.columns([1, 1, 2])
     run_disabled = bool(loaded_run_id)
     with button_cols[0]:
-        run_profile = st.button("▶️ Run Profile", type="primary", disabled=run_disabled)
+        run_profile = st.button(PS.RUN_BUTTON, type="primary", disabled=run_disabled)
     with button_cols[1]:
         suggest_cfg = st.button(
-            "✨ Suggest DQ Config",
+            PS.SUGGEST_BUTTON,
             type="secondary",
             disabled=not stored_profile_result,
         )
@@ -874,8 +888,8 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
     clear_loaded = False
     if loaded_run_id:
         with button_cols[2]:
-            st.info("Viewing a saved profile.")
-            clear_loaded = st.button("Clear loaded profile", key="profile_clear_loaded")
+            st.info(PS.SAVED_PROFILE_INFO)
+            clear_loaded = st.button(PS.CLEAR_LOADED_BUTTON, key=PROFILE_CLEAR_LOADED)
     else:
         button_cols[2].empty()
 
@@ -890,11 +904,11 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
         st.session_state.pop("profile_loaded_run_id", None)
         loaded_run_id = None
         if not session:
-            st.error("No active Snowpark session — unable to profile tables.")
+            st.error(PS.PROFILE_WARNING_NO_SESSION)
         elif not selected_fqn:
-            st.warning("Select a database, schema, and table to profile.")
+            st.warning(PS.PROFILE_WARNING_SELECT_TABLE)
         else:
-            with st.spinner("Profiling table..."):
+            with st.spinner(PS.SAMPLE_SPINNER):
                 start = time.time()
                 profile_error: Optional[Exception] = None
                 summary_raw: Dict[str, Any] = {}
@@ -911,7 +925,7 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
                 duration = time.time() - start
 
             if profile_error is not None:
-                st.error(f"Failed to profile table: {profile_error}")
+                st.error(PS.PROFILE_ERROR.format(error=profile_error))
             else:
                 rows_profiled = int(summary_raw.get("rows_profiled") or 0)
                 profiles: List[ColumnProfile] = []
@@ -937,7 +951,7 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
     def _load_suggestion(profile_payload: Dict[str, Any], success_message: str) -> None:
         suggestion = build_profile_suggestion(profile_payload)
         if not suggestion:
-            st.info("No suggestions available for the current profile.")
+            st.info(PS.NO_SUGGESTIONS)
             return
         st.session_state["cfg_mode"] = "edit"
         st.session_state["selected_config_id"] = None
@@ -966,7 +980,7 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
     if suggest_cfg and profile_result:
         selected_columns = _selected_columns(profile_result)
         if not selected_columns:
-            st.warning("Select at least one column before generating DQ suggestions.")
+            st.warning(PS.PROFILE_WARNING_SELECT_COLUMNS)
         else:
             filtered_profile = dict(profile_result)
             filtered_summary = dict(filtered_profile.get("summary") or {})
@@ -975,7 +989,7 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
             filtered_profile["columns"] = selected_columns
             _load_suggestion(
                 filtered_profile,
-                "Loaded profile suggestion into the configuration editor.",
+                PS.PROFILE_SUCCESS_SUGGESTION,
             )
 
     if not profile_result:
@@ -983,16 +997,20 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
 
     summary = profile_result.get("summary", {})
     metrics_cols = st.columns(3)
-    metrics_cols[0].metric("Rows profiled", f"{summary.get('rows_profiled', 0):,}")
+    metrics_cols[0].metric(PS.METRIC_ROWS_PROFILED, f"{summary.get('rows_profiled', 0):,}")
     sample_pct_display = summary.get("sample_pct")
-    sample_label = "Full scan" if sample_pct_display is None else f"{float(sample_pct_display):.1f}%"
-    metrics_cols[1].metric("Sampling", sample_label)
-    metrics_cols[2].metric("Duration", f"{summary.get('duration_sec', 0.0):.2f}s")
+    sample_label = (
+        PS.SAMPLE_LABEL_FULL_SCAN
+        if sample_pct_display is None
+        else f"{float(sample_pct_display):.1f}%"
+    )
+    metrics_cols[1].metric(PS.METRIC_SAMPLING, sample_label)
+    metrics_cols[2].metric(PS.METRIC_DURATION, f"{summary.get('duration_sec', 0.0):.2f}s")
 
     if summary.get("sample_pct") is None and summary.get("rows_profiled", 0) > FULL_SCAN_WARNING_THRESHOLD:
         profiled = int(summary.get("rows_profiled", 0))
         st.warning(
-            f"Full table scan processed {profiled:,} rows. Consider sampling to improve performance.",
+            PS.SAMPLE_WARNING_FULL_SCAN.format(rows=profiled),
             icon="⚠️",
         )
 
@@ -1020,36 +1038,48 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
 
     filter_box = st.container()
     with filter_box:
-        st.subheader("Filters", anchor=False)
+        st.subheader(PS.FILTERS_SUBHEADER, anchor=False)
         filter_cols = st.columns(4)
-        high_null = filter_cols[0].toggle("High null % (>20%)", value=False)
-        unique_candidates = filter_cols[1].toggle("Unique candidates", value=False)
-        low_cardinality = filter_cols[2].toggle("Low cardinality", value=False)
-        whitespace_risk = filter_cols[3].toggle("Whitespace risk", value=False)
-        st.markdown("**Semantic tags**")
-        semantic_cols = st.columns(7)
-        filter_identifiers = semantic_cols[0].checkbox("Identifiers", value=False)
-        filter_financial = semantic_cols[1].checkbox("Financial", value=False)
-        filter_instrument = semantic_cols[2].checkbox("Instrument", value=False)
-        filter_geo = semantic_cols[3].checkbox("Geo", value=False)
-        filter_contact = semantic_cols[4].checkbox("Contact", value=False)
-        filter_date_text = semantic_cols[5].checkbox("Date (Text)", value=False)
-        filter_ref_codes = semantic_cols[6].checkbox("Reference Codes", value=False)
+        high_null = filter_cols[0].toggle(PS.FILTER_HIGH_NULL, value=False)
+        unique_candidates = filter_cols[1].toggle(PS.FILTER_UNIQUE, value=False)
+        low_cardinality = filter_cols[2].toggle(PS.FILTER_LOW_CARDINALITY, value=False)
+        whitespace_risk = filter_cols[3].toggle(PS.FILTER_WHITESPACE, value=False)
+        st.markdown(f"**{PS.FILTER_SEMANTIC_LABEL}**")
+        semantic_cols = st.columns(len(PS.FILTER_SEMANTIC_OPTIONS))
+        filter_identifiers = semantic_cols[0].checkbox(
+            PS.FILTER_SEMANTIC_OPTIONS[0], value=False
+        )
+        filter_financial = semantic_cols[1].checkbox(
+            PS.FILTER_SEMANTIC_OPTIONS[1], value=False
+        )
+        filter_instrument = semantic_cols[2].checkbox(
+            PS.FILTER_SEMANTIC_OPTIONS[2], value=False
+        )
+        filter_geo = semantic_cols[3].checkbox(
+            PS.FILTER_SEMANTIC_OPTIONS[3], value=False
+        )
+        filter_contact = semantic_cols[4].checkbox(
+            PS.FILTER_SEMANTIC_OPTIONS[4], value=False
+        )
+        filter_date_text = semantic_cols[5].checkbox(
+            PS.FILTER_SEMANTIC_OPTIONS[5], value=False
+        )
+        filter_ref_codes = semantic_cols[6].checkbox(
+            PS.FILTER_SEMANTIC_OPTIONS[6], value=False
+        )
 
     save_enabled = bool(session and meta_db and meta_schema)
     if not save_enabled:
-        st.session_state.pop("profile_save_toggle", None)
+        st.session_state.pop(PROFILE_SAVE_TOGGLE, None)
         st.session_state.pop("_profile_save_prev", None)
         st.session_state.pop("profile_saved_run_id", None)
 
     save_help = (
-        "Persist the current profile results to metadata tables."
-        if save_enabled
-        else "Connect to Snowflake and select metadata targets to enable saving."
+        PS.SAVE_ENABLED_MESSAGE if save_enabled else PS.SAVE_DISABLED_MESSAGE
     )
     save_toggle = st.toggle(
-        "💾 Save Profile",
-        key="profile_save_toggle",
+        PS.SAVE_TOGGLE,
+        key=PROFILE_SAVE_TOGGLE,
         value=False,
         disabled=not save_enabled,
         help=save_help,
@@ -1084,10 +1114,10 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
                 rows=rows_payload,
             )
         except Exception as exc:  # pragma: no cover - Snowflake specific
-            st.error(f"Failed to save profile: {exc}")
+            st.error(PS.CLEAR_PROFILE_ERROR.format(error=exc))
         else:
             st.session_state["profile_saved_run_id"] = run_id
-            st.success(f"Saved profile run {run_id} to metadata.")
+            st.success(PS.PROFILE_SUCCESS_SAVE.format(run_id=run_id))
 
     if not save_toggle:
         st.session_state.pop("profile_saved_run_id", None)
@@ -1105,29 +1135,29 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
         filtered_df = filtered_df[(filtered_df["whitespace_pct"].fillna(0) > 5)]
 
     semantic_filter_map = {
-        "Identifiers": {"ACCOUNT_ID", "ORDER_ID", "TRADE_ID", "UUID", "IBAN", "REF_CODE"},
-        "Financial": {"PRICE/AMOUNT/QUANTITY", "IBAN", "BIC"},
-        "Instrument": {"ISIN", "TICKER/SYMBOL"},
-        "Geo": {"COUNTRY_CODE/NAME", "CURRENCY_CODE", "BIC"},
-        "Contact": {"EMAIL", "PHONE"},
-        "Date (Text)": {"DATE_IN_TEXT"},
-        "Reference Codes": {"REF_CODE"},
+        PS.FILTER_SEMANTIC_OPTIONS[0]: {"ACCOUNT_ID", "ORDER_ID", "TRADE_ID", "UUID", "IBAN", "REF_CODE"},
+        PS.FILTER_SEMANTIC_OPTIONS[1]: {"PRICE/AMOUNT/QUANTITY", "IBAN", "BIC"},
+        PS.FILTER_SEMANTIC_OPTIONS[2]: {"ISIN", "TICKER/SYMBOL"},
+        PS.FILTER_SEMANTIC_OPTIONS[3]: {"COUNTRY_CODE/NAME", "CURRENCY_CODE", "BIC"},
+        PS.FILTER_SEMANTIC_OPTIONS[4]: {"EMAIL", "PHONE"},
+        PS.FILTER_SEMANTIC_OPTIONS[5]: {"DATE_IN_TEXT"},
+        PS.FILTER_SEMANTIC_OPTIONS[6]: {"REF_CODE"},
     }
     active_semantic_filters: List[str] = []
     if filter_identifiers:
-        active_semantic_filters.append("Identifiers")
+        active_semantic_filters.append(PS.FILTER_SEMANTIC_OPTIONS[0])
     if filter_financial:
-        active_semantic_filters.append("Financial")
+        active_semantic_filters.append(PS.FILTER_SEMANTIC_OPTIONS[1])
     if filter_instrument:
-        active_semantic_filters.append("Instrument")
+        active_semantic_filters.append(PS.FILTER_SEMANTIC_OPTIONS[2])
     if filter_geo:
-        active_semantic_filters.append("Geo")
+        active_semantic_filters.append(PS.FILTER_SEMANTIC_OPTIONS[3])
     if filter_contact:
-        active_semantic_filters.append("Contact")
+        active_semantic_filters.append(PS.FILTER_SEMANTIC_OPTIONS[4])
     if filter_date_text:
-        active_semantic_filters.append("Date (Text)")
+        active_semantic_filters.append(PS.FILTER_SEMANTIC_OPTIONS[5])
     if filter_ref_codes:
-        active_semantic_filters.append("Reference Codes")
+        active_semantic_filters.append(PS.FILTER_SEMANTIC_OPTIONS[6])
 
     if active_semantic_filters:
         allowed_types = set()
@@ -1135,20 +1165,36 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
             allowed_types.update(semantic_filter_map.get(key, set()))
         filtered_df = filtered_df[filtered_df["semantic_type"].isin(allowed_types)]
     display_df = filtered_df.copy()
+    select_label = PS.GRID_COLUMN_SELECT
+    column_label = PS.GRID_COLUMN_COLUMN
+    physical_type_label = PS.GRID_COLUMN_PHYSICAL_TYPE
+    nulls_label = PS.GRID_COLUMN_NULLS
+    distinct_label = PS.GRID_COLUMN_DISTINCT
+    avg_length_label = PS.GRID_COLUMN_AVG_LENGTH
+    min_value_label = PS.GRID_COLUMN_MIN_VALUE
+    max_value_label = PS.GRID_COLUMN_MAX_VALUE
+    whitespace_label = PS.GRID_COLUMN_WHITESPACE
+    guessed_type_label = PS.GRID_COLUMN_GUESSED_TYPE
+    confidence_label = PS.GRID_COLUMN_CONFIDENCE
+    note_label = PS.GRID_COLUMN_NOTE
+
     grid_columns = [
-        "Select",
-        "Column",
-        "Physical Type",
-        "Nulls",
-        "Distinct",
-        "Avg Length",
-        "Min Value",
-        "Max Value",
-        "Whitespace %",
-        "Guessed Type",
-        "Confidence",
-        "Note",
+        select_label,
+        column_label,
+        physical_type_label,
+        nulls_label,
+        distinct_label,
+        avg_length_label,
+        min_value_label,
+        max_value_label,
+        whitespace_label,
+        guessed_type_label,
+        confidence_label,
+        note_label,
     ]
+
+    if not PROFILE_INLINE_SELECT:
+        _contract_message(PS.INLINE_SELECT_DISABLED)
     confidence_legend_html = """
     <div style="display:flex; gap:12px; align-items:center; font-size:0.85rem; margin:0.5rem 0;">
         <span style="display:flex; align-items:center; gap:4px;">
@@ -1286,29 +1332,35 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
             return note
 
         display_df_local = display_df.copy()
-        display_df_local["Column"] = display_df_local.get("column_name", "").fillna("").astype(str)
-        display_df_local["Select"] = display_df_local["Column"].apply(
+        display_df_local[column_label] = (
+            display_df_local.get("column_name", "").fillna("").astype(str)
+        )
+        display_df_local[select_label] = display_df_local[column_label].apply(
             lambda name: bool(selection_state.get(_selection_key(target_table, name), False))
         )
-        display_df_local["Select"] = display_df_local["Select"].astype(bool)
-        display_df_local["Physical Type"] = (
+        display_df_local[select_label] = display_df_local[select_label].astype(bool)
+        display_df_local[physical_type_label] = (
             display_df_local.get("data_type", "").fillna("").astype(str)
         )
-        display_df_local["Nulls"] = display_df_local.apply(
+        display_df_local[nulls_label] = display_df_local.apply(
             lambda row: _format_count_with_pct(row.get("nulls"), row.get("null_pct")), axis=1
         )
-        display_df_local["Distinct"] = display_df_local.apply(
+        display_df_local[distinct_label] = display_df_local.apply(
             lambda row: _format_count_with_pct(row.get("distincts"), row.get("distinct_pct")), axis=1
         )
-        display_df_local["Avg Length"] = display_df_local.apply(
+        display_df_local[avg_length_label] = display_df_local.apply(
             _format_length_stats_cell, axis=1
         )
-        display_df_local["Min Value"] = display_df_local["min_val"].apply(_format_value_cell)
-        display_df_local["Max Value"] = display_df_local["max_val"].apply(_format_value_cell)
-        display_df_local["Guessed Type"] = display_df_local["semantic_type"].apply(
+        display_df_local[min_value_label] = display_df_local["min_val"].apply(
+            _format_value_cell
+        )
+        display_df_local[max_value_label] = display_df_local["max_val"].apply(
+            _format_value_cell
+        )
+        display_df_local[guessed_type_label] = display_df_local["semantic_type"].apply(
             _format_semantic_label
         )
-        display_df_local["Whitespace %"] = display_df_local["whitespace_pct"].apply(
+        display_df_local[whitespace_label] = display_df_local["whitespace_pct"].apply(
             _format_whitespace_display
         )
 
@@ -1324,30 +1376,30 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
         display_df_local["_confidence_pct"] = display_df_local["confidence"].apply(
             _normalize_confidence
         )
-        display_df_local["Note"] = display_df_local.apply(_compose_note, axis=1)
+        display_df_local[note_label] = display_df_local.apply(_compose_note, axis=1)
         grid_container = st.container()
 
         confidence_numeric = pd.to_numeric(
             display_df_local["_confidence_pct"], errors="coerce"
         ).clip(lower=0.0, upper=100.0)
-        display_df_local["Confidence"] = confidence_numeric
+        display_df_local[confidence_label] = confidence_numeric
 
         formatted_rows: List[List[Any]] = []
         for _, row in display_df_local.iterrows():
             formatted_rows.append(
                 [
-                    bool(row.get("Select", False)),
-                    row.get("Column"),
-                    row.get("Physical Type"),
-                    row.get("Nulls"),
-                    row.get("Distinct"),
-                    row.get("Avg Length"),
-                    row.get("Min Value"),
-                    row.get("Max Value"),
-                    row.get("Whitespace %"),
-                    row.get("Guessed Type"),
-                    row.get("Confidence"),
-                    row.get("Note"),
+                    bool(row.get(select_label, False)),
+                    row.get(column_label),
+                    row.get(physical_type_label),
+                    row.get(nulls_label),
+                    row.get(distinct_label),
+                    row.get(avg_length_label),
+                    row.get(min_value_label),
+                    row.get(max_value_label),
+                    row.get(whitespace_label),
+                    row.get(guessed_type_label),
+                    row.get(confidence_label),
+                    row.get(note_label),
                 ]
             )
 
@@ -1356,26 +1408,26 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
             grid_df.columns, grid_columns, "profile results grid"
         )
         if grid_render_allowed:
-            grid_df["Select"] = grid_df["Select"].fillna(False).astype(bool)
-            grid_df["Confidence"] = grid_df["Confidence"].apply(_safe_float)
+            grid_df[select_label] = grid_df[select_label].fillna(False).astype(bool)
+            grid_df[confidence_label] = grid_df[confidence_label].apply(_safe_float)
 
         with grid_container:
             st.markdown(confidence_legend_html, unsafe_allow_html=True)
-            include_map: Dict[str, bool] = {}
+            include_map = get_include_map()
             selection_editor: Optional[pd.DataFrame] = None
             if grid_render_allowed and not grid_df.empty:
-                selection_editor_df = grid_df[["Select", "Column"]].copy()
+                selection_editor_df = grid_df[[select_label, column_label]].copy()
                 selection_render_allowed = _validate_grid_columns(
                     selection_editor_df.columns,
-                    ["Select", "Column"],
+                    [select_label, column_label],
                     "profile selection editor",
                 )
                 if selection_render_allowed:
-                    selection_editor_df["Select"] = (
-                        selection_editor_df["Select"].fillna(False).astype(bool)
+                    selection_editor_df[select_label] = (
+                        selection_editor_df[select_label].fillna(False).astype(bool)
                     )
                     suspicious_keys = _detect_secondary_selector_keys(
-                        "profile_results_selection"
+                        PROFILE_RESULTS_SELECTION
                     )
                     if suspicious_keys:
                         _contract_message(
@@ -1388,14 +1440,16 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
                             use_container_width=True,
                             hide_index=True,
                             column_config={
-                                "Select": st.column_config.CheckboxColumn(
-                                    "Select",
-                                    help="Toggle to include the column in downstream DQ suggestions.",
+                                select_label: st.column_config.CheckboxColumn(
+                                    select_label,
+                                    help=PS.GRID_CHECKBOX_HELP,
                                 ),
-                                "Column": st.column_config.Column("Column", disabled=True),
+                                column_label: st.column_config.Column(
+                                    column_label, disabled=True
+                                ),
                             },
-                            disabled=["Column"],
-                            key="profile_results_selection",
+                            disabled=[column_label],
+                            key=PROFILE_RESULTS_SELECTION,
                         )
 
             if (
@@ -1403,24 +1457,36 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
                 and isinstance(selection_editor, pd.DataFrame)
                 and not selection_editor.empty
             ):
-                select_series = selection_editor.get("Select")
-                column_series = selection_editor.get("Column")
+                select_series = selection_editor.get(select_label)
+                column_series = selection_editor.get(column_label)
                 if select_series is not None and column_series is not None:
                     select_flags = select_series.fillna(False).astype(bool)
-                    include_map = {
+                    include_map_local = {
                         str(column_series.iloc[idx]): bool(select_flags.iloc[idx])
                         for idx in range(len(select_flags))
                     }
+                    column_names = list(include_map_local.keys())
+                    if column_names:
+                        bulk_set_includes(column_names, False)
+                        for column_name, selected_flag in include_map_local.items():
+                            set_include(column_name, selected_flag)
+                        include_map = get_include_map()
 
             if grid_render_allowed and include_map:
                 for column_name, selected_flag in include_map.items():
                     key = _selection_key(target_table, column_name)
                     selection_state[key] = selected_flag
-                    grid_df.loc[grid_df["Column"] == column_name, "Select"] = selected_flag
+                    mask = grid_df[column_label] == column_name
+                    if mask.any():
+                        grid_df.loc[mask, select_label] = selected_flag
 
             if grid_render_allowed:
-                styler = grid_df.style.format({"Confidence": _format_confidence_display})
-                styler = styler.applymap(_confidence_style, subset=["Confidence"])
+                styler = grid_df.style.format(
+                    {confidence_label: _format_confidence_display}
+                )
+                styler = styler.applymap(
+                    _confidence_style, subset=[confidence_label]
+                )
                 st.dataframe(styler, hide_index=True, use_container_width=True)
 
         selection_counts = _apply_selection_state(
@@ -1434,19 +1500,25 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
     else:
         empty_df = pd.DataFrame(
             {
-                column: pd.Series(dtype="bool" if column == "Select" else "object")
+                column: pd.Series(
+                    dtype="bool" if column == select_label else "object"
+                )
                 for column in grid_columns
             }
         )
         st.markdown(confidence_legend_html, unsafe_allow_html=True)
-        empty_styler = empty_df.style.format({"Confidence": _format_confidence_display})
-        empty_styler = empty_styler.applymap(_confidence_style, subset=["Confidence"])
+        empty_styler = empty_df.style.format(
+            {confidence_label: _format_confidence_display}
+        )
+        empty_styler = empty_styler.applymap(
+            _confidence_style, subset=[confidence_label]
+        )
         st.dataframe(empty_styler, hide_index=True, use_container_width=True)
 
     if filtered_df.empty:
-        st.info("No columns matched the selected filters.")
+        st.info(PS.NO_COLUMNS_MATCHED)
 
-    st.subheader("Top values by column", anchor=False)
+    st.subheader(PS.TOP_VALUES_SUBHEADER, anchor=False)
     for _, row in filtered_df.iterrows():
         values = row.get("top_values", [])
         non_nulls_value = _safe_int(row.get("non_nulls"))
@@ -1454,17 +1526,17 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
         with st.expander(f"{row['column_name']} ({label_suffix})"):
             if not values:
                 if non_nulls_value is not None and non_nulls_value <= 0:
-                    st.info("No non-null values to display.")
+                    st.info(PS.INFO_NO_NON_NULL)
                 else:
-                    st.info("No top values available.")
+                    st.info(PS.INFO_NO_VALUES)
                 continue
 
             tv_df = pd.DataFrame(values)
             if tv_df.empty:
                 if non_nulls_value is not None and non_nulls_value <= 0:
-                    st.info("No non-null values to display.")
+                    st.info(PS.INFO_NO_NON_NULL)
                 else:
-                    st.info("No top values available.")
+                    st.info(PS.INFO_NO_VALUES)
                 continue
 
             # Normalize common column names when present; otherwise fall back gracefully
@@ -1478,24 +1550,30 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
                 if lowered in {"count", "cnt"} and count_column_name is None:
                     count_column_name = candidate
             if value_column_name is not None:
-                rename_map[value_column_name] = "Value"
+                rename_map[value_column_name] = PS.TOP_VALUES_VALUE_HEADER
             if count_column_name is not None:
-                rename_map[count_column_name] = "Count"
+                rename_map[count_column_name] = PS.TOP_VALUES_COUNT_HEADER
             if rename_map:
                 tv_df = tv_df.rename(columns=rename_map)
                 if value_column_name is not None:
-                    value_column_name = "Value"
+                    value_column_name = PS.TOP_VALUES_VALUE_HEADER
                 if count_column_name is not None:
-                    count_column_name = "Count"
+                    count_column_name = PS.TOP_VALUES_COUNT_HEADER
             elif tv_df.shape[1] == 2:
-                tv_df.columns = ["Value", "Count"]
-                value_column_name = "Value"
-                count_column_name = "Count"
+                tv_df.columns = [
+                    PS.TOP_VALUES_VALUE_HEADER,
+                    PS.TOP_VALUES_COUNT_HEADER,
+                ]
+                value_column_name = PS.TOP_VALUES_VALUE_HEADER
+                count_column_name = PS.TOP_VALUES_COUNT_HEADER
 
             if value_column_name is None and len(tv_df.columns) > 0:
                 value_column_name = tv_df.columns[0]
-            if count_column_name is None and "Count" in tv_df.columns:
-                count_column_name = "Count"
+            if (
+                count_column_name is None
+                and PS.TOP_VALUES_COUNT_HEADER in tv_df.columns
+            ):
+                count_column_name = PS.TOP_VALUES_COUNT_HEADER
 
             pct_columns = [col for col in tv_df.columns if "pct" in str(col).lower()]
 
@@ -1523,7 +1601,7 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
 
             if value_column_name and value_column_name in tv_df.columns:
                 null_bucket_mask = tv_df[value_column_name] == "__NULL__"
-                if null_bucket_mask.any():
+                if null_bucket_mask.any() and not PROFILE_TOP_VALUES_NULLS:
                     tv_df = tv_df.loc[~null_bucket_mask].copy()
                 tv_df = tv_df.loc[~tv_df[value_column_name].isna()].copy()
                 tv_df[value_column_name] = tv_df[value_column_name].replace(
@@ -1576,3 +1654,11 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
                     tv_df[col] = tv_df[col].apply(_format_percentage)
 
             st.table(tv_df)
+
+    if DEBUG_PROFILING and profile_result:
+        with st.expander(PS.DEBUG_PROFILE_PAYLOAD):
+            st.json(profile_result)
+        include_state = get_include_map()
+        if include_state:
+            with st.expander(PS.DEBUG_SELECTION_STATE):
+                st.write(include_state)

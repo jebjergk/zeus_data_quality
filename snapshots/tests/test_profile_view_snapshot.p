@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import ast
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
+
+from ui.strings import ProfileStrings as PS
 
 
 def _unique(values: List[str]) -> List[str]:
@@ -22,18 +24,47 @@ class _ProfileContractCollector(ast.NodeVisitor):
         self.captions: List[str] = []
         self.buttons: List[str] = []
         self.grid_columns: List[str] | None = None
+        self._bindings: Dict[str, str] = {}
 
     def _strings_from_node(self, node: ast.AST | None) -> List[str]:
         if node is None:
             return []
-        if isinstance(node, ast.Constant) and isinstance(node.value, str):
-            return [node.value]
+        evaluated = self._evaluate_string(node)
+        if evaluated is not None:
+            return [evaluated]
         if isinstance(node, ast.IfExp):
             values: List[str] = []
             values.extend(self._strings_from_node(node.body))
             values.extend(self._strings_from_node(node.orelse))
             return values
         return []
+
+    def _evaluate_string(self, node: ast.AST) -> Optional[str]:
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            return node.value
+        if isinstance(node, ast.Attribute):
+            resolved = self._resolve_attribute(node)
+            if isinstance(resolved, str):
+                return resolved
+        if isinstance(node, ast.Name):
+            return self._bindings.get(node.id)
+        return None
+
+    def _resolve_attribute(self, node: ast.Attribute) -> Any:
+        target: Any
+        if isinstance(node.value, ast.Name):
+            if node.value.id == "PS":
+                target = PS
+            else:
+                return None
+        elif isinstance(node.value, ast.Attribute):
+            parent = self._resolve_attribute(node.value)
+            if parent is None:
+                return None
+            target = parent
+        else:
+            return None
+        return getattr(target, node.attr, None)
 
     def visit_Call(self, node: ast.Call) -> Any:  # type: ignore[override]
         func = node.func
@@ -53,12 +84,18 @@ class _ProfileContractCollector(ast.NodeVisitor):
     def visit_Assign(self, node: ast.Assign) -> Any:  # type: ignore[override]
         for target in node.targets:
             if isinstance(target, ast.Name) and target.id == "grid_columns":
-                try:
-                    value = ast.literal_eval(node.value)
-                except Exception:
-                    value = None
-                if isinstance(value, list) and all(isinstance(item, str) for item in value):
-                    self.grid_columns = value
+                values: List[str] = []
+                if isinstance(node.value, ast.List):
+                    for element in node.value.elts:
+                        evaluated = self._evaluate_string(element)
+                        if evaluated is not None:
+                            values.append(evaluated)
+                if values:
+                    self.grid_columns = values
+            elif isinstance(target, ast.Name):
+                evaluated = self._evaluate_string(node.value)
+                if evaluated is not None:
+                    self._bindings[target.id] = evaluated
         self.generic_visit(node)
 
 

@@ -83,6 +83,7 @@ from views.profile_view import render_profile
 from views.table_picker import stateless_table_picker, session_cache_token
 from views.docs_view import render_docs as render_docs_view
 from views.config_editor import render_row_count_preview
+from utils.flags import DEMO_LOCK
 
 ALLOWED_PAGES = {"home", "cfg", "profile", "monitor", "docs"}
 
@@ -1678,8 +1679,12 @@ with st.sidebar:
         ):
             open_config_editor()
         st.divider()
-    run_as_role = st.text_input("RUN_AS_ROLE", value=state.get("run_as_role") or "")
-    dmf_role = st.text_input("DMF_ROLE", value=state.get("dmf_role") or "")
+    run_as_role = st.text_input(
+        "RUN_AS_ROLE", value=state.get("run_as_role") or "", disabled=DEMO_LOCK
+    )
+    dmf_role = st.text_input(
+        "DMF_ROLE", value=state.get("dmf_role") or "", disabled=DEMO_LOCK
+    )
     set_state(run_as_role or None, dmf_role or None)
 
 # Maintain a subtle separation between the sidebar navigation
