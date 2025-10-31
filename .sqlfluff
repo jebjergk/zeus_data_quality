@@ -1,0 +1,14 @@
+[sqlfluff]
+dialect = snowflake
+templater = raw
+max_line_length = 120
+exclude_rules = L009,L010,L014,L016,L029,L031
+
+[sqlfluff:rules]
+tab_space_size = 4
+
+[sqlfluff:rules:L006]
+indent_unit = space
+
+[sqlfluff:rules:L013]
+tab_space_size = 4
