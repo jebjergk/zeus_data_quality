@@ -1586,6 +1586,29 @@ def normalize_profile_row(row: Dict[str, Any]) -> Dict[str, Any]:
     except Exception:
         payload["date_valid_count"] = 0
 
+    def _coerce_bool(value: Any) -> bool:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            try:
+                if math.isnan(float(value)):
+                    return False
+            except Exception:
+                pass
+            return bool(value)
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized in {"true", "t", "yes", "y", "1"}:
+                return True
+            if normalized in {"false", "f", "no", "n", "0"}:
+                return False
+        return False
+
+    if "suggested" in payload:
+        payload["suggested"] = _coerce_bool(payload.get("suggested"))
+    else:
+        payload["suggested"] = False
+
     return payload
 
 
@@ -2792,6 +2815,73 @@ def run_table_profile(
         null_pct_value = float(null_pct)
         only_ws_ratio_value = float(only_ws_ratio)
         whitespace_ratio_value = float(whitespace_ratio)
+
+        effective_distinct_ratio = distinct_ratio_value
+        if (
+            effective_distinct_ratio is None
+            and distincts_int is not None
+            and non_nulls
+        ):
+            try:
+                effective_distinct_ratio = float(distincts_int) / float(non_nulls)
+            except Exception:
+                effective_distinct_ratio = None
+
+        semantic_type_upper = str(semantic_type or "").upper()
+
+        parse_success_ratio = None
+        if any_parse_ratio not in (None, 0):
+            parse_success_ratio = float(any_parse_ratio)
+        elif num_date_ratio not in (None, 0):
+            try:
+                parse_success_ratio = float(num_date_ratio)
+            except Exception:
+                parse_success_ratio = None
+
+        suggested = False
+        if (
+            distincts_int is not None
+            and non_nulls
+            and distincts_int >= non_nulls
+            and nulls_int == 0
+        ):
+            suggested = True
+        elif (
+            null_pct_value <= 0.05
+            and (
+                is_numeric
+                or _is_temporal(dtype)
+                or (
+                    is_string
+                    and effective_distinct_ratio is not None
+                    and 0.05 <= effective_distinct_ratio <= 0.70
+                )
+            )
+        ):
+            suggested = True
+        elif is_string and whitespace_pct >= 5.0:
+            suggested = True
+        elif is_string and parse_success_ratio is not None and parse_success_ratio >= 0.60:
+            suggested = True
+        elif (
+            is_string
+            and semantic_type_upper == "REF_CODE"
+            and (
+                (distincts_int is not None and distincts_int <= 200)
+                or (top3_ratio or 0.0) >= 0.60
+            )
+        ):
+            suggested = True
+        elif (
+            semantic_type_upper
+            in {"ACCOUNT_ID", "ORDER_ID", "TRADE_ID", "UUID"}
+            and effective_distinct_ratio is not None
+            and effective_distinct_ratio >= 0.60
+            and nulls_int == 0
+        ):
+            suggested = True
+
+        column_entry["suggested"] = suggested
 
         guardrail_skip = False
         if non_nulls == 0:
