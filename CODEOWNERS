@@ -1,0 +1,3 @@
+# These owners must review changes to critical UI and profiling services.
+views/** @user
+services/profiling/** @user
