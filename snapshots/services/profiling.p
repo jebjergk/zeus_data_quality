@@ -13,12 +13,12 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 from uuid import uuid4
 
 from services.profile import _is_numeric, _is_temporal, _stringify
+from services.profiles_repo import load_saved_profile_run
 from services.semantics import clamp_confidence, truncate_note
 from utils.meta import _q
 
 __all__ = [
     "list_columns",
-    "list_saved_profiles",
     "load_profile_run",
     "run_table_profile",
     "suggest_checks_from_profile",
@@ -3335,82 +3335,42 @@ def save_profile_results(
     return str(run_id)
 
 
-def list_saved_profiles(session, meta_db: str, meta_schema: str) -> List[Dict[str, Any]]:
-    """Return recent saved profile runs from the metadata tables."""
-
-    if not session or not (meta_db and meta_schema):
-        return []
-
-    runs_tbl = f"{_q(meta_db)}.{_q(meta_schema)}.DQ_PROFILE_RUN"
-    sql = (
-        f"SELECT RUN_ID, RUN_AT, SUMMARY FROM {runs_tbl} "
-        "ORDER BY RUN_AT DESC LIMIT 25"
-    )
-
-    try:
-        rows = session.sql(sql).collect()
-    except Exception:  # pragma: no cover - Snowflake specific
-        logger.debug("Unable to list saved profile runs", exc_info=True)
-        return []
-
-    results: List[Dict[str, Any]] = []
-    for row in rows:
-        if hasattr(row, "asDict"):
-            data = row.asDict()
-        else:
-            data = {}
-            try:
-                data["RUN_ID"] = row[0]
-                data["RUN_AT"] = row[1] if len(row) > 1 else None
-                data["SUMMARY"] = row[2] if len(row) > 2 else None
-            except Exception:
-                data = {}
-
-        run_id_value = data.get("RUN_ID") or data.get("run_id")
-        if not run_id_value:
-            continue
-
-        summary_payload = _coerce_variant_map(data.get("SUMMARY") or data.get("summary"))
-        results.append(
-            {
-                "run_id": str(run_id_value),
-                "run_at": data.get("RUN_AT") or data.get("run_at"),
-                "summary": summary_payload,
-            }
-        )
-
-    return results
-
-
 def load_profile_run(
     session,
     meta_db: str,
     meta_schema: str,
     run_id: str,
+    *,
+    summary_record: Optional[Any] = None,
+    column_records: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """Reconstruct a saved profile run from metadata tables."""
 
     if not session or not (meta_db and meta_schema) or not run_id:
         return {}
 
-    runs_tbl = f"{_q(meta_db)}.{_q(meta_schema)}.DQ_PROFILE_RUN"
-    cols_tbl = f"{_q(meta_db)}.{_q(meta_schema)}.DQ_PROFILE_COLUMN"
+    summary_payload_raw: Optional[Any] = summary_record
+    column_payloads_raw: Optional[List[Dict[str, Any]]] = column_records
 
-    try:
-        run_rows = session.sql(
-            f"SELECT RUN_ID, SUMMARY FROM {runs_tbl} WHERE RUN_ID = ?",
-            params=[run_id],
-        ).collect()
-    except Exception:  # pragma: no cover - Snowflake specific
-        logger.debug("Unable to load saved profile run %s", run_id, exc_info=True)
+    if summary_payload_raw is None or column_payloads_raw is None:
+        try:
+            fetched_summary, fetched_columns = load_saved_profile_run(
+                session, meta_db, meta_schema, run_id
+            )
+        except Exception:  # pragma: no cover - defensive fallback
+            logger.debug(
+                "Unable to fetch saved profile run %s", run_id, exc_info=True
+            )
+            fetched_summary, fetched_columns = None, []
+        if summary_payload_raw is None:
+            summary_payload_raw = fetched_summary
+        if column_payloads_raw is None:
+            column_payloads_raw = fetched_columns
+
+    if summary_payload_raw is None:
         return {}
 
-    if not run_rows:
-        return {}
-
-    summary_payload = _coerce_variant_map(
-        _extract_row_value(run_rows[0], "SUMMARY")
-    )
+    summary_payload = _coerce_variant_map(summary_payload_raw)
 
     target_table = summary_payload.get("target_table") or summary_payload.get("table")
 
@@ -3430,38 +3390,14 @@ def load_profile_run(
     top_n = _coerce_int(summary_payload.get("top_n"))
 
     columns: List[Dict[str, Any]] = []
-    try:
-        column_rows = session.sql(
-            f"""
-            SELECT COLUMN_NAME, PROFILE, SEMANTIC_TYPE, CONFIDENCE, RATIONALE, SIGNALS, SUGGESTED_CHECKS
-            FROM {cols_tbl}
-            WHERE RUN_ID = ?
-            ORDER BY COLUMN_NAME
-            """,
-            params=[run_id],
-        ).collect()
-    except Exception:  # pragma: no cover - Snowflake specific
-        logger.debug("Unable to load saved profile columns for %s", run_id, exc_info=True)
-        column_rows = []
+    column_rows = column_payloads_raw or []
 
     for row in column_rows:
-        if hasattr(row, "asDict"):
-            data = row.asDict()
-        else:
-            try:
-                data = {
-                    "COLUMN_NAME": row[0],
-                    "PROFILE": row[1] if len(row) > 1 else None,
-                    "SEMANTIC_TYPE": row[2] if len(row) > 2 else None,
-                    "CONFIDENCE": row[3] if len(row) > 3 else None,
-                    "RATIONALE": row[4] if len(row) > 4 else None,
-                    "SIGNALS": row[5] if len(row) > 5 else None,
-                    "SUGGESTED_CHECKS": row[6] if len(row) > 6 else None,
-                }
-            except Exception:
-                data = {}
+        data = dict(row) if isinstance(row, dict) else {}
 
-        profile_payload = _coerce_variant_map(data.get("PROFILE") or data.get("profile"))
+        profile_payload = _coerce_variant_map(
+            data.get("PROFILE") or data.get("profile")
+        )
         if not profile_payload:
             profile_payload = {}
 
@@ -3481,7 +3417,10 @@ def load_profile_run(
         if suggested_value is not None:
             merged["suggested_checks"] = _coerce_variant_value(suggested_value)
 
-        merged.setdefault("column_name", data.get("COLUMN_NAME") or data.get("column_name") or "")
+        merged.setdefault(
+            "column_name",
+            data.get("COLUMN_NAME") or data.get("column_name") or "",
+        )
 
         normalized = normalize_profile_row(merged)
         columns.append(normalized)

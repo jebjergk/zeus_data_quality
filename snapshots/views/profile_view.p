@@ -44,12 +44,12 @@ import streamlit as st
 
 from services.profile import build_profile_suggestion
 from services.profiling import (
-    list_saved_profiles,
     load_profile_run,
     normalize_profile_row,
     run_table_profile,
     save_profile_results,
 )
+from services.profiles_repo import list_saved_profiles, load_saved_profile_run
 from ui import keys as ui_keys
 from ui import strings as ui_strings
 from utils.flags import (
@@ -667,6 +667,11 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
     saved_profile_runs: List[Dict[str, Any]] = []
     if saved_profiles_enabled:
         saved_profile_runs = list_saved_profiles(session, meta_db, meta_schema)
+        if not saved_profile_runs:
+            st.info(
+                "No saved profiles found (or metadata tables haven’t been created yet). "
+                "Run and save a profile first."
+            )
 
     saved_run_lookup: Dict[str, str] = {}
     saved_run_labels: List[str] = []
@@ -766,29 +771,47 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
             st.warning(ui_strings.PROFILE_LOAD_WARNING_NO_SELECTION)
         else:
             try:
-                loaded_profile = load_profile_run(
-                    session=session,
-                    meta_db=meta_db,
-                    meta_schema=meta_schema,
-                    run_id=load_selected_run_id,
+                summary_payload, column_payloads = load_saved_profile_run(
+                    session,
+                    meta_db,
+                    meta_schema,
+                    load_selected_run_id,
                 )
             except Exception as exc:  # pragma: no cover - Snowflake specific
                 st.error(ui_strings.PROFILE_LOAD_ERROR_GENERIC.format(error=exc))
             else:
-                if not loaded_profile:
-                    st.warning(ui_strings.PROFILE_WARNING_SAVED_EMPTY)
-                else:
-                    st.session_state[ui_keys.PROFILE_RESULTS_STATE] = loaded_profile
-                    st.session_state[ui_keys.PROFILE_LOADED_RUN_ID] = load_selected_run_id
-                    target_table = loaded_profile.get("target_table")
-                    if target_table:
-                        st.session_state[ui_keys.PROFILE_TARGET_FQN] = target_table
-                    st.success(
-                        ui_strings.PROFILE_SUCCESS_LOAD_SAVED.format(
-                            run_id=load_selected_run_id
-                        )
+                if summary_payload is None and not column_payloads:
+                    st.info(
+                        "No saved profiles found (or metadata tables haven’t been created yet). "
+                        "Run and save a profile first."
                     )
-                    st.rerun()
+                else:
+                    try:
+                        loaded_profile = load_profile_run(
+                            session=session,
+                            meta_db=meta_db,
+                            meta_schema=meta_schema,
+                            run_id=load_selected_run_id,
+                            summary_record=summary_payload,
+                            column_records=column_payloads,
+                        )
+                    except Exception as exc:  # pragma: no cover - Snowflake specific
+                        st.error(ui_strings.PROFILE_LOAD_ERROR_GENERIC.format(error=exc))
+                    else:
+                        if not loaded_profile:
+                            st.warning(ui_strings.PROFILE_WARNING_SAVED_EMPTY)
+                        else:
+                            st.session_state[ui_keys.PROFILE_RESULTS_STATE] = loaded_profile
+                            st.session_state[ui_keys.PROFILE_LOADED_RUN_ID] = load_selected_run_id
+                            target_table = loaded_profile.get("target_table")
+                            if target_table:
+                                st.session_state[ui_keys.PROFILE_TARGET_FQN] = target_table
+                            st.success(
+                                ui_strings.PROFILE_SUCCESS_LOAD_SAVED.format(
+                                    run_id=load_selected_run_id
+                                )
+                            )
+                            st.rerun()
 
     stored_profile_result = st.session_state.get(ui_keys.PROFILE_RESULTS_STATE)
     loaded_run_id = st.session_state.get(ui_keys.PROFILE_LOADED_RUN_ID)
