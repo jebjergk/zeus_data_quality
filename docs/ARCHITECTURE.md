@@ -33,3 +33,70 @@ No data leaves Snowflake. No third-party AI inference is called.
 
 ## Data Flow (Profiling)
 
+User selects table →
+Profiler queries table sample →
+services.profiling.run_table_profile() →
+Produces per-column metrics & signals →
+normalize_profile_row() standardizes payload →
+views.profile_view renders DataFrame →
+User may save / generate DQ config
+
+yaml
+Copy code
+
+Profiling yields:
+- Null counts & percentages
+- Distinct counts & cardinality signals
+- Min / max *actual values* for text + numeric fields
+- Estimated semantic type (Identifier, REF Code, Contact, etc.)
+- Confidence score with rationale
+
+---
+
+## Data Flow (DQ Execution)
+
+User configures rule set → Stored in DQ_CHECK
+Run Now or Scheduled Task → Executes DQ_RUN_CONFIG procedure →
+Each check determines OK / FAIL →
+Results written to DQ_RUN_RESULTS →
+Displayed in UI
+
+yaml
+Copy code
+
+Row-level checks use `WHERE NOT (predicate)` fail-count evaluation.  
+Aggregate checks use `AGG:` prefixed expressions evaluating Boolean status.
+
+---
+
+## Stored Procedures
+
+| Procedure | Purpose |
+|----------|---------|
+| `DQ_RUN_CONFIG(config_id)` | Execute all checks for a configuration and record results |
+| `SP_DQ_MANAGE_TASK(...)` | Create / replace Snowflake Task for scheduled DQ runs |
+
+Both run as **EXECUTE AS CALLER**, meaning:
+- Execution inherits the **user’s role & warehouse**.
+- No surprises with hidden owner-role privileges.
+
+---
+
+## Metadata Tables
+
+| Table | Purpose |
+|------|---------|
+| `DQ_CHECK` | Definition of each DQ rule in a config |
+| `DQ_RUN_RESULTS` | Execution output for each check run |
+| `PROFILE_RUN` (optional) | (Coming) Saved profiling summaries |
+| `PROFILE_COLUMN` (optional) | (Coming) Saved per-column profile details |
+
+---
+
+## Architectural Principles
+
+1. **All processing stays in Snowflake** (Privacy / GDPR safe).
+2. **Profiling is read-only** — no mutation of data.
+3. **UI state is stateless**, except selected table + config editing state.
+4. **Profiling must not distort data** (empty string ≠ NULL).
+5. **Semantic typing is guidance, never authoritative**.
