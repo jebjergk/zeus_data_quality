@@ -7,6 +7,7 @@ client is not installed.  Snowflake objects are loaded lazily via duck typing.
 
 from __future__ import annotations
 from dataclasses import dataclass
+import math
 from typing import Any, Dict, List, Optional, Tuple
 
 try:
@@ -41,6 +42,7 @@ __all__ = [
     "list_tables",
     "get_table_row_count",
     "list_columns",
+    "compute_confidence_pct",
 ]
 
 # ---------- Models ----------
@@ -78,9 +80,89 @@ def _q(ident: str) -> str:
 def fq_table(database: str, schema: str, table: str) -> str:
     return f'{_q(database.upper())}.{_q(schema.upper())}.{_q(table.upper())}'
 
+def _coerce_float(value: Any) -> Optional[float]:
+    """Best-effort conversion of a value to float with NaN/Inf rejection."""
+
+    if value is None:
+        return None
+
+    if isinstance(value, (int, float)):
+        try:
+            numeric = float(value)
+        except Exception:
+            return None
+    else:
+        text = str(value).strip()
+        if not text:
+            return None
+        try:
+            numeric = float(text)
+        except Exception:
+            return None
+
+    if math.isnan(numeric) or math.isinf(numeric):
+        return None
+    return numeric
+
+
+def compute_confidence_pct(
+    *,
+    raw_confidence: Optional[Any] = None,
+    numerator: Optional[Any] = None,
+    denominator: Optional[Any] = None,
+    sample_size: Optional[Any] = None,
+) -> Optional[float]:
+    """Return a sanitized confidence percentage bounded to [0, 100].
+
+    The helper accepts either a raw confidence value (ratio or percentage) or an
+    explicit numerator / denominator pair.  When sampling applies, a non-positive
+    ``sample_size`` will short-circuit to ``0.0`` to avoid division-by-zero or
+    NaN propagation.
+    """
+
+    sample_value = _coerce_float(sample_size)
+    if sample_value is not None and sample_value <= 0:
+        return 0.0
+
+    ratio: Optional[float] = None
+
+    if numerator is not None and denominator is not None:
+        num_value = _coerce_float(numerator)
+        den_value = _coerce_float(denominator)
+        if den_value and den_value > 0:
+            if num_value is None:
+                num_value = 0.0
+            ratio = max(0.0, min(num_value / den_value, 1.0))
+
+    if ratio is None and raw_confidence is not None:
+        confidence_value = _coerce_float(raw_confidence)
+        if confidence_value is not None:
+            if confidence_value > 1.0:
+                ratio = confidence_value / 100.0
+            else:
+                ratio = confidence_value
+
+    if ratio is None:
+        return 0.0 if sample_value == 0 else None
+
+    clamped_ratio = max(0.0, min(ratio, 1.0))
+    percentage = clamped_ratio * 100.0
+    return round(percentage, 3)
+
+
 def _normalize_row(row) -> Dict[str, Any]:
     d = row.asDict() if hasattr(row, "asDict") else dict(row)
-    return {str(k).lower(): v for k, v in d.items()}
+    normalized = {str(k).lower(): v for k, v in d.items()}
+
+    if "confidence" in normalized:
+        normalized["confidence"] = compute_confidence_pct(
+            raw_confidence=normalized.get("confidence"),
+            numerator=normalized.get("confidence_numerator"),
+            denominator=normalized.get("confidence_denominator"),
+            sample_size=normalized.get("sample_size"),
+        )
+
+    return normalized
 
 def _parse_relation_name(name: str) -> Tuple[Optional[str], Optional[str], str]:
     parts = [p.strip('"') for p in name.split('.') if p]
