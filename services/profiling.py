@@ -1891,7 +1891,7 @@ def run_table_profile(
         dtype = meta.get("data_type") or ""
         qcol = _quote_identifier(name)
         distinct_expr = "APPROX_COUNT_DISTINCT({col})" if rows_profiled > approx_threshold else "COUNT(DISTINCT {col})"
-        string_expr = f"TO_VARCHAR({qcol})"
+        string_expr = f"{qcol}::STRING"
         length_expr = f"LENGTH({string_expr})"
 
         metrics_sql = [
@@ -1900,13 +1900,13 @@ def run_table_profile(
             f"{distinct_expr.format(col=qcol)} AS DISTINCTS",
             f"SUM(CASE WHEN {qcol} IS NOT NULL THEN 1 ELSE 0 END) AS NON_NULLS_COUNT",
             (
-                "SUM(CASE WHEN {col} IS NOT NULL AND {str_expr} = '' THEN 1 ELSE 0 END)"
-                " AS EMPTY_STRINGS"
-            ).format(col=qcol, str_expr=string_expr),
+                "SUM(CASE WHEN {str_expr} = '' THEN 1 ELSE 0 END)"
+                " AS EMPTY_STR_ROWS"
+            ).format(str_expr=string_expr),
             (
-                "SUM(CASE WHEN {col} IS NOT NULL AND REGEXP_LIKE({str_expr}, '^[[:space:]]+$') THEN 1 ELSE 0 END)"
+                "SUM(CASE WHEN REGEXP_LIKE({str_expr}, '^\\s+$') THEN 1 ELSE 0 END)"
                 " AS WHITESPACE_ONLY_ROWS"
-            ).format(col=qcol, str_expr=string_expr),
+            ).format(str_expr=string_expr),
         ]
         num_date_matches_alias: Optional[str] = "NUMDATE_PARSE_COUNT"
         num_date_min_alias: Optional[str] = "NUMDATE_MIN"
@@ -1953,10 +1953,10 @@ def run_table_profile(
             trimmed_expr = f"TRIM({qcol}::STRING)"
             sentinel_values = ("'0'", "'00000000'", "'0000-00-00'", "'0000/00/00'")
             metrics_sql.append(
-                f"SUM(CASE WHEN {qcol} IS NOT NULL AND REGEXP_LIKE({string_expr}, '^\\s|\\s$|\\s{{2,}}') THEN 1 ELSE 0 END) AS WHITESPACE_ROWS"
+                f"SUM(CASE WHEN REGEXP_LIKE({string_expr}, '^\\s|\\s$|\\s{{2,}}') THEN 1 ELSE 0 END) AS WHITESPACE_ROWS"
             )
             metrics_sql.append(
-                f"SUM(CASE WHEN {qcol} IS NOT NULL AND REGEXP_LIKE({string_expr}, '^\\s|\\s$') THEN 1 ELSE 0 END) AS LEAD_TRAIL_WS_ROWS"
+                f"SUM(CASE WHEN {qcol}::STRING != TRIM({qcol}::STRING) THEN 1 ELSE 0 END) AS LEAD_TRAIL_WS_ROWS"
             )
             digits_only_expr = f"TRIM({qcol}::STRING)"
             guarded_numeric_expr = (
@@ -1969,10 +1969,10 @@ def run_table_profile(
             ).format(expr=digits_only_expr)
         else:
             metrics_sql.append(
-                f"SUM(CASE WHEN {qcol} IS NOT NULL AND REGEXP_LIKE({string_expr}, '^\\s|\\s$|\\s{{2,}}') THEN 1 ELSE 0 END) AS WHITESPACE_ROWS"
+                f"SUM(CASE WHEN REGEXP_LIKE({string_expr}, '^\\s|\\s$|\\s{{2,}}') THEN 1 ELSE 0 END) AS WHITESPACE_ROWS"
             )
             metrics_sql.append(
-                f"SUM(CASE WHEN {qcol} IS NOT NULL AND REGEXP_LIKE({string_expr}, '^\\s|\\s$') THEN 1 ELSE 0 END) AS LEAD_TRAIL_WS_ROWS"
+                f"SUM(CASE WHEN {qcol}::STRING != TRIM({qcol}::STRING) THEN 1 ELSE 0 END) AS LEAD_TRAIL_WS_ROWS"
             )
 
         if num_date_expr_sql and num_date_matches_alias and num_date_min_alias and num_date_max_alias:
@@ -2188,21 +2188,21 @@ def run_table_profile(
             minimal_metrics.extend(
                 [
                     (
-                        "SUM(CASE WHEN {col} IS NOT NULL AND {str_expr} = '' THEN 1 ELSE 0 END)"
-                        " AS EMPTY_STRINGS"
-                    ).format(col=qcol, str_expr=string_expr),
+                        "SUM(CASE WHEN {str_expr} = '' THEN 1 ELSE 0 END)"
+                        " AS EMPTY_STR_ROWS"
+                    ).format(str_expr=string_expr),
                     (
-                        "SUM(CASE WHEN {col} IS NOT NULL AND REGEXP_LIKE({str_expr}, '^[[:space:]]+$') THEN 1 ELSE 0 END)"
+                        "SUM(CASE WHEN REGEXP_LIKE({str_expr}, '^\\s+$') THEN 1 ELSE 0 END)"
                         " AS WHITESPACE_ONLY_ROWS"
-                    ).format(col=qcol, str_expr=string_expr),
+                    ).format(str_expr=string_expr),
                     (
-                        "SUM(CASE WHEN {col} IS NOT NULL AND REGEXP_LIKE({str_expr}, '^\\s|\\s$|\\s{{2,}}') THEN 1 ELSE 0 END)"
+                        "SUM(CASE WHEN REGEXP_LIKE({str_expr}, '^\\s|\\s$|\\s{{2,}}') THEN 1 ELSE 0 END)"
                         " AS WHITESPACE_ROWS"
-                    ).format(col=qcol, str_expr=string_expr),
+                    ).format(str_expr=string_expr),
                     (
-                        "SUM(CASE WHEN {col} IS NOT NULL AND REGEXP_LIKE({str_expr}, '^\\s|\\s$') THEN 1 ELSE 0 END)"
+                        "SUM(CASE WHEN {col}::STRING != TRIM({col}::STRING) THEN 1 ELSE 0 END)"
                         " AS LEAD_TRAIL_WS_ROWS"
-                    ).format(col=qcol, str_expr=string_expr),
+                    ).format(col=qcol),
                 ]
             )
             if num_date_matches_alias:
@@ -2360,8 +2360,9 @@ def run_table_profile(
         except Exception:
             avg_len_value = None
 
-        non_nulls = max(row_cnt - nulls_int, 0)
-        null_pct = (float(nulls_int) / float(row_cnt)) if row_cnt else 0.0
+        rows_profiled_total = row_cnt if row_cnt >= 0 else 0
+        non_nulls = max(rows_profiled_total - nulls_int, 0)
+        null_pct = (float(nulls_int) / float(rows_profiled_total)) if rows_profiled_total else 0.0
         if distincts_int is not None and non_nulls:
             distinct_pct = float(distincts_int) / float(non_nulls)
         else:
@@ -2564,14 +2565,9 @@ def run_table_profile(
         hints = _derive_name_hints(name)
 
         top_values: List[Dict[str, Any]] = []
-        top_coverage = 0
-        denom_non_nulls = max(1, int(non_nulls or 0))
-        if top_n_clamped > 0 and rows_profiled:
-            if non_nulls <= 0:
-                top_values = [
-                    {"value": None, "count": int(rows_profiled), "pct": 100.0 if rows_profiled else 0.0}
-                ]
-            else:
+        denom_rows_profiled = float(rows_profiled_total) if rows_profiled_total else 0.0
+        if top_n_clamped > 0 and rows_profiled_total:
+            if non_nulls > 0:
                 top_sql = (
                     f"SELECT {qcol} AS VALUE, COUNT(*) AS CNT "
                     f"FROM {sampled_ref} "
@@ -2601,15 +2597,13 @@ def run_table_profile(
                         if key in seen_value_keys:
                             continue
                         seen_value_keys.add(key)
-                        top_coverage += count_int
-                        pct = (float(count_int) / float(denom_non_nulls) * 100.0)
+                        pct = (float(count_int) / denom_rows_profiled * 100.0) if denom_rows_profiled else 0.0
                         top_values.append({"value": value, "count": count_int, "pct": pct})
                 except Exception:
                     top_values = []
-                    top_coverage = 0
 
         whitespace_length_counts: List[Tuple[int, int]] = []
-        if is_string and ws_only_rows_int > 0 and rows_profiled:
+        if is_string and ws_only_rows_int > 0 and rows_profiled_total:
             ws_len_sql = (
                 f"SELECT LENGTH({qcol}::STRING) AS WS_LEN, COUNT(*) AS CNT FROM {sampled_ref} "
                 f"WHERE {qcol} IS NOT NULL AND REGEXP_LIKE({qcol}::STRING, '^\\s+$') "
@@ -2646,10 +2640,25 @@ def run_table_profile(
 
         if is_string and whitespace_length_counts and non_nulls:
             for length_int, count_int in whitespace_length_counts:
-                pct = (float(count_int) / float(denom_non_nulls) * 100.0)
+                pct = (float(count_int) / denom_rows_profiled * 100.0) if denom_rows_profiled else 0.0
                 top_values.append({"value": f"__WS_LEN__:{length_int}", "count": count_int, "pct": pct})
 
-        coverage_pct = (float(top_coverage) / non_nulls * 100.0) if non_nulls else 0.0
+        def _upsert_top_value(entries: List[Dict[str, Any]], target_value: Any, count: int) -> None:
+            if count <= 0:
+                return
+            pct = (float(count) / denom_rows_profiled * 100.0) if denom_rows_profiled else 0.0
+            for entry in entries:
+                if entry.get("value") == target_value:
+                    entry["count"] = count
+                    entry["pct"] = pct
+                    return
+            entries.append({"value": target_value, "count": count, "pct": pct})
+
+        _upsert_top_value(top_values, None, max(nulls_int, 0))
+        _upsert_top_value(top_values, "", max(empty_str_rows_int, 0))
+
+        coverage_total = sum(int(entry.get("count") or 0) for entry in top_values)
+        coverage_pct = (float(coverage_total) / denom_rows_profiled * 100.0) if denom_rows_profiled else 0.0
 
         top1_ratio = None
         top3_ratio = None
