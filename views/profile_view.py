@@ -932,7 +932,7 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
             disabled=run_disabled,
         )
     with button_cols[1]:
-        suggest_cfg = st.button(
+        suggest_cfg_pressed = st.button(
             ui_strings.PROFILE_SUGGEST_BUTTON_LABEL,
             type="secondary",
             disabled=not stored_profile_result,
@@ -1034,21 +1034,7 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
         st.success(success_message)
         st.rerun()
 
-    if suggest_cfg and profile_result:
-        include_map = st.session_state.get(PROFILE_INCLUDE_COLS_STATE, {}) or {}
-        selected_columns = {
-            str(column_name)
-            for column_name, include_flag in include_map.items()
-            if include_flag
-        }
-        if not selected_columns:
-            st.warning(ui_strings.PROFILE_SUGGEST_WARNING_EMPTY)
-        else:
-            _load_suggestion(
-                profile_result,
-                ui_strings.PROFILE_SUGGEST_SUCCESS,
-                only_columns=selected_columns,
-            )
+    selected_columns_from_grid: List[str] = []
 
     if not profile_result:
         return
@@ -1468,11 +1454,14 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
                         include_series = edited_df.get("Include")
                         if include_series is not None:
                             updated_selection = dict(include_selection)
+                            selected_columns_from_grid = []
                             for column_name, include_flag in zip(
                                 record_column_names,
                                 include_series.tolist(),
                             ):
                                 updated_selection[column_name] = bool(include_flag)
+                                if bool(include_flag):
+                                    selected_columns_from_grid.append(column_name)
                             st.session_state[PROFILE_INCLUDE_COLS_STATE] = updated_selection
                             include_selection = updated_selection
                 else:
@@ -1506,6 +1495,16 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
             column_config={"Include": {"editable": True}},
             disabled=disabled_columns,
         )
+
+    if suggest_cfg_pressed and profile_result:
+        if not selected_columns_from_grid:
+            st.warning(ui_strings.PROFILE_SUGGEST_WARNING_EMPTY)
+        else:
+            _load_suggestion(
+                profile_result,
+                ui_strings.PROFILE_SUGGEST_SUCCESS,
+                only_columns=set(selected_columns_from_grid),
+            )
 
     if filtered_df.empty:
         st.info(ui_strings.PROFILE_INFO_NO_FILTER_RESULTS)
