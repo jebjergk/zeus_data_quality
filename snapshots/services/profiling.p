@@ -24,10 +24,82 @@ __all__ = [
     "suggest_checks_from_profile",
     "save_profile_results",
     "normalize_profile_row",
+    "list_saved_profiles",
+    "_label_for_profile_entry",
 ]
 
 
 logger = logging.getLogger(__name__)
+
+
+def list_saved_profiles(session, meta_db: str, meta_schema: str, limit: int = 200):
+    """
+    Return a list of saved profile runs for the dropdown.
+    Each item is a dict with:
+      run_id, run_at (TIMESTAMP_LTZ -> str), target_fqn, database, schema, table_name,
+      rows_profiled, saved_at (ISO string if present), sample_pct
+    Never raises; returns [] on error.
+    """
+
+    if not session or not meta_db or not meta_schema:
+        return []
+
+    tbl = f"{_q(meta_db)}.{_q(meta_schema)}.DQ_PROFILE_RUN"
+    sql = f"""
+        SELECT
+          RUN_ID,
+          TO_VARCHAR(COALESCE(RUN_AT, CURRENT_TIMESTAMP())) AS RUN_AT_STR,
+          TRY_TO_VARCHAR(SUMMARY:target_table)       AS TARGET_FQN,
+          TRY_TO_VARCHAR(SUMMARY:database)           AS DB_NAME,
+          TRY_TO_VARCHAR(SUMMARY:schema)             AS SCH_NAME,
+          TRY_TO_VARCHAR(SUMMARY:table_name)         AS TBL_NAME,
+          TRY_TO_NUMBER(SUMMARY:rows_profiled)       AS ROWS_PROFILED,
+          TRY_TO_VARCHAR(SUMMARY:saved_at)           AS SAVED_AT,
+          TRY_TO_NUMBER(SUMMARY:sample_pct)          AS SAMPLE_PCT
+        FROM {tbl}
+        ORDER BY RUN_AT DESC
+        LIMIT {int(max(1, min(limit, 1000)))}
+    """
+    try:
+        rows = session.sql(sql).collect()
+    except Exception:
+        return []
+
+    out = []
+    for r in rows:
+        d = r.asDict() if hasattr(r, "asDict") else {}
+        out.append(
+            {
+                "run_id": d.get("RUN_ID"),
+                "run_at": d.get("RUN_AT_STR"),
+                "target_fqn": (d.get("TARGET_FQN") or "").strip(),
+                "database": (d.get("DB_NAME") or "").strip('"'),
+                "schema": (d.get("SCH_NAME") or "").strip('"'),
+                "table_name": (d.get("TBL_NAME") or "").strip('"'),
+                "rows_profiled": d.get("ROWS_PROFILED"),
+                "saved_at": d.get("SAVED_AT"),
+                "sample_pct": d.get("SAMPLE_PCT"),
+            }
+        )
+    return out
+
+
+def _label_for_profile_entry(entry: dict) -> str:
+    # Prefer explicit pieces; fallback to target_fqn; never "unknown table"
+    db = (entry.get("database") or "").strip()
+    sch = (entry.get("schema") or "").strip()
+    tbl = (entry.get("table_name") or "").strip()
+    target = (entry.get("target_fqn") or "").strip().strip('"')
+    fqn = f"{db}.{sch}.{tbl}" if all([db, sch, tbl]) else (target or "(unlabeled)")
+    # Unquote any lingering double quotes
+    fqn = ".".join(p.strip().strip('"') for p in fqn.split(".") if p)
+    rows = entry.get("rows_profiled")
+    rows_txt = f"{int(rows):,}" if isinstance(rows, (int, float)) else "?"
+    pct = entry.get("sample_pct")
+    scan_txt = "full scan" if (pct is None) else f"{float(pct):.1f}%"
+    when = entry.get("saved_at") or entry.get("run_at") or ""
+    when_short = when.replace("T", " ").replace("Z", "")
+    return f"{fqn} — {rows_txt} rows — {scan_txt} — {when_short}"
 
 
 def _env_flag(name: str, default: bool = False) -> bool:
