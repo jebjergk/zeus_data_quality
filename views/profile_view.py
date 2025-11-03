@@ -69,7 +69,8 @@ FULL_SCAN_WARNING_THRESHOLD = 1_000_000
 MAX_TOP_N = 10
 
 
-PROFILE_SELECTED_COLS_STATE = "profile_selected_cols"
+PROFILE_INCLUDE_COLS_STATE = "profile_include_cols"
+PROFILE_INCLUDE_TOKEN_STATE = "profile_include_token"
 
 
 def _safe_int(value: Any) -> Optional[int]:
@@ -798,52 +799,120 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
     else:
         current_target_fqn = str(selected_fqn or "")
 
-    def _apply_selection_state(
+    def _profile_signature(
         profile_payload: Optional[Dict[str, Any]],
-        table_fqn: str,
-        initialize_missing: bool,
+        fallback_target: str,
+    ) -> Tuple[str, Tuple[str, ...]]:
+        if not profile_payload:
+            run_id = str(fallback_target or "active")
+            return (run_id, tuple())
+        summary = profile_payload.get("summary") or {}
+        raw_run_id = (
+            summary.get("run_id")
+            or profile_payload.get("target_table")
+            or fallback_target
+            or "active"
+        )
+        run_id = str(raw_run_id)
+        column_names: List[str] = []
+        for column_payload in profile_payload.get("columns", []) or []:
+            column_name = str(
+                column_payload.get("column_name")
+                or column_payload.get("name")
+                or ""
+            ).strip()
+            if column_name:
+                column_names.append(column_name)
+        return (run_id, tuple(column_names))
+
+    def _ensure_include_state(
+        profile_payload: Optional[Dict[str, Any]],
+        fallback_target: str,
+    ) -> Tuple[str, Tuple[str, ...], Dict[str, bool]]:
+        run_id, column_names = _profile_signature(profile_payload, fallback_target)
+        state_map = st.session_state.get(PROFILE_INCLUDE_COLS_STATE)
+        if not isinstance(state_map, dict):
+            state_map = {}
+        token = st.session_state.get(PROFILE_INCLUDE_TOKEN_STATE)
+        if profile_payload:
+            if token != (run_id, column_names):
+                refreshed: Dict[str, bool] = {}
+                for column_payload in profile_payload.get("columns", []) or []:
+                    column_name = str(
+                        column_payload.get("column_name")
+                        or column_payload.get("name")
+                        or ""
+                    ).strip()
+                    if not column_name:
+                        continue
+                    suggested_default = _safe_bool(column_payload.get("suggested"))
+                    refreshed[column_name] = (
+                        bool(suggested_default)
+                        if suggested_default is not None
+                        else False
+                    )
+                state_map = refreshed
+                st.session_state[PROFILE_INCLUDE_TOKEN_STATE] = (run_id, column_names)
+            else:
+                filtered = {
+                    column_name: bool(state_map.get(column_name, False))
+                    for column_name in column_names
+                }
+                state_map = filtered
+            st.session_state[PROFILE_INCLUDE_COLS_STATE] = state_map
+        else:
+            st.session_state[PROFILE_INCLUDE_COLS_STATE] = state_map
+        return (run_id, column_names, state_map)
+
+    def _apply_widget_selection(
+        run_id: str,
+        column_names: Tuple[str, ...],
+        selection_map: Dict[str, bool],
+    ) -> Dict[str, bool]:
+        if not column_names:
+            return selection_map
+        run_token = str(run_id or "active")
+        updated = dict(selection_map)
+        for column_name in column_names:
+            widget_key = f"include_{run_token}_{column_name}"
+            if widget_key in st.session_state:
+                updated[column_name] = bool(st.session_state.get(widget_key))
+        st.session_state[PROFILE_INCLUDE_COLS_STATE] = updated
+        return updated
+
+    def _sync_profile_selection(
+        profile_payload: Optional[Dict[str, Any]],
+        selection_map: Dict[str, bool],
     ) -> Tuple[int, int]:
         if not profile_payload:
             return (0, 0)
-        columns_payload = profile_payload.get("columns", [])
         selected = 0
         total = 0
-        selection_state: Dict[str, Dict[str, bool]] = st.session_state.setdefault(
-            PROFILE_SELECTED_COLS_STATE, {}
-        )
-        table_key = str(table_fqn or "")
-        table_snapshot = dict(selection_state.get(table_key) or {})
-        active_columns: List[str] = []
-        for column_payload in columns_payload:
-            column_name = str(column_payload.get("column_name") or "")
+        for column_payload in profile_payload.get("columns", []) or []:
+            column_name = str(
+                column_payload.get("column_name")
+                or column_payload.get("name")
+                or ""
+            ).strip()
             if not column_name:
                 continue
-            active_columns.append(column_name)
-            if initialize_missing and column_name not in table_snapshot:
-                suggested_default = _safe_bool(column_payload.get("suggested"))
-                if suggested_default is None:
-                    suggested_default = False
-                table_snapshot[column_name] = bool(suggested_default)
-            column_selected = bool(table_snapshot.get(column_name, False))
-            column_payload["dq_selected"] = column_selected
-            if column_selected:
+            include_value = bool(selection_map.get(column_name, False))
+            column_payload["dq_selected"] = include_value
+            if include_value:
                 selected += 1
             total += 1
-        if active_columns:
-            filtered_snapshot = {
-                name: bool(table_snapshot.get(name, False))
-                for name in active_columns
-            }
-        else:
-            filtered_snapshot = {}
-        selection_state[table_key] = filtered_snapshot
-        st.session_state[PROFILE_SELECTED_COLS_STATE] = selection_state
         return (selected, total)
 
-    selection_counts = _apply_selection_state(
-        stored_profile_result,
-        current_target_fqn,
-        initialize_missing=True,
+    (
+        current_profile_run_id,
+        current_profile_columns,
+        include_selection,
+    ) = _ensure_include_state(stored_profile_result, current_target_fqn)
+    include_selection = _apply_widget_selection(
+        current_profile_run_id, current_profile_columns, include_selection
+    )
+    selection_counts = _sync_profile_selection(
+        stored_profile_result, include_selection
     )
     st.session_state[ui_keys.PROFILE_SELECTION_COUNTS] = selection_counts
 
@@ -940,10 +1009,10 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
     def _load_suggestion(
         profile_payload: Dict[str, Any],
         success_message: str,
-        allowed_columns: Optional[Set[str]] = None,
+        only_columns: Optional[Set[str]] = None,
     ) -> None:
         suggestion = build_profile_suggestion(
-            profile_payload, allowed_columns=allowed_columns
+            profile_payload, only_columns=only_columns
         )
         if not suggestion:
             st.info(ui_strings.PROFILE_SUGGEST_EMPTY)
@@ -966,42 +1035,20 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
         st.rerun()
 
     if suggest_cfg and profile_result:
-        table_fqn = str(
-            profile_result.get("target_table") or current_target_fqn or ""
-        )
-        selection_state = st.session_state.get(PROFILE_SELECTED_COLS_STATE, {}) or {}
-        table_selection = selection_state.get(table_fqn, {}) or {}
-        allowed_columns = {
+        include_map = st.session_state.get(PROFILE_INCLUDE_COLS_STATE, {}) or {}
+        selected_columns = {
             str(column_name)
-            for column_name, is_selected in table_selection.items()
-            if is_selected
+            for column_name, include_flag in include_map.items()
+            if include_flag
         }
-        if not allowed_columns:
+        if not selected_columns:
             st.warning(ui_strings.PROFILE_SUGGEST_WARNING_EMPTY)
         else:
-            filtered_columns = [
-                column_payload
-                for column_payload in profile_result.get("columns", [])
-                if str(
-                    column_payload.get("column_name")
-                    or column_payload.get("name")
-                    or ""
-                )
-                in allowed_columns
-            ]
-            if not filtered_columns:
-                st.warning(ui_strings.PROFILE_SUGGEST_WARNING_EMPTY)
-            else:
-                filtered_profile = dict(profile_result)
-                filtered_summary = dict(filtered_profile.get("summary") or {})
-                filtered_summary["columns"] = len(filtered_columns)
-                filtered_profile["summary"] = filtered_summary
-                filtered_profile["columns"] = filtered_columns
-                _load_suggestion(
-                    filtered_profile,
-                    ui_strings.PROFILE_SUGGEST_SUCCESS,
-                    allowed_columns=allowed_columns,
-                )
+            _load_suggestion(
+                profile_result,
+                ui_strings.PROFILE_SUGGEST_SUCCESS,
+                only_columns=selected_columns,
+            )
 
     if not profile_result:
         return
@@ -1371,15 +1418,6 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
         ).clip(lower=0.0, upper=100.0)
         display_df_local["Confidence"] = confidence_numeric
         records = display_df_local.to_dict("records")
-        selection_state: Dict[str, Dict[str, bool]] = st.session_state.setdefault(
-            PROFILE_SELECTED_COLS_STATE, {}
-        )
-        selection_table_key = str(
-            target_table or selected_fqn or current_target_fqn or ""
-        )
-        table_snapshot = dict(selection_state.get(selection_table_key) or {})
-        widget_table_key = str(selected_fqn or selection_table_key)
-        active_columns: List[str] = []
         include_values: List[bool] = []
         grid_container = st.container()
         with grid_container:
@@ -1391,37 +1429,24 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
                     st.markdown("**Include**")
                     for record in records:
                         column_label = str(record.get("Column") or "")
-                        column_name = str(
-                            record.get("column_name") or column_label
+                        column_name_raw = record.get("column_name")
+                        resolved_name = str(
+                            column_name_raw if column_name_raw not in (None, "") else column_label
                         )
-                        active_columns.append(column_name)
-                        cached_value = table_snapshot.get(column_name)
-                        if cached_value is None:
-                            suggested_default = _safe_bool(record.get("suggested"))
-                            cached_value = (
-                                bool(suggested_default)
-                                if suggested_default is not None
-                                else False
-                            )
+                        column_name = resolved_name.strip() or resolved_name
+                        include_default = bool(
+                            include_selection.get(column_name, False)
+                        )
                         checkbox_value = st.checkbox(
                             "",
-                            value=bool(cached_value),
-                            key=(
-                                f"profile_include::{widget_table_key}::{column_label}"
-                                if column_label
-                                else f"profile_include::{widget_table_key}::"
-                            ),
-                            label_visibility="hidden",
+                            value=include_default,
+                            key=f"include_{current_profile_run_id}_{column_name}",
+                            label_visibility="collapsed",
                         )
-                        include_values.append(bool(checkbox_value))
-                        table_snapshot[column_name] = bool(checkbox_value)
-
-                filtered_snapshot = {
-                    name: bool(table_snapshot.get(name, False))
-                    for name in active_columns
-                }
-                selection_state[selection_table_key] = filtered_snapshot
-                st.session_state[PROFILE_SELECTED_COLS_STATE] = selection_state
+                        include_flag = bool(checkbox_value)
+                        include_values.append(include_flag)
+                        include_selection[column_name] = include_flag
+                st.session_state[PROFILE_INCLUDE_COLS_STATE] = include_selection
 
                 if include_values:
                     display_df_local.insert(0, "Include", include_values)
@@ -1444,10 +1469,9 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
                 else:
                     grid_df = None
 
-        selection_counts = _apply_selection_state(
+        selection_counts = _sync_profile_selection(
             profile_result,
-            target_table,
-            initialize_missing=False,
+            include_selection,
         )
         st.session_state[ui_keys.PROFILE_RESULTS_STATE] = profile_result
         st.session_state[ui_keys.PROFILE_SELECTION_COUNTS] = selection_counts
@@ -1602,7 +1626,7 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
     if DEBUG_PROFILING and profile_result:
         with st.expander(ui_strings.PROFILE_DEBUG_PAYLOAD_TITLE, expanded=False):
             st.json(profile_result)
-        include_snapshot = st.session_state.get(PROFILE_SELECTED_COLS_STATE)
+        include_snapshot = st.session_state.get(PROFILE_INCLUDE_COLS_STATE)
         if include_snapshot:
             with st.expander(
                 ui_strings.PROFILE_DEBUG_INCLUDE_MAP_TITLE, expanded=False
