@@ -29,6 +29,7 @@ def _is_string(data_type: str) -> bool:
 def build_profile_suggestion(
     profile_result: Dict[str, Any],
     allowed_columns: Optional[Set[str]] = None,
+    only_columns: Optional[Set[str]] = None,
 ) -> Optional[Dict[str, Any]]:
     """Generate heuristic DQ suggestions from a profile result."""
 
@@ -36,7 +37,20 @@ def build_profile_suggestion(
         return None
 
     columns: List[Dict[str, Any]] = profile_result.get("columns") or []
-    if allowed_columns:
+    if only_columns is not None:
+        normalized_only = {
+            str(column_name)
+            for column_name in only_columns
+            if str(column_name or "").strip()
+        }
+        if normalized_only:
+            columns = [
+                column
+                for column in columns
+                if str(column.get("name") or column.get("column_name") or "")
+                in normalized_only
+            ]
+    elif allowed_columns:
         normalized_allowed = {
             str(column_name)
             for column_name in allowed_columns
