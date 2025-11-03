@@ -44,12 +44,14 @@ import streamlit as st
 
 from services.profile import build_profile_suggestion
 from services.profiling import (
+    _label_for_profile_entry,
+    list_saved_profiles,
     load_profile_run,
     normalize_profile_row,
     run_table_profile,
     save_profile_results,
 )
-from services.profiles_repo import list_saved_profiles, load_saved_profile_run
+from services.profiles_repo import load_saved_profile_run
 from ui import keys as ui_keys
 from ui import strings as ui_strings
 from utils.flags import (
@@ -640,49 +642,16 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
         _contract_message(ui_strings.PROFILE_INLINE_SELECT_DISABLED)
         return
 
-    def _format_saved_run_label(run: Dict[str, Any]) -> str:
-        run_at = run.get("run_at")
-        if isinstance(run_at, datetime):
-            run_at_display = run_at.strftime("%Y-%m-%d %H:%M")
-        else:
-            run_at_display = str(run_at) if run_at else "Unknown time"
-        summary_payload = run.get("summary") or {}
-        if isinstance(summary_payload, dict):
-            target_table = summary_payload.get("target_table") or summary_payload.get("table")
-            top_n_raw = summary_payload.get("top_n")
-            try:
-                top_n = int(float(top_n_raw)) if top_n_raw is not None else None
-            except Exception:
-                top_n = None
-        else:
-            target_table = None
-            top_n = None
-        table_display = str(target_table or "Unknown table")
-        run_id_value = str(run.get("run_id") or "")
-        short_id = run_id_value[:8] if run_id_value else "—"
-        top_n_suffix = f" (Top {top_n})" if isinstance(top_n, (int, float)) else ""
-        return f"{run_at_display} — {table_display}{top_n_suffix} — {short_id}"
-
     saved_profiles_enabled = bool(session and meta_db and meta_schema)
     saved_profile_runs: List[Dict[str, Any]] = []
     if saved_profiles_enabled:
-        saved_profile_runs = list_saved_profiles(session, meta_db, meta_schema)
+        saved_profile_runs = list_saved_profiles(session, meta_db, meta_schema, limit=200)
         if not saved_profile_runs:
             st.info(
                 "No saved profiles found (or metadata tables haven’t been created yet). "
                 "Run and save a profile first."
             )
-
-    saved_run_lookup: Dict[str, str] = {}
-    saved_run_labels: List[str] = []
-    for run in saved_profile_runs:
-        run_id_value = run.get("run_id")
-        if not run_id_value:
-            continue
-        run_id_str = str(run_id_value)
-        label = _format_saved_run_label(run)
-        saved_run_lookup[label] = run_id_str
-        saved_run_labels.append(label)
+    dropdown_runs: List[Dict[str, Any]] = [run for run in saved_profile_runs if run.get("run_id")]
 
     controls = st.columns(3)
     suggested_pct = 10.0
@@ -734,19 +703,20 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
             step=1,
             help=ui_strings.PROFILE_TOP_N_HELP.format(max_top_n=MAX_TOP_N),
         )
+    load_selected_run: Optional[Dict[str, Any]] = None
     load_selected_run_id: Optional[str] = None
     load_button_clicked = False
     with controls[2]:
-        if saved_run_labels:
-            load_options = [ui_strings.PROFILE_LOAD_SELECT_PLACEHOLDER] + saved_run_labels
-            selected_option = st.selectbox(
+        if dropdown_runs:
+            load_selected_run = st.selectbox(
                 ui_strings.PROFILE_LOAD_SELECT_LABEL,
-                options=load_options,
+                options=dropdown_runs,
+                format_func=_label_for_profile_entry,
                 key=ui_keys.PROFILE_LOAD_SELECT,
                 disabled=not saved_profiles_enabled,
+                index=None,
+                placeholder=ui_strings.PROFILE_LOAD_SELECT_PLACEHOLDER,
             )
-            if selected_option in saved_run_lookup:
-                load_selected_run_id = saved_run_lookup[selected_option]
         else:
             st.selectbox(
                 ui_strings.PROFILE_LOAD_SELECT_LABEL,
@@ -754,6 +724,8 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
                 key=ui_keys.PROFILE_LOAD_SELECT,
                 disabled=True,
             )
+        if load_selected_run and load_selected_run.get("run_id") is not None:
+            load_selected_run_id = str(load_selected_run.get("run_id"))
         load_button_clicked = st.button(
             ui_strings.PROFILE_LOAD_BUTTON_LABEL,
             key=ui_keys.PROFILE_LOAD_BUTTON,
@@ -761,7 +733,7 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
         )
         if not saved_profiles_enabled:
             st.caption(ui_strings.PROFILE_LOAD_CAPTION_DISABLED)
-        elif not saved_run_labels:
+        elif not dropdown_runs:
             st.caption(ui_strings.PROFILE_LOAD_CAPTION_EMPTY)
 
     if load_button_clicked:
