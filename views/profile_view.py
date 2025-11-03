@@ -1418,41 +1418,31 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
         ).clip(lower=0.0, upper=100.0)
         display_df_local["Confidence"] = confidence_numeric
         records = display_df_local.to_dict("records")
-        include_values: List[bool] = []
         grid_container = st.container()
         with grid_container:
             st.markdown(confidence_legend_html, unsafe_allow_html=True)
             grid_df: Optional[pd.DataFrame] = None
             if records:
-                include_col, table_col = st.columns([1, 24])
-                with include_col:
-                    st.markdown("**Include**")
-                    for record in records:
-                        column_label = str(record.get("Column") or "")
-                        column_name_raw = record.get("column_name")
-                        resolved_name = str(
-                            column_name_raw if column_name_raw not in (None, "") else column_label
-                        )
-                        column_name = resolved_name.strip() or resolved_name
-                        include_default = bool(
-                            include_selection.get(column_name, False)
-                        )
-                        checkbox_value = st.checkbox(
-                            "",
-                            value=include_default,
-                            key=f"include_{current_profile_run_id}_{column_name}",
-                            label_visibility="collapsed",
-                        )
-                        include_flag = bool(checkbox_value)
-                        include_values.append(include_flag)
-                        include_selection[column_name] = include_flag
-                st.session_state[PROFILE_INCLUDE_COLS_STATE] = include_selection
+                include_values: List[bool] = []
+                record_column_names: List[str] = []
+                for record in records:
+                    column_label = str(record.get("Column") or "")
+                    column_name_raw = record.get("column_name")
+                    resolved_name = str(
+                        column_name_raw if column_name_raw not in (None, "") else column_label
+                    )
+                    column_name = resolved_name.strip() or resolved_name
+                    include_default = bool(
+                        include_selection.get(column_name, False)
+                    )
+                    include_values.append(include_default)
+                    record_column_names.append(column_name)
 
                 if include_values:
                     display_df_local.insert(0, "Include", include_values)
-                    display_df_local["Include"] = (
-                        display_df_local["Include"].fillna(False).astype(bool)
-                    )
+                display_df_local["Include"] = (
+                    display_df_local["Include"].fillna(False).astype(bool)
+                )
                 grid_df = display_df_local[grid_columns].copy()
                 grid_render_allowed = _validate_grid_columns(
                     grid_df.columns, grid_columns, ui_strings.PROFILE_GRID_NAME
@@ -1460,12 +1450,31 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
                 if grid_render_allowed:
                     grid_df["Include"] = grid_df["Include"].fillna(False).astype(bool)
                     grid_df["Confidence"] = grid_df["Confidence"].apply(_safe_float)
-                    styler = grid_df.style.format(
-                        {"Confidence": _format_confidence_display}
+                    grid_df_formatted = grid_df.copy()
+                    grid_df_formatted["Confidence"] = grid_df_formatted[
+                        "Confidence"
+                    ].apply(_format_confidence_display)
+                    disabled_columns = [
+                        column_name for column_name in grid_columns if column_name != "Include"
+                    ]
+                    edited_df = st.data_editor(
+                        grid_df_formatted,
+                        hide_index=True,
+                        use_container_width=True,
+                        column_config={"Include": {"editable": True}},
+                        disabled=disabled_columns,
                     )
-                    styler = styler.applymap(_confidence_style, subset=["Confidence"])
-                    with table_col:
-                        st.dataframe(styler, hide_index=True, use_container_width=True)
+                    if edited_df is not None:
+                        include_series = edited_df.get("Include")
+                        if include_series is not None:
+                            updated_selection = dict(include_selection)
+                            for column_name, include_flag in zip(
+                                record_column_names,
+                                include_series.tolist(),
+                            ):
+                                updated_selection[column_name] = bool(include_flag)
+                            st.session_state[PROFILE_INCLUDE_COLS_STATE] = updated_selection
+                            include_selection = updated_selection
                 else:
                     grid_df = None
 
@@ -1484,9 +1493,19 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
             }
         )
         st.markdown(confidence_legend_html, unsafe_allow_html=True)
-        empty_styler = empty_df.style.format({"Confidence": _format_confidence_display})
-        empty_styler = empty_styler.applymap(_confidence_style, subset=["Confidence"])
-        st.dataframe(empty_styler, hide_index=True, use_container_width=True)
+        empty_df["Confidence"] = empty_df["Confidence"].apply(
+            lambda value: _format_confidence_display(value)
+        )
+        disabled_columns = [
+            column_name for column_name in grid_columns if column_name != "Include"
+        ]
+        st.data_editor(
+            empty_df,
+            hide_index=True,
+            use_container_width=True,
+            column_config={"Include": {"editable": True}},
+            disabled=disabled_columns,
+        )
 
     if filtered_df.empty:
         st.info(ui_strings.PROFILE_INFO_NO_FILTER_RESULTS)
