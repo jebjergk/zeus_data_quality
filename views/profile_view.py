@@ -69,6 +69,9 @@ from views.table_picker import session_cache_token, stateless_table_picker
 FULL_SCAN_WARNING_THRESHOLD = 1_000_000
 MAX_TOP_N = 10
 
+CONFIDENCE_HIGH_THRESHOLD = 90.0
+CONFIDENCE_MEDIUM_THRESHOLD = 75.0
+
 
 PROFILE_INCLUDE_COLS_STATE = "profile_include_cols"
 PROFILE_INCLUDE_TOKEN_STATE = "profile_include_token"
@@ -1313,6 +1316,15 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
     ]
     confidence_legend_html = ui_strings.PROFILE_CONFIDENCE_LEGEND_HTML
 
+    def _confidence_badge_emoji(value: Optional[float]) -> str:
+        if value is None:
+            return ""
+        if value >= CONFIDENCE_HIGH_THRESHOLD:
+            return "🟢"
+        if value >= CONFIDENCE_MEDIUM_THRESHOLD:
+            return "🟡"
+        return "🔴"
+
     def _format_confidence_display(value):
         if value is None or (isinstance(value, float) and math.isnan(value)):
             return ""
@@ -1321,15 +1333,16 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
             s = f"{v:.1f}".rstrip("0").rstrip(".")
         else:
             s = f"{v:.0f}"
-        return f"{s}%"
+        badge = _confidence_badge_emoji(v)
+        return f"{badge} {s}%".strip()
 
     def _confidence_style(value):
         if value is None or (isinstance(value, float) and math.isnan(value)):
             return ""
         v = float(value)
-        if v >= 90.0:
+        if v >= CONFIDENCE_HIGH_THRESHOLD:
             return "background-color: #2e7d32; color: #ffffff;"
-        if v >= 75.0:
+        if v >= CONFIDENCE_MEDIUM_THRESHOLD:
             return "background-color: #f9a825; color: #000000;"
         return "background-color: #9e9e9e; color: #ffffff;"
 
