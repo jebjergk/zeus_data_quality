@@ -652,7 +652,72 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
                 "No saved profiles found (or metadata tables haven’t been created yet). "
                 "Run and save a profile first."
             )
-    dropdown_runs: List[Dict[str, Any]] = [run for run in saved_profile_runs if run.get("run_id")]
+
+    def _normalize_saved_runs(raw_runs: Any) -> List[Dict[str, Any]]:
+        if isinstance(raw_runs, dict):
+            runs_value = raw_runs.get("runs")
+            if isinstance(runs_value, dict):
+                return [entry for entry in runs_value.values() if isinstance(entry, dict)]
+            if isinstance(runs_value, list):
+                return [entry for entry in runs_value if isinstance(entry, dict)]
+            if raw_runs.get("run_id") is not None:
+                return [raw_runs]
+            return []
+        if isinstance(raw_runs, (list, tuple)):
+            return [entry for entry in raw_runs if isinstance(entry, dict)]
+        return []
+
+    def _summary_map(value: Any) -> Dict[str, Any]:
+        if isinstance(value, dict):
+            return value
+        if isinstance(value, str):
+            try:
+                parsed = json.loads(value)
+            except Exception:
+                return {}
+            if isinstance(parsed, dict):
+                return parsed
+        return {}
+
+    dropdown_runs: List[Dict[str, Any]] = []
+    dropdown_run_ids: List[str] = []
+    dropdown_labels: List[str] = []
+    for run_entry in _normalize_saved_runs(saved_profile_runs):
+        run_id_raw = run_entry.get("run_id")
+        if run_id_raw is None:
+            continue
+        run_id = str(run_id_raw)
+        summary_map = _summary_map(run_entry.get("summary"))
+        profile_name_value = (
+            summary_map.get("profile_name")
+            or summary_map.get("name")
+            or run_entry.get("profile_name")
+            or run_entry.get("name")
+            or summary_map.get("target_table")
+            or run_entry.get("target_fqn")
+            or summary_map.get("table_name")
+            or run_entry.get("table_name")
+            or run_id
+        )
+        profile_name = str(profile_name_value).strip() or run_id
+        fallback_label = _label_for_profile_entry(run_entry)
+        if fallback_label and profile_name == run_id:
+            profile_name = fallback_label.split("—", 1)[0].strip() or profile_name
+        timestamp_value = (
+            summary_map.get("saved_at")
+            or run_entry.get("saved_at")
+            or summary_map.get("run_at")
+            or run_entry.get("run_at")
+            or summary_map.get("run_at_str")
+            or run_id
+        )
+        if isinstance(timestamp_value, datetime):
+            timestamp_text = timestamp_value.isoformat()
+        else:
+            timestamp_text = str(timestamp_value)
+        dropdown_runs.append(run_entry)
+        dropdown_run_ids.append(run_id)
+        dropdown_labels.append(f"{profile_name} — {timestamp_text}")
 
     controls = st.columns(3)
     suggested_pct = 10.0
@@ -704,15 +769,22 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
             step=1,
             help=ui_strings.PROFILE_TOP_N_HELP.format(max_top_n=MAX_TOP_N),
         )
-    load_selected_run: Optional[Dict[str, Any]] = None
+    load_selected_index: Optional[int] = None
     load_selected_run_id: Optional[str] = None
     load_button_clicked = False
     with controls[2]:
         if dropdown_runs:
-            load_selected_run = st.selectbox(
+            option_indices = list(range(len(dropdown_runs)))
+
+            def _format_dropdown_option(idx: Optional[int]) -> str:
+                if isinstance(idx, int) and 0 <= idx < len(dropdown_labels):
+                    return dropdown_labels[idx]
+                return ""
+
+            load_selected_index = st.selectbox(
                 ui_strings.PROFILE_LOAD_SELECT_LABEL,
-                options=dropdown_runs,
-                format_func=_label_for_profile_entry,
+                options=option_indices,
+                format_func=_format_dropdown_option,
                 key=ui_keys.PROFILE_LOAD_SELECT,
                 disabled=not saved_profiles_enabled,
                 index=None,
@@ -725,8 +797,11 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
                 key=ui_keys.PROFILE_LOAD_SELECT,
                 disabled=True,
             )
-        if load_selected_run and load_selected_run.get("run_id") is not None:
-            load_selected_run_id = str(load_selected_run.get("run_id"))
+        if (
+            load_selected_index is not None
+            and 0 <= load_selected_index < len(dropdown_run_ids)
+        ):
+            load_selected_run_id = dropdown_run_ids[load_selected_index]
         load_button_clicked = st.button(
             ui_strings.PROFILE_LOAD_BUTTON_LABEL,
             key=ui_keys.PROFILE_LOAD_BUTTON,
