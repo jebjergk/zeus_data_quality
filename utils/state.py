@@ -6,6 +6,12 @@ import json
 from datetime import date, datetime
 from decimal import Decimal
 from typing import Any, Dict, Iterable, List, MutableMapping, Sequence
+from uuid import UUID
+
+try:
+    import numpy as _np
+except Exception:  # pragma: no cover - numpy is optional at runtime
+    _np = None
 
 import streamlit as st
 
@@ -19,6 +25,10 @@ def _json_default(value: Any) -> Any:
         return value.isoformat()
     if isinstance(value, Decimal):
         return float(value)
+    if _np is not None and isinstance(value, _np.generic):
+        return value.item()
+    if isinstance(value, UUID):
+        return str(value)
     return str(value)
 
 
@@ -138,6 +148,12 @@ def _json_dumps_with_default(*args: Any, **kwargs: Any) -> str:
 
 if _json_dumps_original is not _json_dumps_with_default:
     json.dumps = _json_dumps_with_default
+
+
+def _json_dumps_safe(obj: Any) -> str:
+    """Return a JSON string using the profile serializer and UTF-8 characters."""
+
+    return _json_dumps_original(obj, default=_json_default, ensure_ascii=False)
 
 
 def get_include_map() -> Dict[str, bool]:
