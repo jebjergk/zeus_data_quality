@@ -2,11 +2,39 @@
 
 from __future__ import annotations
 
-from typing import Dict, Iterable
+import json
+from datetime import date, datetime
+from decimal import Decimal
+from typing import Any, Dict, Iterable
 
 import streamlit as st
 
 _INCLUDE_MAP = "profile_include_map"
+
+
+def _json_default(value: Any) -> Any:
+    """Serialize unsupported objects when dumping to JSON."""
+
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
+    if isinstance(value, Decimal):
+        return float(value)
+    return str(value)
+
+
+_json_dumps_original = json.dumps
+
+
+def _json_dumps_with_default(*args: Any, **kwargs: Any) -> str:
+    """Proxy for :func:`json.dumps` that injects the profile serializer."""
+
+    if kwargs.get("default") is None:
+        kwargs["default"] = _json_default
+    return _json_dumps_original(*args, **kwargs)
+
+
+if _json_dumps_original is not _json_dumps_with_default:
+    json.dumps = _json_dumps_with_default
 
 
 def get_include_map() -> Dict[str, bool]:
