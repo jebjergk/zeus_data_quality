@@ -31,6 +31,7 @@ Forbidden patterns:
 from __future__ import annotations
 import html
 import json
+import logging
 import math
 import textwrap
 import time
@@ -161,6 +162,26 @@ def _validate_grid_columns(
         )
         return False
     return True
+
+
+def _warn_invalid_include_column(df: pd.DataFrame, context: str) -> None:
+    include_columns = [
+        column for column in df.columns if str(column).strip() == "Include"
+    ]
+    if len(include_columns) != 1:
+        logging.warning(
+            "Profile include column guard failed in %s: columns=%s",
+            context,
+            list(df.columns),
+        )
+        return
+    include_column = include_columns[0]
+    if not pd.api.types.is_bool_dtype(df[include_column]):
+        logging.warning(
+            "Profile include column guard failed in %s: dtype=%s",
+            context,
+            df[include_column].dtype,
+        )
 @dataclass
 class ColumnProfile:
     name: str
@@ -939,22 +960,6 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
             st.session_state[PROFILE_INCLUDE_COLS_STATE] = state_map
         return (run_id, column_names, state_map)
 
-    def _apply_widget_selection(
-        run_id: str,
-        column_names: Tuple[str, ...],
-        selection_map: Dict[str, bool],
-    ) -> Dict[str, bool]:
-        if not column_names:
-            return selection_map
-        run_token = str(run_id or "active")
-        updated = dict(selection_map)
-        for column_name in column_names:
-            widget_key = f"include_{run_token}_{column_name}"
-            if widget_key in st.session_state:
-                updated[column_name] = bool(st.session_state.get(widget_key))
-        st.session_state[PROFILE_INCLUDE_COLS_STATE] = updated
-        return updated
-
     def _sync_profile_selection(
         profile_payload: Optional[Dict[str, Any]],
         selection_map: Dict[str, bool],
@@ -978,13 +983,8 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
             total += 1
         return (selected, total)
 
-    (
-        current_profile_run_id,
-        current_profile_columns,
-        include_selection,
-    ) = _ensure_include_state(stored_profile_result, current_target_fqn)
-    include_selection = _apply_widget_selection(
-        current_profile_run_id, current_profile_columns, include_selection
+    _, _, include_selection = _ensure_include_state(
+        stored_profile_result, current_target_fqn
     )
     selection_counts = _sync_profile_selection(
         stored_profile_result, include_selection
@@ -1525,6 +1525,7 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
                         column_config={"Include": {"editable": True}},
                         disabled=disabled_columns,
                     )
+                    _warn_invalid_include_column(grid_df, "profile_results_grid")
                     if edited_df is not None:
                         include_series = edited_df.get("Include")
                         if include_series is not None:
@@ -1570,6 +1571,7 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
             column_config={"Include": {"editable": True}},
             disabled=disabled_columns,
         )
+        _warn_invalid_include_column(empty_df, "profile_results_grid_empty")
 
     if suggest_cfg_pressed and profile_result:
         if not selected_columns_from_grid:
