@@ -330,21 +330,92 @@ def _profile_display_name(
     )
 
 
-def _normalise_table_filter(table_fqn: Optional[str]) -> Tuple[str, str, str]:
+def _split_relation_parts(
+    table_fqn: Optional[str],
+) -> List[Tuple[str, bool]]:
+    if not table_fqn:
+        return []
+
+    text = str(table_fqn).strip()
+    if not text:
+        return []
+
+    parts: List[Tuple[str, bool]] = []
+    current: List[str] = []
+    current_quoted = False
+    in_quotes = False
+    i = 0
+
+    while i < len(text):
+        ch = text[i]
+        if ch == '"':
+            next_char = text[i + 1] if i + 1 < len(text) else ""
+            if in_quotes and next_char == '"':
+                current.append('"')
+                i += 1
+            else:
+                in_quotes = not in_quotes
+                if in_quotes:
+                    current_quoted = True
+        elif ch == '.' and not in_quotes:
+            part = "".join(current).strip()
+            if part or current_quoted:
+                parts.append((part, current_quoted))
+            current = []
+            current_quoted = False
+        else:
+            current.append(ch)
+        i += 1
+
+    part = "".join(current).strip()
+    if part or current_quoted:
+        parts.append((part, current_quoted))
+
+    return [(value, quoted) for value, quoted in parts if value]
+
+
+def _canonicalize_identifier(value: str, quoted: bool) -> str:
+    if not value:
+        return ""
+    return value if quoted else value.upper()
+
+
+def _normalise_table_filter(table_fqn: Optional[str]) -> Tuple[str, str, str, str]:
+    filter_db = ""
     filter_schema = ""
     filter_table = ""
-    normalized = ""
-    if table_fqn:
-        parts = [
-            part.strip().strip('"')
-            for part in str(table_fqn).split(".")
-            if part and str(part).strip()
+    canonical = ""
+
+    parts = _split_relation_parts(table_fqn)
+    if parts:
+        if len(parts) >= 3:
+            db_part, schema_part, table_part = parts[-3:]
+        elif len(parts) == 2:
+            db_part = ("", False)
+            schema_part, table_part = parts
+        else:
+            db_part = ("", False)
+            schema_part = ("", False)
+            table_part = parts[0]
+
+        canonical_db = _canonicalize_identifier(db_part[0], db_part[1]) if db_part else ""
+        canonical_schema = (
+            _canonicalize_identifier(schema_part[0], schema_part[1]) if schema_part else ""
+        )
+        canonical_table = (
+            _canonicalize_identifier(table_part[0], table_part[1]) if table_part else ""
+        )
+
+        canonical_parts = [
+            part for part in (canonical_db, canonical_schema, canonical_table) if part
         ]
-        if len(parts) >= 2:
-            filter_schema = parts[-2].lower()
-            filter_table = parts[-1].lower()
-            normalized = f"{parts[-2]}.{parts[-1]}"
-    return filter_schema, filter_table, normalized
+        canonical = ".".join(canonical_parts)
+
+        filter_db = canonical_db.upper() if canonical_db else ""
+        filter_schema = canonical_schema.upper() if canonical_schema else ""
+        filter_table = canonical_table.upper() if canonical_table else ""
+
+    return filter_db, filter_schema, filter_table, canonical
 
 
 def save_profile(profile: Any) -> Dict[str, Any]:
@@ -406,11 +477,16 @@ def save_profile(profile: Any) -> Dict[str, Any]:
 def list_saved_profiles(table_fqn: Optional[str]) -> _ProfileListResult:
     """Return normalised saved profile entries for the dropdown."""
 
-    filter_schema, filter_table, normalized_fqn = _normalise_table_filter(table_fqn)
+    filter_db, filter_schema, filter_table, canonical_fqn = _normalise_table_filter(
+        table_fqn
+    )
     context = {
         "where": "list_profiles",
         "table_fqn": table_fqn or "",
-        "normalized_table_fqn": normalized_fqn,
+        "canonical_table_fqn": canonical_fqn,
+        "filter_db": filter_db,
+        "filter_schema": filter_schema,
+        "filter_table": filter_table,
         "final_sql": "SESSION_STATE_FILTER(schema=?, table=?)",
     }
 
@@ -456,10 +532,9 @@ def list_saved_profiles(table_fqn: Optional[str]) -> _ProfileListResult:
                 if not (schema_clean and table_clean):
                     counters["missing_target"] += 1
                     continue
-                if (
-                    schema_clean.lower() != filter_schema
-                    or table_clean.lower() != filter_table
-                ):
+                schema_key = schema_clean.upper()
+                table_key = table_clean.upper()
+                if schema_key != filter_schema or table_key != filter_table:
                     counters["filter_mismatch"] += 1
                     continue
 
