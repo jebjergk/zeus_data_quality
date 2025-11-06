@@ -453,6 +453,56 @@ def _canon_fqn(fqn: str) -> str:
     return text.upper()
 
 
+def _table_fqn_upper_variants(*values: Optional[str]) -> List[str]:
+    """Return ordered uppercase variants for potential legacy table FQNs."""
+
+    variants: List[str] = []
+    seen = set()
+
+    for value in values:
+        if not value:
+            continue
+
+        text = str(value).strip()
+        if not text:
+            continue
+
+        raw_upper = text.upper()
+        if raw_upper and raw_upper not in seen:
+            variants.append(raw_upper)
+            seen.add(raw_upper)
+
+        parts = _split_relation_parts(text)
+        if not parts:
+            continue
+
+        cleaned_parts = []
+        for part_value, _quoted in parts:
+            cleaned = _clean_identifier(part_value)
+            if cleaned:
+                cleaned_parts.append(cleaned.upper())
+
+        if cleaned_parts:
+            cleaned_upper = ".".join(cleaned_parts)
+            if cleaned_upper and cleaned_upper not in seen:
+                variants.append(cleaned_upper)
+                seen.add(cleaned_upper)
+
+        quoted_parts = []
+        for part_value, _quoted in parts:
+            cleaned = _clean_identifier(part_value)
+            if cleaned:
+                quoted_parts.append(f'"{cleaned.upper()}"')
+
+        if quoted_parts:
+            quoted_upper = ".".join(quoted_parts)
+            if quoted_upper and quoted_upper not in seen:
+                variants.append(quoted_upper)
+                seen.add(quoted_upper)
+
+    return variants
+
+
 def save_profile(profile: Any) -> Dict[str, Any]:
     """Persist a saved profile payload into session state."""
 
@@ -553,24 +603,20 @@ def list_saved_profiles(table_fqn: Optional[str]) -> _ProfileListResult:
                 extra={**context, "rowcount": 0, "reason": "normalised_empty"},
             )
 
-        entries: List[Dict[str, Any]] = []
-        counters = {
-            "missing_id": 0,
-            "missing_target": 0,
-            "filter_mismatch": 0,
-        }
+        prepared_runs: List[Dict[str, Any]] = []
+        missing_id = 0
         sample_values: List[str] = []
         sample_keys = set()
 
         for run in runs:
             run_map = _to_mapping(run)
             if not run_map:
-                counters["missing_id"] += 1
+                missing_id += 1
                 continue
 
             run_id, summary_map = _extract_run_identity(run_map)
             if not run_id:
-                counters["missing_id"] += 1
+                missing_id += 1
                 continue
 
             schema_clean, table_clean, table_name = _extract_table_identifiers(
@@ -606,58 +652,127 @@ def list_saved_profiles(table_fqn: Optional[str]) -> _ProfileListResult:
                 if len(sample_values) < 5:
                     sample_values.append(stored_fqn_raw or stored_canon)
 
-            if canon_filter:
-                if stored_canon != canon_filter:
-                    schema_key = schema_clean.upper() if schema_clean else ""
-                    table_key = table_clean.upper() if table_clean else ""
-                    if filter_schema and filter_table:
-                        if not (schema_key and table_key):
-                            counters["missing_target"] += 1
-                            continue
-                        if schema_key == filter_schema and table_key == filter_table:
-                            # Legacy schema/table match fallback
-                            pass
-                        else:
-                            counters["filter_mismatch"] += 1
-                            continue
-                    else:
-                        counters["filter_mismatch"] += 1
-                        continue
-            elif filter_schema and filter_table:
-                if not (schema_clean and table_clean):
-                    counters["missing_target"] += 1
-                    continue
-                schema_key = schema_clean.upper()
-                table_key = table_clean.upper()
-                if schema_key != filter_schema or table_key != filter_table:
-                    counters["filter_mismatch"] += 1
-                    continue
-
             timestamp_iso = _profile_timestamp(run_map, summary_map)
             display_name = _profile_display_name(run_map, summary_map)
             run_dict = dict(run_map)
 
-            entries.append(
+            prepared_runs.append(
                 {
                     "id": run_id,
-                    "name": display_name,
-                    "table_fqn": table_name,
-                    "created_at_iso": timestamp_iso,
-                    "timestamp": timestamp_iso,
-                    "run": run_dict,
-                    "run_json": _json_dumps_safe(run_dict),
+                    "entry": {
+                        "id": run_id,
+                        "name": display_name,
+                        "table_fqn": table_name,
+                        "created_at_iso": timestamp_iso,
+                        "timestamp": timestamp_iso,
+                        "run": run_dict,
+                        "run_json": _json_dumps_safe(run_dict),
+                    },
+                    "stored_canon": stored_canon,
+                    "schema_key": schema_clean.upper() if schema_clean else "",
+                    "table_key": table_clean.upper() if table_clean else "",
+                    "legacy_keys": set(_table_fqn_upper_variants(stored_fqn_raw, stored_canon)),
                 }
             )
 
         total_runs = len(runs)
+
+        def _apply_filter(match_func):
+            matched: List[Dict[str, Any]] = []
+            counters = {"missing_target": 0, "filter_mismatch": 0}
+            for info in prepared_runs:
+                matched_flag, reason = match_func(info)
+                if matched_flag:
+                    matched.append(info)
+                elif reason in counters:
+                    counters[reason] += 1
+            return matched, counters
+
+        def _primary_match(info: Dict[str, Any]):
+            if canon_filter:
+                if info["stored_canon"] == canon_filter:
+                    return True, None
+                if filter_schema and filter_table:
+                    if not (info["schema_key"] and info["table_key"]):
+                        return False, "missing_target"
+                    if (
+                        info["schema_key"] == filter_schema
+                        and info["table_key"] == filter_table
+                    ):
+                        return True, None
+                    return False, "filter_mismatch"
+                return False, "filter_mismatch"
+            if filter_schema and filter_table:
+                if not (info["schema_key"] and info["table_key"]):
+                    return False, "missing_target"
+                if (
+                    info["schema_key"] == filter_schema
+                    and info["table_key"] == filter_table
+                ):
+                    return True, None
+                return False, "filter_mismatch"
+            return True, None
+
+        primary_matches, primary_counters = _apply_filter(_primary_match)
+
+        entries_by_id: Dict[str, Dict[str, Any]] = {}
+        final_counters = primary_counters
+        final_matches = primary_matches
+        fallback_used = False
+        legacy_variant_keys: List[str] = []
+
+        if not primary_matches and canon_filter:
+            session_variants = [
+                table_fqn,
+                canonical_fqn,
+                st.session_state.get("profile_target_fqn"),
+                st.session_state.get("editor_target_fqn"),
+            ]
+            legacy_variant_keys = _table_fqn_upper_variants(*session_variants)
+            legacy_key_set = {key for key in legacy_variant_keys if key}
+
+            if legacy_key_set:
+
+                def _legacy_match(info: Dict[str, Any]):
+                    if info["legacy_keys"] & legacy_key_set:
+                        return True, None
+                    if filter_schema and filter_table:
+                        if not (info["schema_key"] and info["table_key"]):
+                            return False, "missing_target"
+                        if (
+                            info["schema_key"] == filter_schema
+                            and info["table_key"] == filter_table
+                        ):
+                            return True, None
+                    return False, "filter_mismatch"
+
+                legacy_matches, legacy_counters = _apply_filter(_legacy_match)
+                if legacy_matches:
+                    final_matches = legacy_matches
+                    final_counters = legacy_counters
+                    fallback_used = True
+                    context["final_sql"] = "SESSION_STATE_FILTER(UPPER(table_fqn) IN (?…))"
+                else:
+                    final_counters = legacy_counters
+
+        for info in final_matches:
+            entry = info["entry"]
+            entry_id = entry.get("id")
+            if entry_id and entry_id not in entries_by_id:
+                entries_by_id[entry_id] = entry
+
+        entries = list(entries_by_id.values())
+
         log_extra = {
             **context,
             "rowcount": len(entries),
             "total_saved_profiles": total_runs,
-            "skipped_missing_id": counters["missing_id"],
-            "skipped_missing_target": counters["missing_target"],
-            "skipped_filter_mismatch": counters["filter_mismatch"],
+            "skipped_missing_id": missing_id,
+            "skipped_missing_target": final_counters["missing_target"],
+            "skipped_filter_mismatch": final_counters["filter_mismatch"],
         }
+        if fallback_used:
+            log_extra["fallback_variants"] = legacy_variant_keys
 
         if not entries:
             debug_payload = {
@@ -665,6 +780,8 @@ def list_saved_profiles(table_fqn: Optional[str]) -> _ProfileListResult:
                 "samples": sample_values,
                 "canon": canon_filter,
             }
+            if legacy_variant_keys:
+                debug_payload["legacy_variants"] = legacy_variant_keys
             logger.info(
                 "Saved profile list empty after filtering",
                 extra={**log_extra, "debug": debug_payload},
