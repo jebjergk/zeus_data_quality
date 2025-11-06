@@ -650,6 +650,13 @@ def _render_metric_card(
     st.markdown(card_html, unsafe_allow_html=True)
 
 def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: ARG001 - interface matches requirement
+    logger = logging.getLogger(__name__)
+    editor_target_fqn = st.session_state.get("editor_target_fqn")
+    logger.info(
+        '{"where":"profile_view_enter","fqn": %s}',
+        json.dumps(editor_target_fqn or ""),
+    )
+
     st.header(ui_strings.PROFILE_HEADER_TITLE)
     st.caption(ui_strings.PROFILE_HEADER_CAPTION)
 
@@ -673,7 +680,25 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
     if saved_profiles_enabled:
         saved_profile_runs = fetch_saved_profiles(session, meta_db, meta_schema, limit=200)
         st.session_state[SAVED_PROFILES_STATE] = saved_profile_runs
-        profile_list_response = list_saved_profiles(selected_fqn)
+        current_table_fqn = selected_fqn or st.session_state.get(ui_keys.PROFILE_TARGET_FQN)
+        profile_list_response = list_saved_profiles(current_table_fqn)
+        canonical_fqn = (
+            profile_list_response.get("canonical_table_fqn")
+            or current_table_fqn
+            or ""
+        )
+        if profile_list_response.get("ok"):
+            logger.info(
+                "list_saved_profiles ok items=%d fqn=%s",
+                len(profile_list_response.get("items", [])),
+                canonical_fqn,
+            )
+        else:
+            logger.error(
+                "list_saved_profiles failed err=%s fqn=%s",
+                profile_list_response.get("err"),
+                current_table_fqn or "",
+            )
         if profile_list_response.get("ok"):
             saved_profile_entries = profile_list_response.get("items", [])
             if not saved_profile_entries:
