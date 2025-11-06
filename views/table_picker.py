@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import logging
 from typing import List, Optional, Tuple
 
 import streamlit as st
 
-from utils.meta import fq_table, list_databases, list_schemas, list_tables
+from utils.meta import list_databases, list_schemas, list_tables
+
+
+logger = logging.getLogger(__name__)
 
 
 def session_cache_token(session_obj) -> str:
@@ -81,6 +85,19 @@ def stateless_table_picker(session_obj, preselect_fqn: Optional[str]):
         a, b, c = [p.strip('"') for p in fqn.split(".")]
         return a, b, c
 
+    def canonicalise_fqn(database: Optional[str], schema: Optional[str], table: Optional[str]) -> str:
+        parts = []
+
+        for value in (database, schema, table):
+            if not value:
+                parts.append("")
+                continue
+            cleaned = str(value).strip().strip('"')
+            parts.append(cleaned.upper())
+
+        canonical_parts = [part for part in parts if part]
+        return ".".join(canonical_parts)
+
     pre_db, pre_sch, pre_tbl = split_fqn(preselect_fqn or "")
 
     dbs = _list_databases_cached(session_obj)
@@ -113,4 +130,9 @@ def stateless_table_picker(session_obj, preselect_fqn: Optional[str]):
     if not tables or tbl_sel == "— none —":
         return db_sel, sch_sel, None, ""
 
-    return db_sel, sch_sel, tbl_sel, fq_table(db_sel, sch_sel, tbl_sel)
+    canonical_fqn = canonicalise_fqn(db_sel, sch_sel, tbl_sel)
+    if canonical_fqn:
+        st.session_state["editor_target_fqn"] = canonical_fqn
+        logger.info("stateless_table_picker.editor_target_fqn=%s", canonical_fqn)
+
+    return db_sel, sch_sel, tbl_sel, canonical_fqn
