@@ -489,15 +489,23 @@ def save_profile(profile: Any) -> Dict[str, Any]:
 
         st.session_state[SAVED_PROFILES_STATE] = updated
 
+        table_fqn_raw = _extract_table_identifiers(run_map, summary_map)[2]
+        canonical_table_fqn = _canon_fqn(table_fqn_raw)
+
+        if canonical_table_fqn:
+            current_run_dict["table_fqn"] = canonical_table_fqn
+        elif table_fqn_raw:
+            current_run_dict["table_fqn"] = table_fqn_raw
+
         serialized_profile = _json_dumps_safe(current_run_dict)
 
-        table_fqn = _extract_table_identifiers(run_map, summary_map)[2]
         logger.info(
             "Saved profile payload",
             extra={
                 **context,
                 "profile_id": run_id,
-                "table_fqn": table_fqn,
+                "table_fqn_raw": table_fqn_raw,
+                "table_fqn_canonical": canonical_table_fqn,
                 "store_size": len(updated),
             },
         )
