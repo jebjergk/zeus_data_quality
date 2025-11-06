@@ -418,6 +418,41 @@ def _normalise_table_filter(table_fqn: Optional[str]) -> Tuple[str, str, str, st
     return filter_db, filter_schema, filter_table, canonical
 
 
+def _canon_fqn(fqn: str) -> str:
+    """Return an uppercased canonical representation of a table FQN."""
+
+    if not fqn:
+        return ""
+
+    text = str(fqn).strip()
+    if not text:
+        return ""
+
+    parts = _split_relation_parts(text)
+    if len(parts) >= 3:
+        canonical_parts = []
+        for value, _quoted in parts[-3:]:
+            cleaned = _clean_identifier(value)
+            if cleaned:
+                canonical_parts.append(cleaned.upper())
+        if canonical_parts:
+            return ".".join(canonical_parts)
+
+    if parts:
+        cleaned_parts = []
+        for value, _quoted in parts:
+            cleaned = _clean_identifier(value)
+            if cleaned:
+                cleaned_parts.append(cleaned)
+        if cleaned_parts:
+            return ".".join(cleaned_parts).upper()
+
+    cleaned_text = _clean_identifier(text)
+    if cleaned_text:
+        return cleaned_text.upper()
+    return text.upper()
+
+
 def save_profile(profile: Any) -> Dict[str, Any]:
     """Persist a saved profile payload into session state."""
 
@@ -483,14 +518,16 @@ def list_saved_profiles(table_fqn: Optional[str]) -> _ProfileListResult:
     filter_db, filter_schema, filter_table, canonical_fqn = _normalise_table_filter(
         table_fqn
     )
+    canon_filter = _canon_fqn(table_fqn or "")
     context = {
         "where": "list_profiles",
         "table_fqn": table_fqn or "",
-        "canonical_table_fqn": canonical_fqn,
+        "canonical_table_fqn": canonical_fqn or canon_filter,
+        "filter_canon_fqn": canon_filter,
         "filter_db": filter_db,
         "filter_schema": filter_schema,
         "filter_table": filter_table,
-        "final_sql": "SESSION_STATE_FILTER(schema=?, table=?)",
+        "final_sql": "SESSION_STATE_FILTER(UPPER(table_fqn)=?)",
     }
 
     try:
@@ -500,15 +537,13 @@ def list_saved_profiles(table_fqn: Optional[str]) -> _ProfileListResult:
                 "Saved profile store missing or empty",
                 extra={**context, "rowcount": 0, "reason": "store_missing"},
             )
-            return _ProfileListResult({"ok": True, "items": []})
 
-        runs = normalize_saved_profiles(stored)
-        if not runs:
+        runs = normalize_saved_profiles(stored) if stored else []
+        if stored and not runs:
             logger.info(
                 "Saved profile store normalized to zero rows",
                 extra={**context, "rowcount": 0, "reason": "normalised_empty"},
             )
-            return _ProfileListResult({"ok": True, "items": []})
 
         entries: List[Dict[str, Any]] = []
         counters = {
@@ -516,6 +551,8 @@ def list_saved_profiles(table_fqn: Optional[str]) -> _ProfileListResult:
             "missing_target": 0,
             "filter_mismatch": 0,
         }
+        sample_values: List[str] = []
+        sample_keys = set()
 
         for run in runs:
             run_map = _to_mapping(run)
@@ -531,7 +568,54 @@ def list_saved_profiles(table_fqn: Optional[str]) -> _ProfileListResult:
             schema_clean, table_clean, table_name = _extract_table_identifiers(
                 run_map, summary_map
             )
-            if filter_schema and filter_table:
+
+            fqn_candidates = [
+                run_map.get("target_fqn"),
+                summary_map.get("target_fqn"),
+                summary_map.get("target_table"),
+                summary_map.get("target"),
+                run_map.get("target"),
+            ]
+            if table_name:
+                fqn_candidates.append(table_name)
+
+            stored_fqn_raw = ""
+            for candidate in fqn_candidates:
+                if candidate is None:
+                    continue
+                candidate_text = str(candidate).strip()
+                if candidate_text:
+                    stored_fqn_raw = candidate_text
+                    break
+
+            if not stored_fqn_raw and schema_clean and table_clean:
+                stored_fqn_raw = f"{schema_clean}.{table_clean}"
+
+            stored_canon = _canon_fqn(stored_fqn_raw)
+            sample_key = stored_canon or stored_fqn_raw.upper()
+            if sample_key and sample_key not in sample_keys:
+                sample_keys.add(sample_key)
+                if len(sample_values) < 5:
+                    sample_values.append(stored_fqn_raw or stored_canon)
+
+            if canon_filter:
+                if stored_canon != canon_filter:
+                    schema_key = schema_clean.upper() if schema_clean else ""
+                    table_key = table_clean.upper() if table_clean else ""
+                    if filter_schema and filter_table:
+                        if not (schema_key and table_key):
+                            counters["missing_target"] += 1
+                            continue
+                        if schema_key == filter_schema and table_key == filter_table:
+                            # Legacy schema/table match fallback
+                            pass
+                        else:
+                            counters["filter_mismatch"] += 1
+                            continue
+                    else:
+                        counters["filter_mismatch"] += 1
+                        continue
+            elif filter_schema and filter_table:
                 if not (schema_clean and table_clean):
                     counters["missing_target"] += 1
                     continue
@@ -557,16 +641,29 @@ def list_saved_profiles(table_fqn: Optional[str]) -> _ProfileListResult:
                 }
             )
 
-        logger.info(
-            "Listed saved profiles",
-            extra={
-                **context,
-                "rowcount": len(entries),
-                "skipped_missing_id": counters["missing_id"],
-                "skipped_missing_target": counters["missing_target"],
-                "skipped_filter_mismatch": counters["filter_mismatch"],
-            },
-        )
+        total_runs = len(runs)
+        log_extra = {
+            **context,
+            "rowcount": len(entries),
+            "total_saved_profiles": total_runs,
+            "skipped_missing_id": counters["missing_id"],
+            "skipped_missing_target": counters["missing_target"],
+            "skipped_filter_mismatch": counters["filter_mismatch"],
+        }
+
+        if not entries:
+            debug_payload = {
+                "total_rows": total_runs,
+                "samples": sample_values,
+                "canon": canon_filter,
+            }
+            logger.info(
+                "Saved profile list empty after filtering",
+                extra={**log_extra, "debug": debug_payload},
+            )
+            return _ProfileListResult({"ok": True, "items": [], "debug": debug_payload})
+
+        logger.info("Listed saved profiles", extra=log_extra)
 
         return _ProfileListResult({"ok": True, "items": entries})
     except Exception as exc:  # pragma: no cover - defensive
