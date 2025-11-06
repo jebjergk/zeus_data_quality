@@ -31,6 +31,17 @@ Forbidden patterns:
 • Do not allow manual editing of the configuration name or target caption formatting.
 """
 
+import logging
+import sys
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    handlers=[logging.StreamHandler(sys.stdout)],
+    force=True,
+)
+logging.getLogger("snowflake").setLevel(logging.WARNING)
+
 import json
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
