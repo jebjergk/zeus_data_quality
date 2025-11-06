@@ -650,6 +650,32 @@ def verify_profiles_store() -> Dict[str, Any]:
     }
 
 
+def verify_profiles_store_select() -> Dict[str, Any]:
+    """Ensure the current role can SELECT from the profiles store."""
+
+    sql = f"SELECT 1 FROM {PROFILES_TABLE_FQN} LIMIT 1"
+    try:
+        _get_session().sql(sql).collect()
+    except Exception as exc:  # pragma: no cover - defensive
+        err_msg = str(exc) or "profiles_select_failed"
+        logger.error(
+            "Profiles store SELECT check failed",
+            extra={
+                "where": "verify_profiles_store_select",
+                "store_fqn": PROFILES_TABLE_FQN,
+                "err": err_msg,
+            },
+            exc_info=True,
+        )
+        return {"ok": False, "err": err_msg, "fqn": PROFILES_TABLE_FQN}
+
+    logger.info(
+        "Profiles store SELECT check succeeded",
+        extra={"where": "verify_profiles_store_select", "store_fqn": PROFILES_TABLE_FQN},
+    )
+    return {"ok": True, "fqn": PROFILES_TABLE_FQN}
+
+
 def has_profiles_for_fqn(table_fqn: str) -> Dict[str, Any]:
     """Return a lightweight count of saved profiles for the given table FQN."""
 
@@ -854,6 +880,22 @@ def list_saved_profiles(table_fqn: Optional[str]) -> _ProfileListResult:
         "final_sql": "SESSION_STATE_FILTER(UPPER(table_fqn)=?)",
         "store_fqn": PROFILES_TABLE_FQN,
     }
+
+    select_verification = verify_profiles_store_select()
+    if not select_verification.get("ok"):
+        err_msg = select_verification.get("err") or "profiles_select_failed"
+        logger.error(
+            "Profiles store SELECT check failed",
+            extra={**context, "err": err_msg},
+        )
+        return _ProfileListResult(
+            {
+                "ok": False,
+                "err": err_msg,
+                "fqn": PROFILES_TABLE_FQN,
+                "items": [],
+            }
+        )
 
     verification = verify_profiles_store()
     if not verification.get("ok"):
