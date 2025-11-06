@@ -45,8 +45,7 @@ import streamlit as st
 
 from services.profile import build_profile_suggestion
 from services.profiling import (
-    _label_for_profile_entry,
-    list_saved_profiles,
+    list_saved_profiles as fetch_saved_profiles,
     load_profile_run,
     normalize_profile_row,
     run_table_profile,
@@ -63,6 +62,7 @@ from utils.flags import (
     UI_CONTRACT_STRICT,
 )
 from utils.meta import get_table_row_count
+from utils.state import SAVED_PROFILES_STATE, list_saved_profiles
 from views.table_picker import session_cache_token, stateless_table_picker
 
 
@@ -669,79 +669,33 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
 
     saved_profiles_enabled = bool(session and meta_db and meta_schema)
     saved_profile_runs: List[Dict[str, Any]] = []
+    saved_profile_entries: List[Dict[str, Any]] = []
     if saved_profiles_enabled:
-        saved_profile_runs = list_saved_profiles(session, meta_db, meta_schema, limit=200)
-        if not saved_profile_runs:
+        saved_profile_runs = fetch_saved_profiles(session, meta_db, meta_schema, limit=200)
+        st.session_state[SAVED_PROFILES_STATE] = saved_profile_runs
+        saved_profile_entries = list_saved_profiles(selected_fqn)
+        if not saved_profile_entries:
             st.info(
                 "No saved profiles found (or metadata tables haven’t been created yet). "
                 "Run and save a profile first."
             )
+    else:
+        st.session_state.pop(SAVED_PROFILES_STATE, None)
 
-    def _normalize_saved_runs(raw_runs: Any) -> List[Dict[str, Any]]:
-        if isinstance(raw_runs, dict):
-            runs_value = raw_runs.get("runs")
-            if isinstance(runs_value, dict):
-                return [entry for entry in runs_value.values() if isinstance(entry, dict)]
-            if isinstance(runs_value, list):
-                return [entry for entry in runs_value if isinstance(entry, dict)]
-            if raw_runs.get("run_id") is not None:
-                return [raw_runs]
-            return []
-        if isinstance(raw_runs, (list, tuple)):
-            return [entry for entry in raw_runs if isinstance(entry, dict)]
-        return []
-
-    def _summary_map(value: Any) -> Dict[str, Any]:
-        if isinstance(value, dict):
-            return value
-        if isinstance(value, str):
-            try:
-                parsed = json.loads(value)
-            except Exception:
-                return {}
-            if isinstance(parsed, dict):
-                return parsed
-        return {}
-
-    dropdown_runs: List[Dict[str, Any]] = []
     dropdown_run_ids: List[str] = []
     dropdown_labels: List[str] = []
-    for run_entry in _normalize_saved_runs(saved_profile_runs):
-        run_id_raw = run_entry.get("run_id")
-        if run_id_raw is None:
+    for entry in saved_profile_entries:
+        run_id = str(entry.get("id", "")).strip()
+        if not run_id:
             continue
-        run_id = str(run_id_raw)
-        summary_map = _summary_map(run_entry.get("summary"))
-        profile_name_value = (
-            summary_map.get("profile_name")
-            or summary_map.get("name")
-            or run_entry.get("profile_name")
-            or run_entry.get("name")
-            or summary_map.get("target_table")
-            or run_entry.get("target_fqn")
-            or summary_map.get("table_name")
-            or run_entry.get("table_name")
-            or run_id
-        )
-        profile_name = str(profile_name_value).strip() or run_id
-        fallback_label = _label_for_profile_entry(run_entry)
-        if fallback_label and profile_name == run_id:
-            profile_name = fallback_label.split("—", 1)[0].strip() or profile_name
-        timestamp_value = (
-            summary_map.get("saved_at")
-            or run_entry.get("saved_at")
-            or summary_map.get("run_at")
-            or run_entry.get("run_at")
-            or summary_map.get("run_at_str")
-            or run_id
-        )
-        if isinstance(timestamp_value, datetime):
-            timestamp_text = timestamp_value.isoformat()
+        timestamp_text = entry.get("timestamp") or ""
+        label_name = entry.get("name") or "Unnamed"
+        if timestamp_text:
+            label = f"{label_name} — {timestamp_text}"
         else:
-            timestamp_text = str(timestamp_value)
-        dropdown_runs.append(run_entry)
+            label = f"{label_name} — {run_id}"
         dropdown_run_ids.append(run_id)
-        dropdown_labels.append(f"{profile_name} — {timestamp_text}")
+        dropdown_labels.append(label)
 
     controls = st.columns(3)
     suggested_pct = 10.0
@@ -797,8 +751,8 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
     load_selected_run_id: Optional[str] = None
     load_button_clicked = False
     with controls[2]:
-        if dropdown_runs:
-            option_indices = list(range(len(dropdown_runs)))
+        if dropdown_labels:
+            option_indices = list(range(len(dropdown_labels)))
 
             def _format_dropdown_option(idx: Optional[int]) -> str:
                 if isinstance(idx, int) and 0 <= idx < len(dropdown_labels):
@@ -833,7 +787,7 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
         )
         if not saved_profiles_enabled:
             st.caption(ui_strings.PROFILE_LOAD_CAPTION_DISABLED)
-        elif not dropdown_runs:
+        elif not dropdown_labels:
             st.caption(ui_strings.PROFILE_LOAD_CAPTION_EMPTY)
 
     if load_button_clicked:
