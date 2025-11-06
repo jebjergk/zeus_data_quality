@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import sys
 from datetime import date, datetime
 from decimal import Decimal
 from typing import Any, Dict, Iterable, List, MutableMapping, Optional, Sequence, Tuple
@@ -24,6 +25,9 @@ except ModuleNotFoundError:  # pragma: no cover - optional dependency for tests
 
 _INCLUDE_MAP = "profile_include_map"
 SAVED_PROFILES_STATE = "profile_saved_profiles"
+
+
+from utils.config import PROFILES_TABLE_FQN
 
 
 logger = logging.getLogger(__name__)
@@ -503,10 +507,136 @@ def _table_fqn_upper_variants(*values: Optional[str]) -> List[str]:
     return variants
 
 
+_PROFILES_SESSION_KEYS = (
+    "profiles_store_session",
+    "profile_session",
+    "snowpark_session",
+    "snowflake_session",
+    "session",
+    "connection",
+)
+
+
+def _quote_identifier(identifier: str) -> str:
+    cleaned = _clean_identifier(identifier)
+    if not cleaned:
+        return ""
+    escaped = cleaned.replace('"', '""')
+    return f'"{escaped}"'
+
+
+def _store_fqn_parts() -> Tuple[Tuple[str, bool], Tuple[str, bool], Tuple[str, bool]]:
+    parts = _split_relation_parts(PROFILES_TABLE_FQN)
+    if len(parts) >= 3:
+        db_part, schema_part, table_part = parts[-3], parts[-2], parts[-1]
+    else:
+        raw_parts = [
+            part.strip()
+            for part in str(PROFILES_TABLE_FQN or "").split(".")
+            if part.strip()
+        ]
+        while len(raw_parts) < 3:
+            raw_parts.insert(0, "")
+        db_part = (raw_parts[-3], False)
+        schema_part = (raw_parts[-2], False)
+        table_part = (raw_parts[-1], False)
+    return db_part, schema_part, table_part
+
+
+def _info_schema_name(value: str, quoted: bool) -> str:
+    cleaned = _clean_identifier(value)
+    if not cleaned:
+        return ""
+    return cleaned if quoted else cleaned.upper()
+
+
+def _resolve_profiles_session() -> Any:
+    try:
+        state = st.session_state
+    except Exception:  # pragma: no cover - defensive
+        state = {}
+
+    getter = getattr(state, "get", None)
+    for key in _PROFILES_SESSION_KEYS:
+        if getter is not None:
+            candidate = getter(key, None)
+        else:
+            candidate = state.get(key) if isinstance(state, dict) else None
+        if candidate is not None:
+            return candidate
+
+    for attr in ("snowpark_session", "session", "connection"):
+        candidate = getattr(st, attr, None)
+        if candidate is not None:
+            return candidate
+    app_module = sys.modules.get("streamlit_app")
+    if app_module is not None:
+        candidate = getattr(app_module, "session", None)
+        if candidate is not None:
+            return candidate
+    return None
+
+
+def verify_profiles_store() -> Dict[str, Any]:
+    """Check whether the saved profiles table exists in Snowflake."""
+
+    db_part, schema_part, table_part = _store_fqn_parts()
+    db_name = _clean_identifier(db_part[0])
+    schema_name = _info_schema_name(schema_part[0], schema_part[1])
+    table_name = _info_schema_name(table_part[0], table_part[1])
+
+    if not (db_name and schema_name and table_name):
+        return {"ok": False, "fqn": PROFILES_TABLE_FQN, "err": "invalid_fqn"}
+
+    session = _resolve_profiles_session()
+    if session is None:
+        return {"ok": False, "fqn": PROFILES_TABLE_FQN, "err": "session_unavailable"}
+
+    db_identifier = _quote_identifier(db_name)
+    if not db_identifier:
+        return {"ok": False, "fqn": PROFILES_TABLE_FQN, "err": "invalid_database"}
+
+    sql = (
+        f"SELECT 1 FROM {db_identifier}.INFORMATION_SCHEMA.TABLES "
+        "WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? LIMIT 1"
+    )
+    params = [schema_name, table_name]
+
+    try:
+        rows = session.sql(sql, params=params).collect()
+    except Exception as exc:  # pragma: no cover - defensive
+        return {
+            "ok": False,
+            "fqn": PROFILES_TABLE_FQN,
+            "err": str(exc) or "verification_failed",
+        }
+
+    if not rows:
+        return {"ok": False, "fqn": PROFILES_TABLE_FQN, "err": "not_found"}
+
+    return {"ok": True, "fqn": PROFILES_TABLE_FQN, "err": None}
+
+
 def save_profile(profile: Any) -> Dict[str, Any]:
     """Persist a saved profile payload into session state."""
 
-    context = {"where": "save_profile"}
+    context = {"where": "save_profile", "store_fqn": PROFILES_TABLE_FQN}
+    verification = verify_profiles_store()
+    if not verification.get("ok"):
+        logger.info(
+            "Profiles store unavailable",
+            extra={
+                **context,
+                "table_fqn_raw": "",
+                "table_fqn_canon": "",
+                "verification_err": verification.get("err") or "",
+            },
+        )
+        return {
+            "ok": False,
+            "err": "profiles table missing",
+            "fqn": PROFILES_TABLE_FQN,
+        }
     try:
         normalized_profile = normalize_saved_profile(profile)
         if not normalized_profile:
@@ -556,6 +686,7 @@ def save_profile(profile: Any) -> Dict[str, Any]:
                 "profile_id": run_id,
                 "table_fqn_raw": table_fqn_raw,
                 "table_fqn_canonical": canonical_table_fqn,
+                "table_fqn_canon": canonical_table_fqn,
                 "store_size": len(updated),
             },
         )
@@ -580,13 +711,34 @@ def list_saved_profiles(table_fqn: Optional[str]) -> _ProfileListResult:
     context = {
         "where": "list_profiles",
         "table_fqn": table_fqn or "",
+        "table_fqn_raw": table_fqn or "",
         "canonical_table_fqn": canonical_fqn or canon_filter,
+        "table_fqn_canon": canonical_fqn or canon_filter,
         "filter_canon_fqn": canon_filter,
         "filter_db": filter_db,
         "filter_schema": filter_schema,
         "filter_table": filter_table,
         "final_sql": "SESSION_STATE_FILTER(UPPER(table_fqn)=?)",
+        "store_fqn": PROFILES_TABLE_FQN,
     }
+
+    verification = verify_profiles_store()
+    if not verification.get("ok"):
+        logger.info(
+            "Profiles store unavailable",
+            extra={
+                **context,
+                "verification_err": verification.get("err") or "",
+            },
+        )
+        return _ProfileListResult(
+            {
+                "ok": False,
+                "err": "profiles table missing",
+                "fqn": PROFILES_TABLE_FQN,
+                "items": [],
+            }
+        )
 
     try:
         stored = st.session_state.get(SAVED_PROFILES_STATE, [])
@@ -804,7 +956,11 @@ def list_saved_profiles(table_fqn: Optional[str]) -> _ProfileListResult:
 def load_profile_by_id(profile_id: str) -> Dict[str, Any]:
     """Load a saved profile payload from session state by identifier."""
 
-    context = {"where": "load_profile", "profile_id": str(profile_id or "")}
+    context = {
+        "where": "load_profile",
+        "profile_id": str(profile_id or ""),
+        "store_fqn": PROFILES_TABLE_FQN,
+    }
 
     try:
         if not profile_id:
@@ -828,7 +984,12 @@ def load_profile_by_id(profile_id: str) -> Dict[str, Any]:
                 table_fqn = _extract_table_identifiers(run_map, summary_map)[2]
                 logger.info(
                     "Loaded saved profile",
-                    extra={**context, "table_fqn": table_fqn},
+                    extra={
+                        **context,
+                        "table_fqn": table_fqn,
+                        "table_fqn_raw": table_fqn,
+                        "table_fqn_canon": _canon_fqn(table_fqn),
+                    },
                 )
                 item_dict = dict(run_map)
                 return {
