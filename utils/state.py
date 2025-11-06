@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import json
+import logging
 from datetime import date, datetime
 from decimal import Decimal
-from typing import Any, Dict, Iterable, List, MutableMapping, Sequence
+from typing import Any, Dict, Iterable, List, MutableMapping, Optional, Sequence, Tuple
 from uuid import UUID
 
 try:
@@ -22,6 +23,10 @@ except ModuleNotFoundError:  # pragma: no cover - optional dependency for tests
     st = _StreamlitStateStub()  # type: ignore[assignment]
 
 _INCLUDE_MAP = "profile_include_map"
+SAVED_PROFILES_STATE = "profile_saved_profiles"
+
+
+logger = logging.getLogger(__name__)
 
 
 def _json_default(value: Any) -> Any:
@@ -139,6 +144,194 @@ def normalize_saved_profiles(profiles: Any) -> List[Dict[str, Any]]:
         if normalized:
             normalized_runs.append(normalized)
     return normalized_runs
+
+
+def _clean_identifier(value: Any) -> str:
+    if value is None:
+        return ""
+    return str(value).strip().strip('"')
+
+
+def _ensure_iso_timestamp(value: Any) -> str:
+    """Return an ISO-8601-ish string from assorted timestamp inputs."""
+
+    if value is None:
+        return ""
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, date):
+        return datetime(value.year, value.month, value.day).isoformat()
+    text = str(value).strip()
+    if not text:
+        return ""
+
+    candidate = text
+    if "T" not in candidate and " " in candidate:
+        candidate = candidate.replace(" ", "T", 1)
+    if candidate.endswith("Z"):
+        normalized = candidate[:-1] + "+00:00"
+    else:
+        normalized = candidate
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError:
+        return text
+    iso_value = parsed.isoformat()
+    if candidate.endswith("Z"):
+        return iso_value.replace("+00:00", "Z")
+    return iso_value
+
+
+def _extract_schema_table(*candidates: Any) -> Tuple[str, str]:
+    schema = ""
+    table = ""
+    for candidate in candidates:
+        if not isinstance(candidate, MutableMapping):
+            continue
+        target = _clean_identifier(
+            candidate.get("target_fqn")
+            or candidate.get("target_table")
+            or candidate.get("target")
+        )
+        if target:
+            parts = [part.strip().strip('"') for part in target.split(".") if part.strip()]
+            if len(parts) >= 2:
+                return parts[-2], parts[-1]
+        schema_value = _clean_identifier(
+            candidate.get("schema")
+            or candidate.get("schema_name")
+            or candidate.get("schemaName")
+            or candidate.get("SCH_NAME")
+        )
+        table_value = _clean_identifier(
+            candidate.get("table_name")
+            or candidate.get("table")
+            or candidate.get("TABLE_NAME")
+            or candidate.get("name")
+        )
+        if schema_value and table_value:
+            return schema_value, table_value
+    return schema, table
+
+
+def _to_mapping(value: Any) -> MutableMapping[str, Any]:
+    if isinstance(value, MutableMapping):
+        return value
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except Exception:
+            return {}
+        if isinstance(parsed, MutableMapping):
+            return parsed
+    return {}
+
+
+def _first_text(*values: Any, default: str = "") -> str:
+    for value in values:
+        if value is None:
+            continue
+        text = str(value).strip()
+        if text:
+            return text
+    return default
+
+
+def list_saved_profiles(table_fqn: Optional[str]) -> List[Dict[str, Any]]:
+    """Return normalised saved profile entries for the dropdown."""
+
+    try:
+        stored = st.session_state.get(SAVED_PROFILES_STATE, [])
+        runs = normalize_saved_profiles(stored)
+        if not runs:
+            return []
+
+        filter_schema = ""
+        filter_table = ""
+        if table_fqn:
+            parts = [
+                part.strip().strip('"')
+                for part in str(table_fqn).split(".")
+                if part and str(part).strip()
+            ]
+            if len(parts) >= 2:
+                filter_schema = parts[-2].lower()
+                filter_table = parts[-1].lower()
+
+        entries: List[Dict[str, Any]] = []
+        for run in runs:
+            summary_map = _to_mapping(run.get("summary"))
+            run_id = _first_text(
+                run.get("run_id"),
+                run.get("id"),
+                summary_map.get("run_id"),
+                summary_map.get("id"),
+            )
+            if not run_id:
+                continue
+
+            schema, table = _extract_schema_table(run, summary_map)
+            if filter_schema and filter_table:
+                schema_clean = _clean_identifier(schema)
+                table_clean = _clean_identifier(table)
+                if not (schema_clean and table_clean):
+                    target = _clean_identifier(
+                        run.get("target_fqn") or summary_map.get("target_table")
+                    )
+                    if target:
+                        parts = [
+                            part.strip().strip('"')
+                            for part in target.split(".")
+                            if part.strip()
+                        ]
+                        if len(parts) >= 2:
+                            schema_clean = schema_clean or parts[-2]
+                            table_clean = table_clean or parts[-1]
+                if not (schema_clean and table_clean):
+                    continue
+                if schema_clean.lower() != filter_schema or table_clean.lower() != filter_table:
+                    continue
+
+            name = _first_text(
+                summary_map.get("profile_name"),
+                run.get("profile_name"),
+                summary_map.get("name"),
+                run.get("name"),
+                summary_map.get("target_table"),
+                run.get("target_fqn"),
+                run.get("table_name"),
+                run.get("table"),
+                default="Unnamed",
+            )
+
+            timestamp_value = _first_text(
+                summary_map.get("saved_at"),
+                run.get("saved_at"),
+                summary_map.get("run_at"),
+                run.get("run_at"),
+                summary_map.get("run_at_str"),
+                run.get("run_at_str"),
+                summary_map.get("created_at"),
+                run.get("created_at"),
+                summary_map.get("created"),
+                run.get("created"),
+                summary_map.get("createdTs"),
+                run.get("createdTs"),
+            )
+            timestamp_iso = _ensure_iso_timestamp(timestamp_value)
+
+            entries.append(
+                {
+                    "id": run_id,
+                    "name": name,
+                    "timestamp": timestamp_iso,
+                    "run": run,
+                }
+            )
+        return entries
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.error("Failed to list saved profiles: %s", exc, exc_info=True)
+        return []
 
 
 _json_dumps_original = json.dumps
