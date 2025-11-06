@@ -29,6 +29,19 @@ SAVED_PROFILES_STATE = "profile_saved_profiles"
 logger = logging.getLogger(__name__)
 
 
+class _ProfileListResult(dict):
+    """Dictionary wrapper that behaves like a list for legacy callers."""
+
+    def __iter__(self):  # type: ignore[override]
+        return iter(self.get("items", []))
+
+    def __len__(self) -> int:  # type: ignore[override]
+        return len(self.get("items", []))
+
+    def __bool__(self) -> bool:  # type: ignore[override]
+        return bool(self.get("items", []))
+
+
 def _json_default(value: Any) -> Any:
     """Serialize unsupported objects when dumping to JSON."""
 
@@ -237,101 +250,299 @@ def _first_text(*values: Any, default: str = "") -> str:
     return default
 
 
-def list_saved_profiles(table_fqn: Optional[str]) -> List[Dict[str, Any]]:
+def _profile_summary_map(run: MutableMapping[str, Any]) -> MutableMapping[str, Any]:
+    return _to_mapping(run.get("summary"))
+
+
+def _extract_run_identity(
+    run: MutableMapping[str, Any]
+) -> Tuple[str, MutableMapping[str, Any]]:
+    summary_map = _profile_summary_map(run)
+    run_id = _first_text(
+        run.get("run_id"),
+        run.get("id"),
+        summary_map.get("run_id"),
+        summary_map.get("id"),
+    ).strip()
+    return run_id, summary_map
+
+
+def _extract_table_identifiers(
+    run: MutableMapping[str, Any], summary_map: MutableMapping[str, Any]
+) -> Tuple[str, str, str]:
+    schema, table = _extract_schema_table(run, summary_map)
+    schema_clean = _clean_identifier(schema)
+    table_clean = _clean_identifier(table)
+    if not (schema_clean and table_clean):
+        target = _clean_identifier(
+            run.get("target_fqn")
+            or summary_map.get("target_table")
+            or summary_map.get("target")
+        )
+        if target:
+            parts = [
+                part.strip().strip('"')
+                for part in target.split(".")
+                if part.strip()
+            ]
+            if len(parts) >= 2:
+                schema_clean = schema_clean or parts[-2]
+                table_clean = table_clean or parts[-1]
+    table_fqn = ""
+    if schema_clean and table_clean:
+        table_fqn = f"{schema_clean}.{table_clean}"
+    return schema_clean, table_clean, table_fqn
+
+
+def _profile_timestamp(
+    run: MutableMapping[str, Any], summary_map: MutableMapping[str, Any]
+) -> str:
+    timestamp_value = _first_text(
+        summary_map.get("saved_at"),
+        run.get("saved_at"),
+        summary_map.get("run_at"),
+        run.get("run_at"),
+        summary_map.get("run_at_str"),
+        run.get("run_at_str"),
+        summary_map.get("created_at"),
+        run.get("created_at"),
+        summary_map.get("created"),
+        run.get("created"),
+        summary_map.get("createdTs"),
+        run.get("createdTs"),
+    )
+    return _ensure_iso_timestamp(timestamp_value)
+
+
+def _profile_display_name(
+    run: MutableMapping[str, Any], summary_map: MutableMapping[str, Any]
+) -> str:
+    return _first_text(
+        summary_map.get("profile_name"),
+        run.get("profile_name"),
+        summary_map.get("name"),
+        run.get("name"),
+        summary_map.get("target_table"),
+        run.get("target_fqn"),
+        run.get("table_name"),
+        run.get("table"),
+        default="Unnamed",
+    )
+
+
+def _normalise_table_filter(table_fqn: Optional[str]) -> Tuple[str, str, str]:
+    filter_schema = ""
+    filter_table = ""
+    normalized = ""
+    if table_fqn:
+        parts = [
+            part.strip().strip('"')
+            for part in str(table_fqn).split(".")
+            if part and str(part).strip()
+        ]
+        if len(parts) >= 2:
+            filter_schema = parts[-2].lower()
+            filter_table = parts[-1].lower()
+            normalized = f"{parts[-2]}.{parts[-1]}"
+    return filter_schema, filter_table, normalized
+
+
+def save_profile(profile: Any) -> Dict[str, Any]:
+    """Persist a saved profile payload into session state."""
+
+    context = {"where": "save_profile"}
+    try:
+        normalized_profile = normalize_saved_profile(profile)
+        if not normalized_profile:
+            raise ValueError("Profile payload is empty or invalid")
+
+        run_map = _to_mapping(normalized_profile)
+        if not run_map:
+            raise ValueError("Profile payload is not a mapping")
+
+        run_id, summary_map = _extract_run_identity(run_map)
+        if not run_id:
+            raise ValueError("Profile payload is missing a run identifier")
+
+        existing = normalize_saved_profiles(
+            st.session_state.get(SAVED_PROFILES_STATE, [])
+        )
+        updated: List[Dict[str, Any]] = []
+        replaced = False
+        for run in existing:
+            run_dict = _to_mapping(run)
+            existing_id, _ = _extract_run_identity(run_dict)
+            if existing_id == run_id:
+                updated.append(dict(run_map))
+                replaced = True
+            else:
+                updated.append(dict(run_dict))
+        if not replaced:
+            updated.append(dict(run_map))
+
+        st.session_state[SAVED_PROFILES_STATE] = updated
+
+        table_fqn = _extract_table_identifiers(run_map, summary_map)[2]
+        logger.info(
+            "Saved profile payload",
+            extra={
+                **context,
+                "profile_id": run_id,
+                "table_fqn": table_fqn,
+                "store_size": len(updated),
+            },
+        )
+        return {"ok": True, "id": run_id}
+    except Exception as exc:  # pragma: no cover - defensive
+        err_msg = str(exc)
+        logger.error(
+            "Failed to save profile",
+            extra={**context, "err": err_msg},
+            exc_info=True,
+        )
+        return {"ok": False, "err": err_msg}
+
+
+def list_saved_profiles(table_fqn: Optional[str]) -> _ProfileListResult:
     """Return normalised saved profile entries for the dropdown."""
+
+    filter_schema, filter_table, normalized_fqn = _normalise_table_filter(table_fqn)
+    context = {
+        "where": "list_profiles",
+        "table_fqn": table_fqn or "",
+        "normalized_table_fqn": normalized_fqn,
+        "final_sql": "SESSION_STATE_FILTER(schema=?, table=?)",
+    }
 
     try:
         stored = st.session_state.get(SAVED_PROFILES_STATE, [])
+        if not stored:
+            logger.info(
+                "Saved profile store missing or empty",
+                extra={**context, "rowcount": 0, "reason": "store_missing"},
+            )
+            return _ProfileListResult({"ok": True, "items": []})
+
         runs = normalize_saved_profiles(stored)
         if not runs:
-            return []
-
-        filter_schema = ""
-        filter_table = ""
-        if table_fqn:
-            parts = [
-                part.strip().strip('"')
-                for part in str(table_fqn).split(".")
-                if part and str(part).strip()
-            ]
-            if len(parts) >= 2:
-                filter_schema = parts[-2].lower()
-                filter_table = parts[-1].lower()
+            logger.info(
+                "Saved profile store normalized to zero rows",
+                extra={**context, "rowcount": 0, "reason": "normalised_empty"},
+            )
+            return _ProfileListResult({"ok": True, "items": []})
 
         entries: List[Dict[str, Any]] = []
+        counters = {
+            "missing_id": 0,
+            "missing_target": 0,
+            "filter_mismatch": 0,
+        }
+
         for run in runs:
-            summary_map = _to_mapping(run.get("summary"))
-            run_id = _first_text(
-                run.get("run_id"),
-                run.get("id"),
-                summary_map.get("run_id"),
-                summary_map.get("id"),
-            )
-            if not run_id:
+            run_map = _to_mapping(run)
+            if not run_map:
+                counters["missing_id"] += 1
                 continue
 
-            schema, table = _extract_schema_table(run, summary_map)
+            run_id, summary_map = _extract_run_identity(run_map)
+            if not run_id:
+                counters["missing_id"] += 1
+                continue
+
+            schema_clean, table_clean, table_name = _extract_table_identifiers(
+                run_map, summary_map
+            )
             if filter_schema and filter_table:
-                schema_clean = _clean_identifier(schema)
-                table_clean = _clean_identifier(table)
                 if not (schema_clean and table_clean):
-                    target = _clean_identifier(
-                        run.get("target_fqn") or summary_map.get("target_table")
-                    )
-                    if target:
-                        parts = [
-                            part.strip().strip('"')
-                            for part in target.split(".")
-                            if part.strip()
-                        ]
-                        if len(parts) >= 2:
-                            schema_clean = schema_clean or parts[-2]
-                            table_clean = table_clean or parts[-1]
-                if not (schema_clean and table_clean):
+                    counters["missing_target"] += 1
                     continue
-                if schema_clean.lower() != filter_schema or table_clean.lower() != filter_table:
+                if (
+                    schema_clean.lower() != filter_schema
+                    or table_clean.lower() != filter_table
+                ):
+                    counters["filter_mismatch"] += 1
                     continue
 
-            name = _first_text(
-                summary_map.get("profile_name"),
-                run.get("profile_name"),
-                summary_map.get("name"),
-                run.get("name"),
-                summary_map.get("target_table"),
-                run.get("target_fqn"),
-                run.get("table_name"),
-                run.get("table"),
-                default="Unnamed",
-            )
-
-            timestamp_value = _first_text(
-                summary_map.get("saved_at"),
-                run.get("saved_at"),
-                summary_map.get("run_at"),
-                run.get("run_at"),
-                summary_map.get("run_at_str"),
-                run.get("run_at_str"),
-                summary_map.get("created_at"),
-                run.get("created_at"),
-                summary_map.get("created"),
-                run.get("created"),
-                summary_map.get("createdTs"),
-                run.get("createdTs"),
-            )
-            timestamp_iso = _ensure_iso_timestamp(timestamp_value)
+            timestamp_iso = _profile_timestamp(run_map, summary_map)
+            display_name = _profile_display_name(run_map, summary_map)
 
             entries.append(
                 {
                     "id": run_id,
-                    "name": name,
+                    "name": display_name,
+                    "table_fqn": table_name,
+                    "created_at_iso": timestamp_iso,
                     "timestamp": timestamp_iso,
-                    "run": run,
+                    "run": dict(run_map),
                 }
             )
-        return entries
+
+        logger.info(
+            "Listed saved profiles",
+            extra={
+                **context,
+                "rowcount": len(entries),
+                "skipped_missing_id": counters["missing_id"],
+                "skipped_missing_target": counters["missing_target"],
+                "skipped_filter_mismatch": counters["filter_mismatch"],
+            },
+        )
+
+        return _ProfileListResult({"ok": True, "items": entries})
     except Exception as exc:  # pragma: no cover - defensive
-        logger.error("Failed to list saved profiles: %s", exc, exc_info=True)
-        return []
+        err_msg = str(exc)
+        logger.error(
+            "Failed to list saved profiles",
+            extra={**context, "err": err_msg},
+            exc_info=True,
+        )
+        return _ProfileListResult({"ok": False, "err": err_msg, "items": []})
+
+
+def load_profile_by_id(profile_id: str) -> Dict[str, Any]:
+    """Load a saved profile payload from session state by identifier."""
+
+    context = {"where": "load_profile", "profile_id": str(profile_id or "")}
+
+    try:
+        if not profile_id:
+            raise ValueError("Profile identifier is required")
+
+        stored = st.session_state.get(SAVED_PROFILES_STATE, [])
+        if not stored:
+            logger.info(
+                "Saved profile store missing while loading",
+                extra={**context, "reason": "store_missing"},
+            )
+            return {"ok": False, "err": "Saved profile store is empty"}
+
+        runs = normalize_saved_profiles(stored)
+        for run in runs:
+            run_map = _to_mapping(run)
+            if not run_map:
+                continue
+            run_id, summary_map = _extract_run_identity(run_map)
+            if run_id == str(profile_id).strip():
+                table_fqn = _extract_table_identifiers(run_map, summary_map)[2]
+                logger.info(
+                    "Loaded saved profile",
+                    extra={**context, "table_fqn": table_fqn},
+                )
+                return {"ok": True, "item": dict(run_map)}
+
+        logger.info(
+            "Saved profile not found",
+            extra={**context, "reason": "not_found"},
+        )
+        return {"ok": False, "err": f"Profile '{profile_id}' not found"}
+    except Exception as exc:  # pragma: no cover - defensive
+        err_msg = str(exc)
+        logger.error(
+            "Failed to load saved profile",
+            extra={**context, "err": err_msg},
+            exc_info=True,
+        )
+        return {"ok": False, "err": err_msg}
 
 
 _json_dumps_original = json.dumps
