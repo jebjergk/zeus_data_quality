@@ -27,10 +27,17 @@ _INCLUDE_MAP = "profile_include_map"
 SAVED_PROFILES_STATE = "profile_saved_profiles"
 
 
+from snowflake.snowpark.context import get_active_session
+
 from utils.config import PROFILES_TABLE_FQN
 
 
 logger = logging.getLogger(__name__)
+
+
+def _get_session():
+    # Never shadow this name elsewhere
+    return get_active_session()
 
 
 class _ProfileListResult(dict):
@@ -588,8 +595,8 @@ def verify_profiles_store() -> Dict[str, Any]:
     if not (db_name and schema_name and table_name):
         return {"ok": False, "fqn": PROFILES_TABLE_FQN, "err": "invalid_fqn"}
 
-    session = _resolve_profiles_session()
-    if session is None:
+    profiles_session = _resolve_profiles_session()
+    if profiles_session is None:
         return {"ok": False, "fqn": PROFILES_TABLE_FQN, "err": "session_unavailable"}
 
     db_identifier = _quote_identifier(db_name)
@@ -603,7 +610,7 @@ def verify_profiles_store() -> Dict[str, Any]:
     params = [schema_name, table_name]
 
     try:
-        rows = session.sql(sql, params=params).collect()
+        rows = _get_session().sql(sql, params=params).collect()
     except Exception as exc:  # pragma: no cover - defensive
         return {
             "ok": False,
