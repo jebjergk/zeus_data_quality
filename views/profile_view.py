@@ -54,6 +54,7 @@ from services.profiling import (
 from services.profiles_repo import load_saved_profile_run
 from ui import keys as ui_keys
 from ui import strings as ui_strings
+from utils.config import PROFILES_TABLE_FQN
 from utils.flags import (
     DEBUG_PROFILING,
     DEMO_LOCK,
@@ -62,7 +63,12 @@ from utils.flags import (
     UI_CONTRACT_STRICT,
 )
 from utils.meta import get_table_row_count
-from utils.state import SAVED_PROFILES_STATE, list_saved_profiles
+from utils.state import (
+    SAVED_PROFILES_STATE,
+    list_saved_profiles,
+    verify_profiles_store,
+    _canon_fqn,
+)
 from views.table_picker import session_cache_token, stateless_table_picker
 
 
@@ -1755,8 +1761,33 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
         diagnostics_response = profile_list_response or list_saved_profiles(
             current_table_fqn
         )
+        store_verification = verify_profiles_store()
+        store_ok = bool(store_verification.get("ok"))
+        store_err = store_verification.get("err")
+        store_fqn = store_verification.get("fqn") or PROFILES_TABLE_FQN
+
+        debug_info = diagnostics_response.get("debug")
+        canonical_fqn = ""
+        if isinstance(debug_info, dict):
+            canon_value = debug_info.get("canon")
+            if canon_value:
+                canonical_fqn = str(canon_value)
+
+        if not canonical_fqn:
+            canon_source = editor_target_fqn or current_table_fqn
+            if canon_source:
+                try:
+                    canon_candidate = _canon_fqn(str(canon_source))
+                except Exception:  # pragma: no cover - defensive fallback
+                    canon_candidate = ""
+                if canon_candidate:
+                    canonical_fqn = str(canon_candidate)
+
         with st.expander("Debug · Profiling Diagnostics", expanded=False):
             st.text(f"editor_target_fqn: {str(editor_target_fqn or '')}")
+            st.text(f"canonical_fqn: {canonical_fqn}")
+            st.text(f"store_fqn: {store_fqn}")
+            st.write({"store_ok": store_ok, "store_err": store_err})
 
             items = list(diagnostics_response.get("items") or [])
             summary: Dict[str, Any] = {
@@ -1766,7 +1797,6 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
             }
             st.write(summary)
 
-            debug_info = diagnostics_response.get("debug")
             if isinstance(debug_info, dict):
                 debug_summary: Dict[str, Any] = {}
                 if "total_rows" in debug_info:
@@ -1799,6 +1829,12 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
                     st.caption("Sample saved profile table FQNs")
                     st.table(pd.DataFrame(sample_rows))
 
+            if not store_ok:
+                missing_message = "Profiles store missing or inaccessible"
+                if store_err:
+                    missing_message = f"{missing_message}: {store_err}"
+                st.warning(missing_message)
+
             if summary["ok"]:
                 if items:
                     preview_rows = [
@@ -1812,5 +1848,7 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
                     ]
                     if preview_rows:
                         st.table(pd.DataFrame(preview_rows))
+                elif store_ok:
+                    st.info("Store exists; likely FQN mismatch or no profiles saved yet.")
                 else:
                     st.info("No items returned for this FQN")
