@@ -692,32 +692,32 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
     if saved_profiles_enabled:
         saved_profile_runs = fetch_saved_profiles(session, meta_db, meta_schema, limit=200)
         st.session_state[SAVED_PROFILES_STATE] = saved_profile_runs
-        profile_list_response = list_saved_profiles(current_table_fqn)
+        list_fqn = st.session_state.get("editor_target_fqn") or ""
+        profile_list_response = list_saved_profiles(list_fqn)
         canonical_fqn = (
             profile_list_response.get("canonical_table_fqn")
-            or current_table_fqn
+            or list_fqn
             or ""
         )
         if profile_list_response.get("ok"):
+            saved_profile_entries = profile_list_response.get("items", []) or []
             logger.info(
                 "list_saved_profiles ok items=%d fqn=%s",
-                len(profile_list_response.get("items", [])),
+                len(saved_profile_entries),
                 canonical_fqn,
             )
-        else:
-            logger.error(
-                "list_saved_profiles failed err=%s fqn=%s",
-                profile_list_response.get("err"),
-                current_table_fqn or "",
-            )
-        if profile_list_response.get("ok"):
-            saved_profile_entries = profile_list_response.get("items", [])
             if not saved_profile_entries:
                 st.info(
                     "No saved profiles found (or metadata tables haven’t been created yet). "
                     "Run and save a profile first."
                 )
         else:
+            saved_profile_entries = []
+            logger.error(
+                "list_saved_profiles failed err=%s fqn=%s",
+                profile_list_response.get("err"),
+                list_fqn,
+            )
             logging.warning(
                 "Saved profile listing failed",
                 extra={
@@ -728,8 +728,7 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
     else:
         st.session_state.pop(SAVED_PROFILES_STATE, None)
 
-    dropdown_run_ids: List[str] = []
-    dropdown_labels: List[str] = []
+    dropdown_options: List[Tuple[str, str]] = []
     for entry in saved_profile_entries:
         run_id = str(entry.get("id", "")).strip()
         if not run_id:
@@ -740,12 +739,8 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
             or entry.get("timestamp")
             or ""
         )
-        if created_at_iso:
-            label = f"{label_name} — {created_at_iso}"
-        else:
-            label = f"{label_name} — {run_id}"
-        dropdown_run_ids.append(run_id)
-        dropdown_labels.append(label)
+        label_suffix = created_at_iso or run_id
+        dropdown_options.append((run_id, f"{label_name} — {label_suffix}"))
 
     controls = st.columns(3)
     suggested_pct = 10.0
@@ -797,39 +792,35 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
             step=1,
             help=ui_strings.PROFILE_TOP_N_HELP.format(max_top_n=MAX_TOP_N),
         )
-    load_selected_index: Optional[int] = None
     load_selected_run_id: Optional[str] = None
     load_button_clicked = False
     with controls[2]:
-        if dropdown_labels:
-            option_indices = list(range(len(dropdown_labels)))
+        selectbox_disabled = len(dropdown_options) == 0
+        if dropdown_options:
 
-            def _format_dropdown_option(idx: Optional[int]) -> str:
-                if isinstance(idx, int) and 0 <= idx < len(dropdown_labels):
-                    return dropdown_labels[idx]
+            def _format_dropdown_option(option: Optional[Tuple[str, str]]) -> str:
+                if isinstance(option, tuple) and len(option) == 2:
+                    return option[1]
                 return ""
 
-            load_selected_index = st.selectbox(
+            selected_option = st.selectbox(
                 ui_strings.PROFILE_LOAD_SELECT_LABEL,
-                options=option_indices,
+                options=dropdown_options,
                 format_func=_format_dropdown_option,
                 key=ui_keys.PROFILE_LOAD_SELECT,
-                disabled=not saved_profiles_enabled,
+                disabled=selectbox_disabled,
                 index=None,
                 placeholder=ui_strings.PROFILE_LOAD_SELECT_PLACEHOLDER,
             )
+            if isinstance(selected_option, tuple) and len(selected_option) == 2:
+                load_selected_run_id = selected_option[0]
         else:
             st.selectbox(
                 ui_strings.PROFILE_LOAD_SELECT_LABEL,
                 options=[ui_strings.PROFILE_LOAD_SELECT_EMPTY],
                 key=ui_keys.PROFILE_LOAD_SELECT,
-                disabled=True,
+                disabled=selectbox_disabled,
             )
-        if (
-            load_selected_index is not None
-            and 0 <= load_selected_index < len(dropdown_run_ids)
-        ):
-            load_selected_run_id = dropdown_run_ids[load_selected_index]
         load_button_clicked = st.button(
             ui_strings.PROFILE_LOAD_BUTTON_LABEL,
             key=ui_keys.PROFILE_LOAD_BUTTON,
@@ -837,7 +828,7 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
         )
         if not saved_profiles_enabled:
             st.caption(ui_strings.PROFILE_LOAD_CAPTION_DISABLED)
-        elif not dropdown_labels:
+        elif not dropdown_options:
             st.caption(ui_strings.PROFILE_LOAD_CAPTION_EMPTY)
 
     if load_button_clicked:
