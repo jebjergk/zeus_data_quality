@@ -438,20 +438,23 @@ def save_profile(profile: Any) -> Dict[str, Any]:
         existing = normalize_saved_profiles(
             st.session_state.get(SAVED_PROFILES_STATE, [])
         )
+        current_run_dict = dict(run_map)
         updated: List[Dict[str, Any]] = []
         replaced = False
         for run in existing:
-            run_dict = _to_mapping(run)
-            existing_id, _ = _extract_run_identity(run_dict)
+            existing_run_dict = _to_mapping(run)
+            existing_id, _ = _extract_run_identity(existing_run_dict)
             if existing_id == run_id:
-                updated.append(dict(run_map))
+                updated.append(current_run_dict)
                 replaced = True
             else:
-                updated.append(dict(run_dict))
+                updated.append(dict(existing_run_dict))
         if not replaced:
-            updated.append(dict(run_map))
+            updated.append(current_run_dict)
 
         st.session_state[SAVED_PROFILES_STATE] = updated
+
+        serialized_profile = _json_dumps_safe(current_run_dict)
 
         table_fqn = _extract_table_identifiers(run_map, summary_map)[2]
         logger.info(
@@ -463,7 +466,7 @@ def save_profile(profile: Any) -> Dict[str, Any]:
                 "store_size": len(updated),
             },
         )
-        return {"ok": True, "id": run_id}
+        return {"ok": True, "id": run_id, "item_json": serialized_profile}
     except Exception as exc:  # pragma: no cover - defensive
         err_msg = str(exc)
         logger.error(
@@ -540,6 +543,7 @@ def list_saved_profiles(table_fqn: Optional[str]) -> _ProfileListResult:
 
             timestamp_iso = _profile_timestamp(run_map, summary_map)
             display_name = _profile_display_name(run_map, summary_map)
+            run_dict = dict(run_map)
 
             entries.append(
                 {
@@ -548,7 +552,8 @@ def list_saved_profiles(table_fqn: Optional[str]) -> _ProfileListResult:
                     "table_fqn": table_name,
                     "created_at_iso": timestamp_iso,
                     "timestamp": timestamp_iso,
-                    "run": dict(run_map),
+                    "run": run_dict,
+                    "run_json": _json_dumps_safe(run_dict),
                 }
             )
 
@@ -603,7 +608,12 @@ def load_profile_by_id(profile_id: str) -> Dict[str, Any]:
                     "Loaded saved profile",
                     extra={**context, "table_fqn": table_fqn},
                 )
-                return {"ok": True, "item": dict(run_map)}
+                item_dict = dict(run_map)
+                return {
+                    "ok": True,
+                    "item": item_dict,
+                    "item_json": _json_dumps_safe(item_dict),
+                }
 
         logger.info(
             "Saved profile not found",
