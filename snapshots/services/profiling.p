@@ -9,13 +9,14 @@ import os
 import random
 import re
 from datetime import datetime
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple, Union
 from uuid import uuid4
 
 from services.profile import _is_numeric, _is_temporal, _stringify
 from services.profiles_repo import load_saved_profile_run
 from services.semantics import clamp_confidence, truncate_note
 from utils.meta import _q
+from utils.state import _json_dumps_safe
 
 __all__ = [
     "list_columns",
@@ -3272,7 +3273,7 @@ def save_profile_results(
     meta_schema: str,
     run_info: Dict[str, Any],
     rows: List[Dict[str, Any]],
-) -> str:
+) -> Union[str, Dict[str, Any]]:
     """Persist profile results into metadata tables and return the run identifier."""
 
     if not session:
@@ -3281,7 +3282,7 @@ def save_profile_results(
         raise ValueError("Metadata database and schema are required")
 
     run_id = run_info.get("run_id") or uuid4().hex
-    summary_json = json.dumps({**run_info, "run_id": run_id})
+    summary_json = _json_dumps_safe({**run_info, "run_id": run_id})
 
     runs_tbl = f"{_q(meta_db)}.{_q(meta_schema)}.DQ_PROFILE_RUN"
     cols_tbl = f"{_q(meta_db)}.{_q(meta_schema)}.DQ_PROFILE_COLUMN"
@@ -3326,92 +3327,101 @@ def save_profile_results(
     session.sql(f"DELETE FROM {runs_tbl} WHERE RUN_ID = ?", params=[run_id]).collect()
     session.sql(f"DELETE FROM {cols_tbl} WHERE RUN_ID = ?", params=[run_id]).collect()
 
-    session.sql(
-        f"INSERT INTO {runs_tbl} (RUN_ID, SUMMARY) SELECT ?, PARSE_JSON(?)",
-        params=[run_id, summary_json],
-    ).collect()
-
-    for row_data in rows:
-        normalized_row = normalize_profile_row(row_data)
-        column_name = normalized_row.get("column_name")
-        if not column_name:
-            continue
-        serialized = json.dumps(normalized_row)
-        semantic_type = normalized_row.get("semantic_type")
-        confidence_raw = normalized_row.get("confidence")
-        rationale = normalized_row.get("rationale")
-        signals_value = normalized_row.get("signals")
-        suggested_checks_value = normalized_row.get("suggested_checks")
-
-        if (
-            semantic_type is None
-            or confidence_raw is None
-            or (isinstance(rationale, str) and not rationale.strip())
-        ):
-            try:
-                (
-                    inferred_type,
-                    inferred_conf,
-                    inferred_rationale,
-                    inferred_min,
-                    inferred_max,
-                ) = _infer_semantic_type(normalized_row)
-            except Exception:
-                inferred_type = inferred_conf = inferred_rationale = None
-                inferred_min = inferred_max = None
-            else:
-                if semantic_type is None:
-                    semantic_type = inferred_type
-                if confidence_raw is None:
-                    confidence_raw = inferred_conf
-                if (isinstance(rationale, str) and not rationale.strip()) or rationale is None:
-                    rationale = inferred_rationale
-                if normalized_row.get("profile_min") is None and inferred_min is not None:
-                    normalized_row["profile_min"] = inferred_min
-                if normalized_row.get("profile_max") is None and inferred_max is not None:
-                    normalized_row["profile_max"] = inferred_max
-
-        try:
-            confidence = float(confidence_raw) if confidence_raw is not None else None
-        except Exception:
-            confidence = None
-
-        def _json_or_null(value: Any) -> str:
-            if value is None:
-                return "null"
-            try:
-                return json.dumps(value)
-            except Exception:
-                return "null"
-
-        signals_json = _json_or_null(signals_value)
-        suggested_checks_json = _json_or_null(suggested_checks_value)
-
+    try:
         session.sql(
-            f"""
-            INSERT INTO {cols_tbl} (
-                RUN_ID,
-                COLUMN_NAME,
-                PROFILE,
-                SEMANTIC_TYPE,
-                CONFIDENCE,
-                RATIONALE,
-                SIGNALS,
-                SUGGESTED_CHECKS
-            )
-            SELECT ?, ?, PARSE_JSON(?), ?, ?, ?, PARSE_JSON(?), PARSE_JSON(?)
-            """,
-            params=[
-                run_id,
-                column_name,
-                serialized,
-                semantic_type,
-                confidence,
-                rationale,
-                signals_json,
-                suggested_checks_json,
-            ],
+            f"INSERT INTO {runs_tbl} (RUN_ID, SUMMARY) SELECT ?, PARSE_JSON(?)",
+            params=[run_id, summary_json],
         ).collect()
+
+        for row_data in rows:
+            normalized_row = normalize_profile_row(row_data)
+            column_name = normalized_row.get("column_name")
+            if not column_name:
+                continue
+            serialized = _json_dumps_safe(normalized_row)
+            semantic_type = normalized_row.get("semantic_type")
+            confidence_raw = normalized_row.get("confidence")
+            rationale = normalized_row.get("rationale")
+            signals_value = normalized_row.get("signals")
+            suggested_checks_value = normalized_row.get("suggested_checks")
+
+            if (
+                semantic_type is None
+                or confidence_raw is None
+                or (isinstance(rationale, str) and not rationale.strip())
+            ):
+                try:
+                    (
+                        inferred_type,
+                        inferred_conf,
+                        inferred_rationale,
+                        inferred_min,
+                        inferred_max,
+                    ) = _infer_semantic_type(normalized_row)
+                except Exception:
+                    inferred_type = inferred_conf = inferred_rationale = None
+                    inferred_min = inferred_max = None
+                else:
+                    if semantic_type is None:
+                        semantic_type = inferred_type
+                    if confidence_raw is None:
+                        confidence_raw = inferred_conf
+                    if (isinstance(rationale, str) and not rationale.strip()) or rationale is None:
+                        rationale = inferred_rationale
+                    if (
+                        normalized_row.get("profile_min") is None
+                        and inferred_min is not None
+                    ):
+                        normalized_row["profile_min"] = inferred_min
+                    if (
+                        normalized_row.get("profile_max") is None
+                        and inferred_max is not None
+                    ):
+                        normalized_row["profile_max"] = inferred_max
+
+            try:
+                confidence = float(confidence_raw) if confidence_raw is not None else None
+            except Exception:
+                confidence = None
+
+            def _json_or_null(value: Any) -> str:
+                if value is None:
+                    return "null"
+                try:
+                    return _json_dumps_safe(value)
+                except Exception:
+                    return "null"
+
+            signals_json = _json_or_null(signals_value)
+            suggested_checks_json = _json_or_null(suggested_checks_value)
+
+            session.sql(
+                f"""
+                INSERT INTO {cols_tbl} (
+                    RUN_ID,
+                    COLUMN_NAME,
+                    PROFILE,
+                    SEMANTIC_TYPE,
+                    CONFIDENCE,
+                    RATIONALE,
+                    SIGNALS,
+                    SUGGESTED_CHECKS
+                )
+                SELECT ?, ?, PARSE_JSON(?), ?, ?, ?, PARSE_JSON(?), PARSE_JSON(?)
+                """,
+                params=[
+                    run_id,
+                    column_name,
+                    serialized,
+                    semantic_type,
+                    confidence,
+                    rationale,
+                    signals_json,
+                    suggested_checks_json,
+                ],
+            ).collect()
+    except Exception as exc:
+        return {"ok": False, "run_id": str(run_id), "error": str(exc)}
 
     return str(run_id)
 

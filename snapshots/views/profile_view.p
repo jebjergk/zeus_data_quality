@@ -1244,7 +1244,7 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
             rows_payload.append(normalized_column)
 
         try:
-            run_id = save_profile_results(
+            save_result = save_profile_results(
                 session=session,
                 meta_db=meta_db,
                 meta_schema=meta_schema,
@@ -1254,8 +1254,19 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
         except Exception as exc:  # pragma: no cover - Snowflake specific
             st.error(ui_strings.PROFILE_SAVE_ERROR.format(error=exc))
         else:
-            st.session_state[ui_keys.PROFILE_SAVE_RUN_ID] = run_id
-            st.success(ui_strings.PROFILE_SAVE_SUCCESS.format(run_id=run_id))
+            if isinstance(save_result, dict):
+                if not save_result.get("ok", False):
+                    error_text = save_result.get("error") or "Unknown error"
+                    st.error(ui_strings.PROFILE_SAVE_ERROR.format(error=error_text))
+                    run_id = ""
+                else:
+                    run_id = str(save_result.get("run_id") or "")
+            else:
+                run_id = str(save_result)
+
+            if run_id:
+                st.session_state[ui_keys.PROFILE_SAVE_RUN_ID] = run_id
+                st.success(ui_strings.PROFILE_SAVE_SUCCESS.format(run_id=run_id))
 
     if not save_toggle:
         st.session_state.pop(ui_keys.PROFILE_SAVE_RUN_ID, None)

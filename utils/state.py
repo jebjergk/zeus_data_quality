@@ -13,7 +13,13 @@ try:
 except Exception:  # pragma: no cover - numpy is optional at runtime
     _np = None
 
-import streamlit as st
+try:
+    import streamlit as st
+except ModuleNotFoundError:  # pragma: no cover - optional dependency for tests
+    class _StreamlitStateStub:
+        session_state: Dict[str, Any] = {}
+
+    st = _StreamlitStateStub()  # type: ignore[assignment]
 
 _INCLUDE_MAP = "profile_include_map"
 
