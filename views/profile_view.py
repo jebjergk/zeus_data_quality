@@ -673,11 +673,21 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
     if saved_profiles_enabled:
         saved_profile_runs = fetch_saved_profiles(session, meta_db, meta_schema, limit=200)
         st.session_state[SAVED_PROFILES_STATE] = saved_profile_runs
-        saved_profile_entries = list_saved_profiles(selected_fqn)
-        if not saved_profile_entries:
-            st.info(
-                "No saved profiles found (or metadata tables haven’t been created yet). "
-                "Run and save a profile first."
+        profile_list_response = list_saved_profiles(selected_fqn)
+        if profile_list_response.get("ok"):
+            saved_profile_entries = profile_list_response.get("items", [])
+            if not saved_profile_entries:
+                st.info(
+                    "No saved profiles found (or metadata tables haven’t been created yet). "
+                    "Run and save a profile first."
+                )
+        else:
+            logging.warning(
+                "Saved profile listing failed",
+                extra={
+                    "table_fqn": selected_fqn or "",
+                    "err": profile_list_response.get("err"),
+                },
             )
     else:
         st.session_state.pop(SAVED_PROFILES_STATE, None)
@@ -688,10 +698,14 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
         run_id = str(entry.get("id", "")).strip()
         if not run_id:
             continue
-        timestamp_text = entry.get("timestamp") or ""
         label_name = entry.get("name") or "Unnamed"
-        if timestamp_text:
-            label = f"{label_name} — {timestamp_text}"
+        created_at_iso = (
+            entry.get("created_at_iso")
+            or entry.get("timestamp")
+            or ""
+        )
+        if created_at_iso:
+            label = f"{label_name} — {created_at_iso}"
         else:
             label = f"{label_name} — {run_id}"
         dropdown_run_ids.append(run_id)
