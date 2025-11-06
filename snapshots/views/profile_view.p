@@ -1766,6 +1766,39 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
             }
             st.write(summary)
 
+            debug_info = diagnostics_response.get("debug")
+            if isinstance(debug_info, dict):
+                debug_summary: Dict[str, Any] = {}
+                if "total_rows" in debug_info:
+                    debug_summary["total_rows"] = debug_info.get("total_rows")
+                if "canon" in debug_info:
+                    debug_summary["canon"] = debug_info.get("canon")
+                if debug_summary:
+                    st.write(debug_summary)
+
+                raw_samples = debug_info.get("samples")
+                if not raw_samples:
+                    raw_samples = debug_info.get("table_fqn_samples")
+
+                sample_rows: List[Dict[str, Any]] = []
+                if isinstance(raw_samples, dict):
+                    raw_samples = list(raw_samples.values())
+                if isinstance(raw_samples, Sequence) and not isinstance(
+                    raw_samples, (str, bytes, bytearray)
+                ):
+                    for sample in raw_samples:
+                        if isinstance(sample, dict):
+                            sample_value = sample.get("table_fqn") or sample.get("value")
+                        else:
+                            sample_value = sample
+                        if sample_value is None:
+                            continue
+                        sample_rows.append({"table_fqn": str(sample_value)})
+
+                if sample_rows:
+                    st.caption("Sample saved profile table FQNs")
+                    st.table(pd.DataFrame(sample_rows))
+
             if summary["ok"]:
                 if items:
                     preview_rows = [
