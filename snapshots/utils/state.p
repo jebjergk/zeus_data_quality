@@ -587,27 +587,36 @@ def _resolve_profiles_session() -> Any:
 def verify_profiles_store() -> Dict[str, Any]:
     """Check whether the saved profiles table exists in Snowflake."""
 
-    db_part, schema_part, table_part = _store_fqn_parts()
+    parts = _split_relation_parts(PROFILES_TABLE_FQN)
+    if len(parts) >= 3:
+        db_part, schema_part, table_part = parts[-3], parts[-2], parts[-1]
+    else:
+        return {"ok": False, "fqn": PROFILES_TABLE_FQN, "err": "invalid_fqn"}
+
     db_name = _clean_identifier(db_part[0])
-    schema_name = _info_schema_name(schema_part[0], schema_part[1])
-    table_name = _info_schema_name(table_part[0], table_part[1])
+    schema_name = _clean_identifier(schema_part[0])
+    table_name = _clean_identifier(table_part[0])
 
     if not (db_name and schema_name and table_name):
         return {"ok": False, "fqn": PROFILES_TABLE_FQN, "err": "invalid_fqn"}
+
+    db_upper = db_name.upper()
+    schema_upper = schema_name.upper()
+    table_upper = table_name.upper()
 
     profiles_session = _resolve_profiles_session()
     if profiles_session is None:
         return {"ok": False, "fqn": PROFILES_TABLE_FQN, "err": "session_unavailable"}
 
-    db_identifier = _quote_identifier(db_name)
+    db_identifier = _quote_identifier(db_upper)
     if not db_identifier:
         return {"ok": False, "fqn": PROFILES_TABLE_FQN, "err": "invalid_database"}
 
     sql = (
-        f"SELECT 1 FROM {db_identifier}.INFORMATION_SCHEMA.TABLES "
-        "WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? LIMIT 1"
+        f"SELECT COUNT(*) AS c FROM {db_identifier}.INFORMATION_SCHEMA.TABLES "
+        "WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?"
     )
-    params = [schema_name, table_name]
+    params = [schema_upper, table_upper]
 
     try:
         rows = _get_session().sql(sql, params=params).collect()
@@ -618,10 +627,27 @@ def verify_profiles_store() -> Dict[str, Any]:
             "err": str(exc) or "verification_failed",
         }
 
-    if not rows:
-        return {"ok": False, "fqn": PROFILES_TABLE_FQN, "err": "not_found"}
+    count = 0
+    if rows:
+        row = rows[0]
+        try:
+            count = int(row[0])
+        except Exception:  # pragma: no cover - defensive
+            count = int(getattr(row, "c", 0) or getattr(row, "C", 0) or 0)
 
-    return {"ok": True, "fqn": PROFILES_TABLE_FQN, "err": None}
+    logger.info(
+        "Profiles store verification",
+        extra={"db": db_upper, "schema": schema_upper, "table": table_upper, "count": count},
+    )
+
+    if count > 0:
+        return {"ok": True, "fqn": PROFILES_TABLE_FQN}
+
+    return {
+        "ok": False,
+        "fqn": PROFILES_TABLE_FQN,
+        "err": "profiles table missing",
+    }
 
 
 def save_profile(profile: Any) -> Dict[str, Any]:
