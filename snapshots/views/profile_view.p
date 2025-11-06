@@ -1761,6 +1761,8 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
         diagnostics_response = profile_list_response or list_saved_profiles(
             current_table_fqn
         )
+        if not isinstance(diagnostics_response, dict):
+            diagnostics_response = {}
         store_verification = verify_profiles_store()
         store_ok = bool(store_verification.get("ok"))
         store_err = store_verification.get("err")
