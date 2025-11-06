@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import json
+import logging
 from datetime import date, datetime
 from decimal import Decimal
-from typing import Any, Dict, Iterable, List, MutableMapping, Sequence
+from typing import Any, Dict, Iterable, List, MutableMapping, Optional, Sequence
 from uuid import UUID
 
 try:
@@ -21,7 +22,11 @@ except ModuleNotFoundError:  # pragma: no cover - optional dependency for tests
 
     st = _StreamlitStateStub()  # type: ignore[assignment]
 
+logger = logging.getLogger(__name__)
+
+
 _INCLUDE_MAP = "profile_include_map"
+_SAVED_PROFILES_KEY = "saved_profiles"
 
 
 def _json_default(value: Any) -> Any:
@@ -195,3 +200,176 @@ def prune_includes(valid_keys: Iterable[str]) -> None:
     st.session_state[_INCLUDE_MAP] = {
         key: value for key, value in include_map.items() if key in valid
     }
+
+
+def _get_saved_profiles_container(*, create: bool = False) -> Dict[str, Dict[str, Any]]:
+    """Return the saved profiles state container, optionally creating it."""
+
+    existing = st.session_state.get(_SAVED_PROFILES_KEY)
+    if isinstance(existing, dict):
+        return existing
+    if isinstance(existing, MutableMapping):
+        materialized = dict(existing)
+        st.session_state[_SAVED_PROFILES_KEY] = materialized
+        return materialized
+    if create:
+        container: Dict[str, Dict[str, Any]] = {}
+        st.session_state[_SAVED_PROFILES_KEY] = container
+        return container
+    return {}
+
+
+def save_profile(table_fqn: str, profile_id: str, profile: Any) -> Dict[str, Any]:
+    """Persist a profile payload into session state with structured logging."""
+
+    table_key = (table_fqn or "").strip()
+    profile_key = (profile_id or "").strip()
+
+    try:
+        if not table_key:
+            raise ValueError("table_fqn is required")
+        if not profile_key:
+            raise ValueError("profile_id is required")
+
+        container = _get_saved_profiles_container(create=True)
+        bucket = container.get(table_key)
+        if not isinstance(bucket, dict):
+            bucket = {}
+            container[table_key] = bucket
+
+        normalized_profile = normalize_saved_profile(profile)
+        bucket[profile_key] = normalized_profile
+        st.session_state[_SAVED_PROFILES_KEY] = container
+
+        logger.info(
+            "save_profile ok table_fqn=%s profile_id=%s",
+            table_key,
+            profile_key,
+        )
+        return {
+            "ok": True,
+            "table_fqn": table_key,
+            "profile_id": profile_key,
+            "profile": normalized_profile,
+        }
+    except Exception as exc:  # pragma: no cover - defensive logging path
+        logger.error(
+            "save_profile failed table_fqn=%s profile_id=%s error=%s",
+            table_fqn,
+            profile_id,
+            exc,
+            exc_info=True,
+        )
+        return {
+            "ok": False,
+            "err": str(exc),
+            "where": "save_profile",
+            "table_fqn": str(table_fqn),
+            "profile_id": str(profile_id),
+        }
+
+
+def list_saved_profiles(table_fqn: Optional[str] = None) -> Dict[str, Any]:
+    """Return saved profiles for a table with explicit success or failure."""
+
+    table_key = (table_fqn or "").strip() if table_fqn is not None else None
+
+    try:
+        container = _get_saved_profiles_container(create=False)
+        profiles_raw: List[Any]
+        if table_key:
+            bucket = container.get(table_key)
+            profiles_raw = list(bucket.values()) if isinstance(bucket, dict) else []
+        else:
+            profiles_raw = []
+            for bucket in container.values():
+                if isinstance(bucket, dict):
+                    profiles_raw.extend(bucket.values())
+
+        profiles = normalize_saved_profiles(profiles_raw)
+        logger.info(
+            "list_saved_profiles ok table_fqn=%s count=%d",
+            table_key or "*",
+            len(profiles),
+        )
+        return {
+            "ok": True,
+            "table_fqn": table_key,
+            "profiles": profiles,
+        }
+    except Exception as exc:  # pragma: no cover - defensive logging path
+        logger.error(
+            "list_saved_profiles failed table_fqn=%s error=%s",
+            table_fqn,
+            exc,
+            exc_info=True,
+        )
+        return {
+            "ok": False,
+            "err": str(exc),
+            "where": "list_saved_profiles",
+            "table_fqn": table_key,
+        }
+
+
+def load_profile_by_id(table_fqn: str, profile_id: str) -> Dict[str, Any]:
+    """Return a saved profile payload for ``profile_id`` or a failure payload."""
+
+    table_key = (table_fqn or "").strip()
+    profile_key = (profile_id or "").strip()
+
+    try:
+        if not table_key:
+            raise ValueError("table_fqn is required")
+        if not profile_key:
+            raise ValueError("profile_id is required")
+
+        container = _get_saved_profiles_container(create=False)
+        bucket = container.get(table_key)
+        profile_raw: Optional[Any]
+        if isinstance(bucket, dict):
+            profile_raw = bucket.get(profile_key)
+        else:
+            profile_raw = None
+
+        if profile_raw is None:
+            logger.info(
+                "load_profile_by_id miss table_fqn=%s profile_id=%s",
+                table_key,
+                profile_key,
+            )
+            return {
+                "ok": False,
+                "err": "profile not found",
+                "where": "load_profile_by_id",
+                "table_fqn": table_key,
+                "profile_id": profile_key,
+            }
+
+        profile = normalize_saved_profile(profile_raw)
+        logger.info(
+            "load_profile_by_id ok table_fqn=%s profile_id=%s",
+            table_key,
+            profile_key,
+        )
+        return {
+            "ok": True,
+            "table_fqn": table_key,
+            "profile_id": profile_key,
+            "profile": profile,
+        }
+    except Exception as exc:  # pragma: no cover - defensive logging path
+        logger.error(
+            "load_profile_by_id failed table_fqn=%s profile_id=%s error=%s",
+            table_fqn,
+            profile_id,
+            exc,
+            exc_info=True,
+        )
+        return {
+            "ok": False,
+            "err": str(exc),
+            "where": "load_profile_by_id",
+            "table_fqn": str(table_fqn),
+            "profile_id": str(profile_id),
+        }
