@@ -677,10 +677,13 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
     saved_profiles_enabled = bool(session and meta_db and meta_schema)
     saved_profile_runs: List[Dict[str, Any]] = []
     saved_profile_entries: List[Dict[str, Any]] = []
+    current_table_fqn = selected_fqn or st.session_state.get(
+        ui_keys.PROFILE_TARGET_FQN
+    )
+    profile_list_response: Dict[str, Any] = {}
     if saved_profiles_enabled:
         saved_profile_runs = fetch_saved_profiles(session, meta_db, meta_schema, limit=200)
         st.session_state[SAVED_PROFILES_STATE] = saved_profile_runs
-        current_table_fqn = selected_fqn or st.session_state.get(ui_keys.PROFILE_TARGET_FQN)
         profile_list_response = list_saved_profiles(current_table_fqn)
         canonical_fqn = (
             profile_list_response.get("canonical_table_fqn")
@@ -1735,12 +1738,44 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
 
             st.table(tv_df)
 
-    if DEBUG_PROFILING and profile_result:
-        with st.expander(ui_strings.PROFILE_DEBUG_PAYLOAD_TITLE, expanded=False):
-            st.json(profile_result)
-        include_snapshot = st.session_state.get(PROFILE_INCLUDE_COLS_STATE)
-        if include_snapshot:
-            with st.expander(
-                ui_strings.PROFILE_DEBUG_INCLUDE_MAP_TITLE, expanded=False
-            ):
-                st.write(include_snapshot)
+    if DEBUG_PROFILING:
+        if profile_result:
+            with st.expander(ui_strings.PROFILE_DEBUG_PAYLOAD_TITLE, expanded=False):
+                st.json(profile_result)
+            include_snapshot = st.session_state.get(PROFILE_INCLUDE_COLS_STATE)
+            if include_snapshot:
+                with st.expander(
+                    ui_strings.PROFILE_DEBUG_INCLUDE_MAP_TITLE, expanded=False
+                ):
+                    st.write(include_snapshot)
+
+        diagnostics_response = profile_list_response or list_saved_profiles(
+            current_table_fqn
+        )
+        with st.expander("Debug · Profiling Diagnostics", expanded=False):
+            st.text(f"editor_target_fqn: {str(editor_target_fqn or '')}")
+
+            items = list(diagnostics_response.get("items") or [])
+            summary: Dict[str, Any] = {
+                "ok": bool(diagnostics_response.get("ok")),
+                "len": len(items),
+            }
+            if diagnostics_response.get("err"):
+                summary["err"] = diagnostics_response.get("err")
+            st.write(summary)
+
+            if summary["ok"]:
+                if items:
+                    preview_rows = [
+                        {
+                            "id": item.get("id"),
+                            "name": item.get("name"),
+                            "created_at_iso": item.get("created_at_iso"),
+                            "table_fqn": item.get("table_fqn"),
+                        }
+                        for item in items[:5]
+                    ]
+                    if preview_rows:
+                        st.table(pd.DataFrame(preview_rows))
+                else:
+                    st.info("No items returned for this FQN")
