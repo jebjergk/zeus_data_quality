@@ -650,6 +650,56 @@ def verify_profiles_store() -> Dict[str, Any]:
     }
 
 
+def has_profiles_for_fqn(table_fqn: str) -> Dict[str, Any]:
+    """Return a lightweight count of saved profiles for the given table FQN."""
+
+    canon = _canon_fqn(table_fqn or "")
+    context = {
+        "where": "has_profiles_for_fqn",
+        "table_fqn": table_fqn or "",
+        "table_fqn_canon": canon,
+        "store_fqn": PROFILES_TABLE_FQN,
+        "canon": canon,
+    }
+
+    if not canon:
+        logger.info(
+            "Saved profile count lookup skipped due to empty canonical FQN",
+            extra={**context, "count": 0, "reason": "empty_canon"},
+        )
+        return {"ok": True, "count": 0, "canon": canon}
+
+    sql = (
+        f"SELECT COUNT(*) AS c FROM {PROFILES_TABLE_FQN} "
+        "WHERE UPPER(TABLE_FQN) = ?"
+    )
+
+    try:
+        rows = _get_session().sql(sql, params=[canon]).collect()
+    except Exception as exc:  # pragma: no cover - defensive
+        err_msg = str(exc) or "profile_count_failed"
+        logger.error(
+            "Failed to count saved profiles",
+            extra={**context, "err": err_msg},
+            exc_info=True,
+        )
+        return {"ok": False, "err": err_msg}
+
+    count = 0
+    if rows:
+        row = rows[0]
+        try:
+            count = int(row[0])
+        except Exception:  # pragma: no cover - defensive
+            count = int(getattr(row, "c", 0) or getattr(row, "C", 0) or 0)
+
+    logger.info(
+        "Saved profile count lookup",
+        extra={**context, "count": count},
+    )
+    return {"ok": True, "count": count, "canon": canon}
+
+
 def save_profile(profile: Any) -> Dict[str, Any]:
     """Persist a saved profile payload into session state."""
 
