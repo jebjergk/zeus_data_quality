@@ -621,22 +621,7 @@ def save_profile(profile: Any) -> Dict[str, Any]:
     """Persist a saved profile payload into session state."""
 
     context = {"where": "save_profile", "store_fqn": PROFILES_TABLE_FQN}
-    verification = verify_profiles_store()
-    if not verification.get("ok"):
-        logger.info(
-            "Profiles store unavailable",
-            extra={
-                **context,
-                "table_fqn_raw": "",
-                "table_fqn_canon": "",
-                "verification_err": verification.get("err") or "",
-            },
-        )
-        return {
-            "ok": False,
-            "err": "profiles table missing",
-            "fqn": PROFILES_TABLE_FQN,
-        }
+    context_with_table = dict(context)
     try:
         normalized_profile = normalize_saved_profile(profile)
         if not normalized_profile:
@@ -649,6 +634,62 @@ def save_profile(profile: Any) -> Dict[str, Any]:
         run_id, summary_map = _extract_run_identity(run_map)
         if not run_id:
             raise ValueError("Profile payload is missing a run identifier")
+
+        table_fqn_raw = _extract_table_identifiers(run_map, summary_map)[2]
+        canonical_table_fqn = _canon_fqn(table_fqn_raw)
+
+        if not canonical_table_fqn:
+            for candidate in (
+                run_map.get("target_fqn"),
+                summary_map.get("target_fqn"),
+                summary_map.get("target_table"),
+                summary_map.get("target"),
+                run_map.get("target"),
+            ):
+                if candidate is None:
+                    continue
+                candidate_text = str(candidate).strip()
+                if not candidate_text:
+                    continue
+                candidate_canon = _canon_fqn(candidate_text)
+                if candidate_canon:
+                    table_fqn_raw = candidate_text
+                    canonical_table_fqn = candidate_canon
+                    break
+
+        context_with_table = {
+            **context,
+            "table_fqn_raw": table_fqn_raw or "",
+            "table_fqn_canonical": canonical_table_fqn,
+            "table_fqn_canon": canonical_table_fqn,
+        }
+
+        if not canonical_table_fqn:
+            logger.error(
+                "Cannot save profile without a table FQN",
+                extra={
+                    **context_with_table,
+                    "profile_id": run_id,
+                    "reason": "empty_fqn",
+                },
+            )
+            return {"ok": False, "err": "empty_fqn"}
+
+        verification = verify_profiles_store()
+        if not verification.get("ok"):
+            logger.info(
+                "Profiles store unavailable",
+                extra={
+                    **context_with_table,
+                    "profile_id": run_id,
+                    "verification_err": verification.get("err") or "",
+                },
+            )
+            return {
+                "ok": False,
+                "err": "profiles table missing",
+                "fqn": PROFILES_TABLE_FQN,
+            }
 
         existing = normalize_saved_profiles(
             st.session_state.get(SAVED_PROFILES_STATE, [])
@@ -669,24 +710,15 @@ def save_profile(profile: Any) -> Dict[str, Any]:
 
         st.session_state[SAVED_PROFILES_STATE] = updated
 
-        table_fqn_raw = _extract_table_identifiers(run_map, summary_map)[2]
-        canonical_table_fqn = _canon_fqn(table_fqn_raw)
-
-        if canonical_table_fqn:
-            current_run_dict["table_fqn"] = canonical_table_fqn
-        elif table_fqn_raw:
-            current_run_dict["table_fqn"] = table_fqn_raw
+        current_run_dict["table_fqn"] = canonical_table_fqn
 
         serialized_profile = _json_dumps_safe(current_run_dict)
 
         logger.info(
             "Saved profile payload",
             extra={
-                **context,
+                **context_with_table,
                 "profile_id": run_id,
-                "table_fqn_raw": table_fqn_raw,
-                "table_fqn_canonical": canonical_table_fqn,
-                "table_fqn_canon": canonical_table_fqn,
                 "store_size": len(updated),
             },
         )
@@ -695,7 +727,7 @@ def save_profile(profile: Any) -> Dict[str, Any]:
         err_msg = str(exc)
         logger.error(
             "Failed to save profile",
-            extra={**context, "err": err_msg},
+            extra={**context_with_table, "err": err_msg},
             exc_info=True,
         )
         return {"ok": False, "err": err_msg}
@@ -704,10 +736,28 @@ def save_profile(profile: Any) -> Dict[str, Any]:
 def list_saved_profiles(table_fqn: Optional[str]) -> _ProfileListResult:
     """Return normalised saved profile entries for the dropdown."""
 
+    canon_filter = _canon_fqn(table_fqn or "")
+    if not (table_fqn and canon_filter):
+        empty_context = {
+            "where": "list_profiles",
+            "table_fqn": table_fqn or "",
+            "table_fqn_raw": table_fqn or "",
+            "canonical_table_fqn": canon_filter,
+            "table_fqn_canon": canon_filter,
+            "filter_canon_fqn": canon_filter,
+            "reason": "empty_fqn",
+        }
+        logger.info(
+            "Skipping saved profile listing due to empty table FQN",
+            extra=empty_context,
+        )
+        return _ProfileListResult(
+            {"ok": True, "items": [], "debug": {"reason": "empty_fqn"}}
+        )
+
     filter_db, filter_schema, filter_table, canonical_fqn = _normalise_table_filter(
         table_fqn
     )
-    canon_filter = _canon_fqn(table_fqn or "")
     context = {
         "where": "list_profiles",
         "table_fqn": table_fqn or "",
