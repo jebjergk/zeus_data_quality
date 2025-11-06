@@ -90,6 +90,7 @@ from services.configs import save_config_and_checks, delete_config_full
 from services.state import get_state, set_state
 from utils.checkdefs import build_rule_for_column_check, build_rule_for_table_check
 from utils.configs import get_metadata_namespace, get_proc_name
+from utils.flags import DEBUG_PROFILING
 from views.profile_view import render_profile
 from views.table_picker import stateless_table_picker, session_cache_token
 from views.docs_view import render_docs as render_docs_view
@@ -1704,6 +1705,10 @@ if page == "cfg":
     else:
         render_config_editor()
 elif page == "profile":
+    if DEBUG_PROFILING:
+        st.caption("🛠️ Debug: entering Profile view")
+        target_fqn = st.session_state.get("editor_target_fqn") or "—"
+        st.caption(f"🧭 Target FQN: {target_fqn}")
     render_profile(session, METADATA_DB, METADATA_SCHEMA)
 elif page == "monitor":
     render_monitor()
