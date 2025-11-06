@@ -91,7 +91,7 @@ from services.state import get_state, set_state
 from utils.checkdefs import build_rule_for_column_check, build_rule_for_table_check
 from utils.configs import get_metadata_namespace, get_proc_name
 from utils.flags import DEBUG_PROFILING
-from views.profile_view import render_profile
+from views import profile_view
 from views.table_picker import stateless_table_picker, session_cache_token
 from views.docs_view import render_docs as render_docs_view
 from views.config_editor import render_row_count_preview
@@ -107,6 +107,29 @@ CHECKS_TBL = f"{METADATA_DB}.{METADATA_SCHEMA}.DQ_CHECK"
 # RUN_RESULTS_TBL already defined above
 
 st.set_page_config(page_title="Zeus Data Quality", layout="wide")
+
+try:
+    _debug_param = st.query_params.get("debug")  # type: ignore[attr-defined]
+except Exception:
+    _debug_param = None
+
+if isinstance(_debug_param, list):
+    _debug_candidate = next(
+        (item for item in _debug_param if isinstance(item, str)), None
+    )
+elif isinstance(_debug_param, str):
+    _debug_candidate = _debug_param
+else:
+    _debug_candidate = None
+
+_debug_value = (_debug_candidate or "").strip().lower()
+_debug_override = _debug_value in {"1", "true", "yes"}
+DEBUG_PROFILING_ENABLED = bool(DEBUG_PROFILING or _debug_override)
+
+# Propagate the effective debug flag to the profile view so diagnostics honour
+# the query parameter override without requiring signature changes.
+profile_view.DEBUG_PROFILING_OVERRIDE = DEBUG_PROFILING_ENABLED  # type: ignore[attr-defined]
+profile_view.DEBUG_PROFILING = DEBUG_PROFILING_ENABLED
 
 # ---------- Styling (simple Snowflake-ish) ----------
 st.markdown("""
@@ -1705,11 +1728,11 @@ if page == "cfg":
     else:
         render_config_editor()
 elif page == "profile":
-    if DEBUG_PROFILING:
+    if DEBUG_PROFILING_ENABLED:
         st.caption("🛠️ Debug: entering Profile view")
         target_fqn = st.session_state.get("editor_target_fqn") or "—"
         st.caption(f"🧭 Target FQN: {target_fqn}")
-    render_profile(session, METADATA_DB, METADATA_SCHEMA)
+    profile_view.render_profile(session, METADATA_DB, METADATA_SCHEMA)
 elif page == "monitor":
     render_monitor()
 elif page == "docs":
