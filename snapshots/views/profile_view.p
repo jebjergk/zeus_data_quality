@@ -82,6 +82,10 @@ CONFIDENCE_MEDIUM_THRESHOLD = 75.0
 
 PROFILE_INCLUDE_COLS_STATE = "profile_include_cols"
 PROFILE_INCLUDE_TOKEN_STATE = "profile_include_token"
+LAST_PROFILE_SUMMARY_STATE = "last_profile_summary"
+LAST_PROFILE_ROWS_STATE = "last_profile_rows"
+LAST_PROFILE_TARGET_STATE = "last_profile_target_table"
+LAST_PROFILE_TOP_N_STATE = "last_profile_top_n"
 
 
 def _safe_int(value: Any) -> Optional[int]:
@@ -1137,11 +1141,28 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
         selected_columns_from_grid: List[str] = []
 
         if not profile_result:
+            st.session_state.pop(LAST_PROFILE_SUMMARY_STATE, None)
+            st.session_state.pop(LAST_PROFILE_ROWS_STATE, None)
+            st.session_state.pop(LAST_PROFILE_TARGET_STATE, None)
+            st.session_state.pop(LAST_PROFILE_TOP_N_STATE, None)
             if not DEBUG_PROFILING:
                 return
 
         if profile_result:
                 summary = profile_result.get("summary", {})
+                summary_copy = dict(summary) if isinstance(summary, dict) else summary
+                rows_copy: List[Dict[str, Any]] = []
+                for column_payload in profile_result.get("columns", []) or []:
+                    if isinstance(column_payload, dict):
+                        rows_copy.append(dict(column_payload))
+                    else:
+                        rows_copy.append(column_payload)
+                st.session_state[LAST_PROFILE_SUMMARY_STATE] = summary_copy
+                st.session_state[LAST_PROFILE_ROWS_STATE] = rows_copy
+                st.session_state[LAST_PROFILE_TARGET_STATE] = (
+                    profile_result.get("target_table") or current_target_fqn
+                )
+                st.session_state[LAST_PROFILE_TOP_N_STATE] = profile_result.get("top_n")
                 metrics_cols = st.columns(3)
                 metrics_cols[0].metric(
                     ui_strings.PROFILE_METRIC_ROWS,
@@ -1228,6 +1249,11 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
                         ui_strings.PROFILE_FILTER_SEMANTIC_REFERENCE, value=False
                     )
 
+                last_profile_summary = st.session_state.get(LAST_PROFILE_SUMMARY_STATE)
+                last_profile_rows = st.session_state.get(LAST_PROFILE_ROWS_STATE) or []
+                last_profile_target = st.session_state.get(LAST_PROFILE_TARGET_STATE)
+                last_profile_top_n = st.session_state.get(LAST_PROFILE_TOP_N_STATE)
+
                 save_enabled = bool(session and meta_db and meta_schema)
                 if not save_enabled:
                     st.session_state.pop(ui_keys.PROFILE_SAVE_TOGGLE, None)
@@ -1239,7 +1265,10 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
                     if save_enabled
                     else ui_strings.PROFILE_SAVE_HELP_DISABLED
                 )
-                save_disabled = (not save_enabled) or busy_profiling
+                save_payload_ready = (
+                    last_profile_summary is not None and len(last_profile_rows) > 0
+                )
+                save_disabled = (not save_enabled) or busy_profiling or (not save_payload_ready)
                 save_toggle = st.toggle(
                     ui_strings.PROFILE_SAVE_LABEL,
                     key=ui_keys.PROFILE_SAVE_TOGGLE,
@@ -1256,20 +1285,32 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
                     and save_enabled
                     and not prev_toggle
                     and not busy_profiling
+                    and save_payload_ready
                 )
                 if should_save_profile:
                     st.session_state["busy_profiling"] = True
                     busy_profiling = True
-                    run_info = {**(profile_result.get("summary") or {})}
+                    summary_payload: Dict[str, Any] = {}
+                    if isinstance(last_profile_summary, dict):
+                        summary_payload.update(last_profile_summary)
+                    run_info = {**summary_payload}
                     run_info.update(
                         {
-                            "target_table": profile_result.get("target_table"),
-                            "top_n": profile_result.get("top_n"),
+                            "target_table": (
+                                last_profile_target
+                                or profile_result.get("target_table")
+                                or current_target_fqn
+                            ),
+                            "top_n": (
+                                last_profile_top_n
+                                if last_profile_top_n is not None
+                                else profile_result.get("top_n")
+                            ),
                             "saved_at": datetime.utcnow().isoformat() + "Z",
                         }
                     )
                     rows_payload: List[Dict[str, Any]] = []
-                    for column_profile in profile_result.get("columns", []):
+                    for column_profile in last_profile_rows:
                         normalized_column = normalize_profile_row(column_profile)
                         column_name = normalized_column.get("column_name")
                         if not column_name:
