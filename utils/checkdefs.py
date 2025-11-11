@@ -59,13 +59,12 @@ def _q(ident: str) -> str:
     return '.'.join(_quote_identifier(part) for part in parts)
 
 
-# Snowflake uses RE2; no lookahead/lookbehind/backrefs.
+# Snowflake uses RE2; avoid lookaheads/lookbehinds and embed via params.
 _NUMERIC_RE = re.compile(r"^[+-]?(?:\d+)(?:\.\d+)?$")
 
 
 def _re2_ipv4_pattern() -> str:
-    octet = r"(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])"
-    return rf"^{octet}(?:\\.{octet}){{3}}$"
+    return r"^((25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\.){3}(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])$"
 
 
 def _format_literal(value: object) -> str:
