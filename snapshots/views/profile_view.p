@@ -110,6 +110,14 @@ def _sync_last_profile_session(
         st.session_state[LAST_PROFILE_ROWS_STATE] = []
         st.session_state.pop(LAST_PROFILE_TARGET_STATE, None)
         st.session_state.pop(LAST_PROFILE_TOP_N_STATE, None)
+        if DEBUG_PROFILING:
+            logging.getLogger(__name__).info(
+                "store_result ok=%s rows=%s err=%s fqn=%s",
+                False,
+                0,
+                None,
+                target_table,
+            )
         return
 
     summary_payload = dict(profile_payload.get("summary") or {})
@@ -133,9 +141,20 @@ def _sync_last_profile_session(
     st.session_state[LAST_PROFILE_SUMMARY_STATE] = summary_payload
     st.session_state[LAST_PROFILE_TARGET_STATE] = target_table
     st.session_state[LAST_PROFILE_ERROR_STATE] = None
+    if DEBUG_PROFILING:
+        rows_payload = profile_payload.get("columns")
+        row_count = len(rows_payload) if isinstance(rows_payload, list) else 0
+        logging.getLogger(__name__).info(
+            "store_result ok=%s rows=%s err=%s fqn=%s",
+            True,
+            row_count,
+            None,
+            target_table,
+        )
 
 
 def _record_last_profile_error(message: Optional[str]) -> None:
+    target_before_clear = st.session_state.get(LAST_PROFILE_TARGET_STATE)
     st.session_state[LAST_PROFILE_SUMMARY_STATE] = None
     st.session_state[LAST_PROFILE_ROWS_STATE] = []
     st.session_state[LAST_PROFILE_ERROR_STATE] = message if message else None
@@ -145,6 +164,14 @@ def _record_last_profile_error(message: Optional[str]) -> None:
     st.session_state.pop(PROFILE_INCLUDE_TOKEN_STATE, None)
     st.session_state.pop(ui_keys.PROFILE_RESULTS_STATE, None)
     st.session_state.pop(ui_keys.PROFILE_SELECTION_COUNTS, None)
+    if DEBUG_PROFILING:
+        logging.getLogger(__name__).info(
+            "store_result ok=%s rows=%s err=%s fqn=%s",
+            False,
+            0,
+            message if message else None,
+            target_before_clear,
+        )
 
 
 def _safe_int(value: Any) -> Optional[int]:
