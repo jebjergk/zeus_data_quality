@@ -53,33 +53,14 @@ ALLOWED_PAGES = {"home", "cfg", "profile", "monitor", "docs"}
 DEFAULT_ACTIVE_VIEW = "home"
 
 if "active_view" not in st.session_state:
-    st.session_state["active_view"] = "home"
-    default_view = st.session_state["active_view"]
-    try:
-        params = dict(st.query_params)  # type: ignore[attr-defined]
-    except Exception:
-        params = {}
-    page_param = params.get("page") if isinstance(params, dict) else None
-    candidate: Optional[str]
-    if isinstance(page_param, list):
-        candidate = next((item for item in page_param if isinstance(item, str)), None)
-    elif isinstance(page_param, str):
-        candidate = page_param
-    else:
-        candidate = None
-    if candidate:
-        candidate_lower = candidate.strip().lower()
-        if candidate_lower in ALLOWED_PAGES:
-            default_view = candidate_lower
-    st.session_state["active_view"] = default_view
-    if "page" not in st.session_state:
-        st.session_state["page"] = default_view
-    st.session_state["_last_query_page"] = default_view
+    st.session_state["active_view"] = DEFAULT_ACTIVE_VIEW
     logging.info("route:init %s", st.session_state["active_view"])
-elif "_last_query_page" not in st.session_state:
-    st.session_state["_last_query_page"] = st.session_state.get(
-        "active_view", DEFAULT_ACTIVE_VIEW
-    )
+
+if "_last_query_page" not in st.session_state:
+    st.session_state["_last_query_page"] = st.session_state["active_view"]
+
+if "page" not in st.session_state:
+    st.session_state["page"] = st.session_state["active_view"]
 
 
 def set_view(view: str) -> None:
@@ -1714,13 +1695,13 @@ if (
     navigate_to(page_state_value)
 if "cfg_mode" not in st.session_state:
     st.session_state["cfg_mode"] = "list"
-current_view = st.session_state.get("active_view", DEFAULT_ACTIVE_VIEW)
+view = st.session_state.get("active_view", DEFAULT_ACTIVE_VIEW)
 with st.sidebar:
     st.header("Zeus DQ")
     st.button(
         "🏠 Overview",
         use_container_width=True,
-        type="primary" if current_view == "home" else "secondary",
+        type="primary" if view == "home" else "secondary",
         key="nav_home",
         on_click=navigate_to,
         args=("home",),
@@ -1728,7 +1709,7 @@ with st.sidebar:
     st.button(
         "⚙️ Configurations",
         use_container_width=True,
-        type="primary" if current_view == "cfg" else "secondary",
+        type="primary" if view == "cfg" else "secondary",
         key="nav_cfg",
         on_click=navigate_to,
         args=("cfg",),
@@ -1736,7 +1717,7 @@ with st.sidebar:
     st.button(
         "🧪 Profile Table",
         use_container_width=True,
-        type="primary" if current_view == "profile" else "secondary",
+        type="primary" if view == "profile" else "secondary",
         key="nav_profile",
         on_click=navigate_to,
         args=("profile",),
@@ -1744,7 +1725,7 @@ with st.sidebar:
     st.button(
         "📊 Monitor",
         use_container_width=True,
-        type="primary" if current_view == "monitor" else "secondary",
+        type="primary" if view == "monitor" else "secondary",
         key="nav_monitor",
         on_click=navigate_to,
         args=("monitor",),
@@ -1752,13 +1733,13 @@ with st.sidebar:
     st.button(
         "📘 Documentation",
         use_container_width=True,
-        type="primary" if current_view == "docs" else "secondary",
+        type="primary" if view == "docs" else "secondary",
         key="nav_docs",
         on_click=navigate_to,
         args=("docs",),
     )
     st.divider()
-    if current_view == "cfg" and st.session_state.get("cfg_mode", "list") == "list":
+    if view == "cfg" and st.session_state.get("cfg_mode", "list") == "list":
         if st.button(
             "➕ Create configuration",
             use_container_width=True,
@@ -1774,28 +1755,28 @@ with st.sidebar:
 # and the main content area.
 st.markdown("<div class='sf-hr'></div>", unsafe_allow_html=True)
 
-active_view = st.session_state.get("active_view", DEFAULT_ACTIVE_VIEW)
+view = st.session_state.get("active_view", DEFAULT_ACTIVE_VIEW)
 if DEBUG_PROFILING:
     st.caption(
         "🛠 route="
-        f"{st.session_state.get('active_view')} "
+        f"{view} "
         f"busy_prof={st.session_state.get('busy_profiling')} "
         f"busy_save={st.session_state.get('busy_saving')}"
     )
-if active_view == "cfg":
+if view == "cfg":
     if st.session_state.get("cfg_mode","list") == "list":
         render_config_list()
     else:
         render_config_editor()
-elif active_view == "profile":
+elif view == "profile":
     if DEBUG_PROFILING_ENABLED:
         st.caption("🛠️ Debug: entering Profile view")
         target_fqn = st.session_state.get("editor_target_fqn") or "—"
         st.caption(f"🧭 Target FQN: {target_fqn}")
     profile_view.render_profile(session, METADATA_DB, METADATA_SCHEMA)
-elif active_view == "monitor":
+elif view == "monitor":
     render_monitor()
-elif active_view == "docs":
+elif view == "docs":
     render_docs()
 else:
     render_home()
