@@ -12,6 +12,8 @@ from datetime import datetime
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple, Union
 from uuid import uuid4
 
+from snowflake.snowpark.context import get_active_session
+
 from services.profile import _is_numeric, _is_temporal, _stringify
 from services.profiles_repo import load_saved_profile_run
 from services.semantics import clamp_confidence, truncate_note
@@ -32,6 +34,21 @@ __all__ = [
 
 
 logger = logging.getLogger(__name__)
+
+
+def _get_session():
+    return get_active_session()
+
+
+def _with_extended_timeout(seconds: int):
+    _get_session().sql(
+        "ALTER SESSION SET STATEMENT_TIMEOUT_IN_SECONDS = ?",
+        params=[seconds],
+    ).collect()
+
+
+def _ping():
+    _get_session().sql("SELECT 1").collect()
 
 
 def list_saved_profiles(session, meta_db: str, meta_schema: str, limit: int = 200):
@@ -1799,17 +1816,6 @@ def _collect_single_row(session, sql: str, params: Optional[Sequence[Any]] = Non
     return result[0] if result else None
 
 
-def _with_extended_timeout(session, seconds: int) -> None:
-    session.sql(
-        "ALTER SESSION SET STATEMENT_TIMEOUT_IN_SECONDS = ?",
-        params=[seconds],
-    ).collect()
-
-
-def _ping(session) -> None:
-    session.sql("SELECT 1").collect()
-
-
 def _extract_row_value(row, key: str, default=None):
     if row is None:
         return default
@@ -1884,14 +1890,14 @@ def run_table_profile(
     if not session or not fqn:
         return {}, []
 
-    _with_extended_timeout(session, 600)
+    _with_extended_timeout(600)
 
     db, schema, table = _split_fqn(fqn)
     columns = list_columns(session, db, schema, table)
     if not columns:
         return {}, []
 
-    _ping(session)
+    _ping()
 
     pct: Optional[float]
     if sample_pct is None:
@@ -1929,7 +1935,7 @@ def run_table_profile(
     except Exception:
         rows_profiled = 0
 
-    _ping(session)
+    _ping()
 
     per_column: List[Dict[str, Any]] = []
     approx_threshold = 100000
@@ -1938,7 +1944,7 @@ def run_table_profile(
 
     reference_sets = _load_reference_sets(session, db, schema)
 
-    _ping(session)
+    _ping()
 
     for meta in columns:
         name = meta.get("column_name")
@@ -2314,7 +2320,7 @@ def run_table_profile(
                     error_message = f"fallback failed: {fallback_message}"
                 row = None
 
-        _ping(session)
+        _ping()
 
         row_cnt_raw = _extract_row_value(row, "ROW_CNT", rows_profiled)
         try:
@@ -2660,7 +2666,7 @@ def run_table_profile(
                 except Exception:
                     top_values = []
                 finally:
-                    _ping(session)
+                    _ping()
 
         whitespace_length_counts: List[Tuple[int, int]] = []
         if is_string and ws_only_rows_int > 0 and rows_profiled_total:
@@ -2698,7 +2704,7 @@ def run_table_profile(
             except Exception:
                 whitespace_length_counts = []
             finally:
-                _ping(session)
+                _ping()
 
         if is_string and whitespace_length_counts and non_nulls:
             for length_int, count_int in whitespace_length_counts:
@@ -3150,7 +3156,7 @@ def run_table_profile(
 
         per_column.append(column_entry)
 
-        _ping(session)
+        _ping()
 
     summary = {
         "table": fqn,
