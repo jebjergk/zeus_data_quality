@@ -664,6 +664,9 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
         json.dumps(editor_target_fqn or ""),
     )
 
+    if "busy_profiling" not in st.session_state:
+        st.session_state["busy_profiling"] = False
+
     st.header(ui_strings.PROFILE_HEADER_TITLE)
     st.caption(ui_strings.PROFILE_HEADER_CAPTION)
 
@@ -1007,7 +1010,8 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
     )
 
     button_cols = st.columns([1, 1, 2])
-    run_disabled = bool(loaded_run_id)
+    busy_profiling = bool(st.session_state.get("busy_profiling", False))
+    run_disabled = bool(loaded_run_id) or busy_profiling
     with button_cols[0]:
         run_profile = st.button(
             ui_strings.PROFILE_RUN_BUTTON_LABEL,
@@ -1018,7 +1022,7 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
         suggest_cfg_pressed = st.button(
             ui_strings.PROFILE_SUGGEST_BUTTON_LABEL,
             type="secondary",
-            disabled=not stored_profile_result,
+            disabled=busy_profiling or not stored_profile_result,
         )
 
     clear_loaded = False
@@ -1040,19 +1044,26 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
     profile_result = stored_profile_result
 
     if run_profile:
-        st.session_state.pop(ui_keys.PROFILE_LOADED_RUN_ID, None)
-        loaded_run_id = None
-        if not session:
-            st.error(ui_strings.PROFILE_RUN_ERROR_NO_SESSION)
-        elif not selected_fqn:
-            st.warning(ui_strings.PROFILE_RUN_WARNING_NO_TABLE)
+        if st.session_state.get("busy_profiling", False):
+            run_profile = False
         else:
-            with st.spinner(ui_strings.PROFILE_RUN_SPINNER):
-                start = time.time()
-                st.session_state.pop("profiling_last_error", None)
-                st.session_state.pop("profiling_last_error_trace", None)
-                summary_raw: Dict[str, Any] = {}
-                column_rows: List[Dict[str, Any]] = []
+            st.session_state["busy_profiling"] = True
+
+    if run_profile:
+        try:
+            st.session_state.pop(ui_keys.PROFILE_LOADED_RUN_ID, None)
+            loaded_run_id = None
+            if not session:
+                st.error(ui_strings.PROFILE_RUN_ERROR_NO_SESSION)
+            elif not selected_fqn:
+                st.warning(ui_strings.PROFILE_RUN_WARNING_NO_TABLE)
+            else:
+                with st.spinner(ui_strings.PROFILE_RUN_SPINNER):
+                    start = time.time()
+                    st.session_state.pop("profiling_last_error", None)
+                    st.session_state.pop("profiling_last_error_trace", None)
+                    summary_raw: Dict[str, Any] = {}
+                    column_rows: List[Dict[str, Any]] = []
                 try:
                     summary_raw, column_rows = run_table_profile(
                         session=session,
@@ -1069,29 +1080,33 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
                         traceback.format_exc()
                     )
                     st.error("Profiling failed — see debug panel for details.")
+                    st.session_state["busy_profiling"] = False
                     st.stop()
                 duration = time.time() - start
 
-            rows_profiled = int(summary_raw.get("rows_profiled") or 0)
-            profiles: List[ColumnProfile] = []
-            columns_payload: List[Dict[str, Any]] = []
-            for column in column_rows:
-                normalized_column = normalize_profile_row(column)
-                columns_payload.append(normalized_column)
-                profiles.append(_column_profile_from_payload(normalized_column))
-            profile_result = {
-                "target_table": selected_fqn,
-                "summary": {
-                    "rows_profiled": rows_profiled,
-                    "sample_pct": summary_raw.get("sample_pct"),
-                    "duration_sec": duration,
-                    "columns": len(profiles),
-                },
-                "columns": columns_payload,
-                "top_n": int(top_n),
-            }
-            st.session_state[ui_keys.PROFILE_RESULTS_STATE] = profile_result
-            st.rerun()
+                rows_profiled = int(summary_raw.get("rows_profiled") or 0)
+                profiles: List[ColumnProfile] = []
+                columns_payload: List[Dict[str, Any]] = []
+                for column in column_rows:
+                    normalized_column = normalize_profile_row(column)
+                    columns_payload.append(normalized_column)
+                    profiles.append(_column_profile_from_payload(normalized_column))
+                profile_result = {
+                    "target_table": selected_fqn,
+                    "summary": {
+                        "rows_profiled": rows_profiled,
+                        "sample_pct": summary_raw.get("sample_pct"),
+                        "duration_sec": duration,
+                        "columns": len(profiles),
+                    },
+                    "columns": columns_payload,
+                    "top_n": int(top_n),
+                }
+                st.session_state[ui_keys.PROFILE_RESULTS_STATE] = profile_result
+                st.session_state["busy_profiling"] = False
+                st.rerun()
+        finally:
+            st.session_state["busy_profiling"] = False
 
     def _load_suggestion(
         profile_payload: Dict[str, Any],
@@ -1226,18 +1241,27 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
                 if save_enabled
                 else ui_strings.PROFILE_SAVE_HELP_DISABLED
             )
+            save_disabled = (not save_enabled) or st.session_state.get(
+                "busy_profiling", False
+            )
             save_toggle = st.toggle(
                 ui_strings.PROFILE_SAVE_LABEL,
                 key=ui_keys.PROFILE_SAVE_TOGGLE,
                 value=False,
-                disabled=not save_enabled,
+                disabled=save_disabled,
                 help=save_help,
             )
 
             prev_toggle = st.session_state.get(ui_keys.PROFILE_SAVE_TOGGLE_PREV, False)
             st.session_state[ui_keys.PROFILE_SAVE_TOGGLE_PREV] = save_toggle
 
-            if save_toggle and save_enabled and not prev_toggle:
+            if (
+                save_toggle
+                and save_enabled
+                and not prev_toggle
+                and not st.session_state.get("busy_profiling", False)
+            ):
+                st.session_state["busy_profiling"] = True
                 run_info = {**(profile_result.get("summary") or {})}
                 run_info.update(
                     {
@@ -1278,6 +1302,8 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
                     if run_id:
                         st.session_state[ui_keys.PROFILE_SAVE_RUN_ID] = run_id
                         st.success(ui_strings.PROFILE_SAVE_SUCCESS.format(run_id=run_id))
+                finally:
+                    st.session_state["busy_profiling"] = False
 
             if not save_toggle:
                 st.session_state.pop(ui_keys.PROFILE_SAVE_RUN_ID, None)
