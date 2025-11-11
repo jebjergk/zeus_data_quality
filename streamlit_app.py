@@ -34,6 +34,8 @@ Forbidden patterns:
 import logging
 import sys
 
+import streamlit as st
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
@@ -47,12 +49,11 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 from uuid import uuid4
 
-import streamlit as st
-
 ALLOWED_PAGES = {"home", "cfg", "profile", "monitor", "docs"}
+DEFAULT_ACTIVE_VIEW = "profile"
 
 if "active_view" not in st.session_state:
-    default_view = "home"
+    default_view = DEFAULT_ACTIVE_VIEW
     try:
         params = dict(st.query_params)  # type: ignore[attr-defined]
     except Exception:
@@ -75,7 +76,14 @@ if "active_view" not in st.session_state:
     st.session_state["_last_query_page"] = default_view
     logging.info("route:init %s", st.session_state["active_view"])
 elif "_last_query_page" not in st.session_state:
-    st.session_state["_last_query_page"] = st.session_state.get("active_view", "home")
+    st.session_state["_last_query_page"] = st.session_state.get(
+        "active_view", DEFAULT_ACTIVE_VIEW
+    )
+
+
+def set_view(view: str) -> None:
+    """Update the active view explicitly via user navigation."""
+    st.session_state["active_view"] = view
 
 try:
     import altair as alt
@@ -244,7 +252,7 @@ def _get_page_from_query_params() -> Optional[str]:
 
 def navigate_to(page: str) -> None:
     """Update the current page selection in session state."""
-    st.session_state["active_view"] = page
+    set_view(page)
     st.session_state["page"] = page
     st.session_state["_last_query_page"] = page
     try:
@@ -1687,11 +1695,13 @@ last_query_page = st.session_state.get("_last_query_page")
 if query_page and query_page != last_query_page:
     st.session_state["_last_query_page"] = query_page
     if query_page != st.session_state.get("active_view"):
-        st.session_state["active_view"] = query_page
+        set_view(query_page)
         st.session_state["page"] = query_page
 elif query_page is None:
     if "_last_query_page" not in st.session_state:
-        st.session_state["_last_query_page"] = st.session_state.get("active_view")
+        st.session_state["_last_query_page"] = st.session_state.get(
+            "active_view", DEFAULT_ACTIVE_VIEW
+        )
     elif last_query_page is not None:
         st.session_state["_last_query_page"] = None
 
@@ -1703,7 +1713,7 @@ if (
     navigate_to(page_state_value)
 if "cfg_mode" not in st.session_state:
     st.session_state["cfg_mode"] = "list"
-current_view = st.session_state.get("active_view", "home")
+current_view = st.session_state.get("active_view", DEFAULT_ACTIVE_VIEW)
 with st.sidebar:
     st.header("Zeus DQ")
     st.button(
@@ -1763,7 +1773,7 @@ with st.sidebar:
 # and the main content area.
 st.markdown("<div class='sf-hr'></div>", unsafe_allow_html=True)
 
-active_view = st.session_state.get("active_view", "home")
+active_view = st.session_state.get("active_view", DEFAULT_ACTIVE_VIEW)
 if active_view == "cfg":
     if st.session_state.get("cfg_mode","list") == "list":
         render_config_list()
