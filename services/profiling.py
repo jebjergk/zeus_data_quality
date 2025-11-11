@@ -15,6 +15,7 @@ from uuid import uuid4
 from services.profile import _is_numeric, _is_temporal, _stringify
 from services.profiles_repo import load_saved_profile_run
 from services.semantics import clamp_confidence, truncate_note
+from utils.checkdefs import _re2_ipv4_pattern
 from utils.meta import _q
 from utils.state import _json_dumps_safe
 
@@ -155,7 +156,7 @@ SEMANTIC_REGEX_PATTERNS: Dict[str, str] = {
     "bic": r"^[A-Z]{4}[A-Z]{2}[A-Z0-9]{2}([A-Z0-9]{3})?$",
     "uuid": r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
     "url": r"^(https?|ftp)://[^\s/$.?#].[^\s]*$",
-    "ipv4": r"^((25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)(\.(?!$)|$)){4}$",
+    "ipv4": _re2_ipv4_pattern(),
     "phone_e164": r"^\+[1-9][0-9]{1,14}$",
 }
 
