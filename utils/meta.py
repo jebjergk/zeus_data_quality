@@ -6,6 +6,7 @@ client is not installed.  Snowflake objects are loaded lazily via duck typing.
 """
 
 from __future__ import annotations
+import importlib
 from dataclasses import dataclass
 import math
 from typing import Any, Dict, List, Optional, Tuple
@@ -16,6 +17,47 @@ except Exception:
     Session = Any  # type: ignore
 
 from utils.configs import get_metadata_namespace
+
+_streamlit_spec = importlib.util.find_spec("streamlit")
+if _streamlit_spec is None:
+
+    class _StreamlitCacheStub:
+        def cache_data(self, **_kwargs):
+            def decorator(func):
+                return func
+
+            return decorator
+
+    st = _StreamlitCacheStub()
+else:
+    import streamlit as st  # type: ignore
+
+
+def _session_hash(session: Any) -> Any:
+    """Return a stable hash for a Snowpark session."""
+
+    if session is None:
+        return None
+
+    for attr in ("session_id", "get_session_id"):
+        if hasattr(session, attr):
+            value = getattr(session, attr)
+            try:
+                result = value() if callable(value) else value
+            except Exception:
+                result = None
+            if result is not None:
+                return result
+
+    return id(session)
+
+
+CACHE_HASH_FUNCS = {
+    "snowflake.snowpark.session.Session": _session_hash,
+}
+
+if isinstance(Session, type):
+    CACHE_HASH_FUNCS[Session] = _session_hash
 
 METADATA_DB, METADATA_SCHEMA = get_metadata_namespace()
 
@@ -357,16 +399,38 @@ def get_checks(session: Session, config_id: str) -> List[DQCheck]:
     return out
 
 # ---------- Discovery (INFO_SCHEMA with safe fallbacks) ----------
-def list_databases(session: Session) -> List[str]:
-    if not session: return []
+def list_databases(session: Session, *, editor_target_fqn: Optional[str] = None) -> List[str]:
+    if not session:
+        return []
+    cache_key = editor_target_fqn or "GLOBAL::DATABASES"
+    return _list_databases_cached(cache_key, session)
+
+
+@st.cache_data(ttl=120, show_spinner=False, hash_funcs=CACHE_HASH_FUNCS)
+def _list_databases_cached(editor_target_fqn: str, session: Session) -> List[str]:
+    del editor_target_fqn  # key only
     try:
         df = session.sql("SELECT DATABASE_NAME FROM SNOWFLAKE.INFORMATION_SCHEMA.DATABASES ORDER BY 1")
         return [r[0] for r in df.collect()]
     except Exception:
         return []
 
-def list_schemas(session: Session, database: str) -> List[str]:
-    if not session or not database: return []
+
+def list_schemas(
+    session: Session,
+    database: str,
+    *,
+    editor_target_fqn: Optional[str] = None,
+) -> List[str]:
+    if not session or not database:
+        return []
+    cache_key = editor_target_fqn or f"{database.upper()}::SCHEMAS"
+    return _list_schemas_cached(cache_key, session, database)
+
+
+@st.cache_data(ttl=120, show_spinner=False, hash_funcs=CACHE_HASH_FUNCS)
+def _list_schemas_cached(editor_target_fqn: str, session: Session, database: str) -> List[str]:
+    del editor_target_fqn
     try:
         df = session.sql(f'SELECT SCHEMA_NAME FROM {_q(database)}.INFORMATION_SCHEMA.SCHEMATA ORDER BY 1')
         return [r[0] for r in df.collect()]
@@ -377,8 +441,23 @@ def list_schemas(session: Session, database: str) -> List[str]:
         except Exception:
             return []
 
-def list_tables(session: Session, database: str, schema: str) -> List[str]:
-    if not session or not (database and schema): return []
+
+def list_tables(
+    session: Session,
+    database: str,
+    schema: str,
+    *,
+    editor_target_fqn: Optional[str] = None,
+) -> List[str]:
+    if not session or not (database and schema):
+        return []
+    cache_key = editor_target_fqn or f"{database.upper()}.{schema.upper()}::TABLES"
+    return _list_tables_cached(cache_key, session, database, schema)
+
+
+@st.cache_data(ttl=120, show_spinner=False, hash_funcs=CACHE_HASH_FUNCS)
+def _list_tables_cached(editor_target_fqn: str, session: Session, database: str, schema: str) -> List[str]:
+    del editor_target_fqn
     try:
         df = session.sql(f"SELECT TABLE_NAME FROM {_q(database)}.INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = ? AND TABLE_TYPE='BASE TABLE' ORDER BY 1", params=[schema.upper()])
         return [r[0] for r in df.collect()]
@@ -390,13 +469,33 @@ def list_tables(session: Session, database: str, schema: str) -> List[str]:
             return []
 
 
-def get_table_row_count(session: Session, database: str, schema: str, table: str) -> Optional[int]:
+def get_table_row_count(
+    session: Session,
+    database: str,
+    schema: str,
+    table: str,
+    *,
+    editor_target_fqn: Optional[str] = None,
+) -> Optional[int]:
     """Return the row count reported by Snowflake metadata for a table."""
 
     if not session or not (database and schema and table):
         return None
 
-    # Prefer INFORMATION_SCHEMA when available because it exposes a dedicated ROW_COUNT column.
+    cache_key = editor_target_fqn or fq_table(database, schema, table)
+    return _get_table_row_count_cached(cache_key, session, database, schema, table)
+
+
+@st.cache_data(ttl=120, show_spinner=False, hash_funcs=CACHE_HASH_FUNCS)
+def _get_table_row_count_cached(
+    editor_target_fqn: str,
+    session: Session,
+    database: str,
+    schema: str,
+    table: str,
+) -> Optional[int]:
+    del editor_target_fqn
+
     try:
         df = session.sql(
             f"SELECT ROW_COUNT FROM {_q(database)}.INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?",
@@ -409,21 +508,18 @@ def get_table_row_count(session: Session, database: str, schema: str, table: str
     except Exception:
         pass
 
-    # Fall back to SHOW TABLES which relies on metadata and does not incur table scan costs.
     try:
         df = session.sql(
             f"SHOW TABLES LIKE ? IN SCHEMA {_q(database)}.{_q(schema)}",
             params=[table],
         )
         for row in df.collect():
-            # Rows from SHOW TABLES can be accessed by name via asDict() when available.
             if hasattr(row, "asDict"):
                 data = row.asDict()
                 value = data.get("rows") or data.get("ROW_COUNT")
                 if value is not None:
                     return int(value)
             else:
-                # SHOW TABLES returns: created_on, name, database_name, schema_name, kind, comment, cluster_by, rows, bytes, owner, retention_time, automatic_clustering, change_tracking
                 if len(row) >= 8:
                     value = row[7]
                     if value is not None:
@@ -433,8 +529,30 @@ def get_table_row_count(session: Session, database: str, schema: str, table: str
 
     return None
 
-def list_columns(session: Session, database: str, schema: str, table: str) -> List[str]:
-    if not session or not (database and schema and table): return []
+
+def list_columns(
+    session: Session,
+    database: str,
+    schema: str,
+    table: str,
+    *,
+    editor_target_fqn: Optional[str] = None,
+) -> List[str]:
+    if not session or not (database and schema and table):
+        return []
+    cache_key = editor_target_fqn or fq_table(database, schema, table)
+    return _list_columns_cached(cache_key, session, database, schema, table)
+
+
+@st.cache_data(ttl=120, show_spinner=False, hash_funcs=CACHE_HASH_FUNCS)
+def _list_columns_cached(
+    editor_target_fqn: str,
+    session: Session,
+    database: str,
+    schema: str,
+    table: str,
+) -> List[str]:
+    del editor_target_fqn
     try:
         df = session.sql(f"SELECT COLUMN_NAME FROM {_q(database)}.INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? ORDER BY ORDINAL_POSITION", params=[schema.upper(), table.upper()])
         return [r[0] for r in df.collect()]
