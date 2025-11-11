@@ -731,7 +731,7 @@ def save_profile(table_fqn: str, name: Optional[str], payload: Any) -> Dict[str,
 
     canon = _canon_fqn(table_fqn or "")
     profile_name = (name or "").strip() or "Unnamed"
-    run_id = uuid4().hex
+    run_id = str(uuid4())
     context = {
         "where": "save_profile",
         "store_fqn": PROFILES_TABLE_FQN,
@@ -769,9 +769,9 @@ def save_profile(table_fqn: str, name: Optional[str], payload: Any) -> Dict[str,
         _get_session().sql(sql, params=params).collect()
         logger.info(
             "Saved profile payload",
-            extra={**context, "insert_sql": "VALUES(?, ?, ?, CURRENT_TIMESTAMP(), PARSE_JSON(?))"},
+            extra={"op": "save_profile", "id": run_id, "fqn": canon},
         )
-        return {"ok": True, "id": run_id, "table_fqn_canon": canon}
+        return {"ok": True, "id": run_id}
     except Exception as exc:  # pragma: no cover - defensive
         err_msg = str(exc) or "profile_save_failed"
         logger.error(
