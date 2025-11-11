@@ -131,8 +131,8 @@ def stateless_table_picker(session_obj, preselect_fqn: Optional[str]):
         return db_sel, sch_sel, None, ""
 
     canonical_fqn = canonicalise_fqn(db_sel, sch_sel, tbl_sel)
-    if canonical_fqn:
+    if canonical_fqn and st.session_state.get("editor_target_fqn") != canonical_fqn:
         st.session_state["editor_target_fqn"] = canonical_fqn
-        logger.info("stateless_table_picker.editor_target_fqn=%s", canonical_fqn)
+        logger.info("picker:set_fqn %s", canonical_fqn)
 
     return db_sel, sch_sel, tbl_sel, canonical_fqn
