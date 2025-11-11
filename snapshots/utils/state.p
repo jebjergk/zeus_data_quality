@@ -765,13 +765,10 @@ def save_profile(table_fqn: str, name: Optional[str], payload: Any) -> Dict[str,
     )
     params = [run_id, canon, profile_name, payload_json]
 
+    session = _get_session()
+
     try:
-        _get_session().sql(sql, params=params).collect()
-        logger.info(
-            "Saved profile payload",
-            extra={"op": "save_profile", "id": run_id, "fqn": canon},
-        )
-        return {"ok": True, "id": run_id}
+        session.sql(sql, params=params).collect()
     except Exception as exc:  # pragma: no cover - defensive
         err_msg = str(exc) or "profile_save_failed"
         logger.error(
@@ -780,6 +777,34 @@ def save_profile(table_fqn: str, name: Optional[str], payload: Any) -> Dict[str,
             exc_info=True,
         )
         return {"ok": False, "err": err_msg}
+
+    verify_sql = (
+        f"SELECT 1 FROM {PROFILES_TABLE_FQN} WHERE ID = ? LIMIT 1"
+    )
+
+    try:
+        verification_rows = session.sql(verify_sql, params=[run_id]).collect()
+    except Exception as exc:  # pragma: no cover - defensive
+        err_msg = str(exc) or "save_verify_failed"
+        logger.error(
+            "Failed to verify saved profile",
+            extra={**context, "err": err_msg},
+            exc_info=True,
+        )
+        return {"ok": False, "err": "save_verify_failed"}
+
+    if not verification_rows:
+        logger.error(
+            "Saved profile verification failed",
+            extra={**context, "err": "save_verify_failed"},
+        )
+        return {"ok": False, "err": "save_verify_failed"}
+
+    logger.info(
+        "Saved profile payload",
+        extra={"op": "save_profile", "id": run_id, "fqn": canon},
+    )
+    return {"ok": True, "id": run_id}
 
 
 
