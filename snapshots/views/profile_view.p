@@ -739,6 +739,25 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
         if DEMO_LOCK:
             st.info(ui_strings.PROFILE_DEMO_LOCK_MESSAGE)
 
+        render_inputs: Optional[Dict[str, Any]] = None
+        if DEBUG_PROFILING:
+            has_summary = st.session_state.get("last_profile_summary") is not None
+            rows_len = len(st.session_state.get("last_profile_rows") or [])
+            last_err = st.session_state.get("last_profile_err")
+            render_inputs = {
+                "has_summary": has_summary,
+                "rows_len": rows_len,
+                "last_err": last_err,
+                "fqn": editor_target_fqn,
+            }
+            logger.info(
+                "render_inputs has_summary=%s rows_len=%s last_err=%s fqn=%s",
+                has_summary,
+                rows_len,
+                last_err,
+                editor_target_fqn,
+            )
+
         base_selection = st.session_state.get(ui_keys.PROFILE_TARGET_FQN)
         _db_sel, _sch_sel, _tbl_sel, selected_fqn = _table_picker(session, base_selection)
         if selected_fqn:
@@ -2013,6 +2032,8 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
                         canonical_fqn = str(canon_candidate)
 
             with st.expander("Debug · Profiling Diagnostics", expanded=False):
+                if render_inputs is not None:
+                    st.text(json.dumps(render_inputs, sort_keys=True, separators=(",", ": ")))
                 if DEBUG_PROFILING:
                     st.caption(
                         f"last_error={st.session_state.get('profiling_last_error')}"
