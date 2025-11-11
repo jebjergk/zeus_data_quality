@@ -50,10 +50,11 @@ from typing import Any, Dict, List, Optional, Tuple
 from uuid import uuid4
 
 ALLOWED_PAGES = {"home", "cfg", "profile", "monitor", "docs"}
-DEFAULT_ACTIVE_VIEW = "profile"
+DEFAULT_ACTIVE_VIEW = "home"
 
 if "active_view" not in st.session_state:
-    default_view = DEFAULT_ACTIVE_VIEW
+    st.session_state["active_view"] = "home"
+    default_view = st.session_state["active_view"]
     try:
         params = dict(st.query_params)  # type: ignore[attr-defined]
     except Exception:
