@@ -254,7 +254,8 @@ def open_config_editor(
     """Switch to the configuration editor with the given selection."""
     st.session_state["cfg_mode"] = "edit"
     st.session_state["selected_config_id"] = config_id
-    st.session_state["editor_target_fqn"] = target_fqn
+    if target_fqn is not None:
+        st.session_state["editor_target_fqn"] = target_fqn
     st.rerun()
 
 
@@ -1670,6 +1671,7 @@ def render_docs() -> None:
 
 # ---------- Sidebar + routing ----------
 state = get_state()
+st.session_state.setdefault("editor_target_fqn", None)
 query_page = _get_page_from_query_params()
 last_query_page = st.session_state.get("_last_query_page")
 if query_page and query_page != last_query_page:
@@ -1691,8 +1693,7 @@ if (
     and page_state_value != st.session_state.get("active_view")
 ):
     navigate_to(page_state_value)
-if "cfg_mode" not in st.session_state:
-    st.session_state["cfg_mode"] = "list"
+st.session_state.setdefault("cfg_mode", "list")
 view = st.session_state.get("active_view", "home")
 with st.sidebar:
     st.header("Zeus DQ")

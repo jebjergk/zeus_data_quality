@@ -753,10 +753,8 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
             json.dumps(editor_target_fqn or ""),
         )
 
-        if "busy_profiling" not in st.session_state:
-            st.session_state["busy_profiling"] = False
-        if "busy_saving" not in st.session_state:
-            st.session_state["busy_saving"] = False
+        st.session_state.setdefault("busy_profiling", False)
+        st.session_state.setdefault("busy_saving", False)
 
         _ensure_last_profile_state_defaults()
 
@@ -870,8 +868,8 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
         if st.session_state.get(sample_target_key) != selected_fqn:
             st.session_state[sample_target_key] = selected_fqn
             st.session_state[sample_pct_state_key] = float(suggested_pct)
-        elif sample_pct_state_key not in st.session_state:
-            st.session_state[sample_pct_state_key] = float(suggested_pct)
+        else:
+            st.session_state.setdefault(sample_pct_state_key, float(suggested_pct))
 
         approx_rows = None
         if row_count is not None and suggested_pct > 0:
