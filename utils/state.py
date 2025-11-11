@@ -925,26 +925,39 @@ def load_profile_by_id(profile_id: str) -> Dict[str, Any]:
     created_at_value = _ensure_iso_timestamp(row[3]) if len(row) > 3 else ""
 
     payload_json = ""
+    raw_payload: Any = {}
     if len(row) > 4:
-        payload_value: Any = ""
+        payload_value: Any = None
         try:
             payload_value = row["PAYLOAD_JSON"]  # type: ignore[index]
         except Exception:
-            payload_value = row[4]
-        payload_json = str(payload_value or "")
+            try:
+                payload_value = row[4]
+            except Exception:
+                payload_value = None
 
-    raw_payload: Any = {}
-    if payload_json:
-        try:
-            raw_payload = json.loads(payload_json)
-        except Exception as exc:
-            err_msg = str(exc) or "payload_parse_error"
+        if isinstance(payload_value, str):
+            payload_json = payload_value
+            try:
+                raw_payload = json.loads(payload_json)
+            except Exception as exc:
+                err_msg = str(exc) or "payload_parse_error"
+                logger.error(
+                    "Failed to parse profile payload JSON",
+                    extra={**context, "err": err_msg},
+                    exc_info=True,
+                )
+                return {"ok": False, "err": f"payload_parse_error: {err_msg}"}
+        elif payload_value is not None:
             logger.error(
-                "Failed to parse profile payload JSON",
-                extra={**context, "err": err_msg},
-                exc_info=True,
+                "Saved profile payload was not returned as JSON text",
+                extra={
+                    **context,
+                    "err": "payload_not_json_text",
+                    "payload_type": type(payload_value).__name__,
+                },
             )
-            return {"ok": False, "err": f"payload_parse_error: {err_msg}"}
+            return {"ok": False, "err": "payload_not_json_text"}
 
     payload_dict = normalize_saved_profile(raw_payload) if payload_json else {}
 
