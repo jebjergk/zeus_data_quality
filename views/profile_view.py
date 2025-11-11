@@ -1359,6 +1359,35 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
                     )
 
                 save_enabled = bool(session and meta_db and meta_schema)
+                last_profile_summary_raw = st.session_state.get(
+                    LAST_PROFILE_SUMMARY_STATE
+                )
+                if isinstance(last_profile_summary_raw, dict):
+                    last_profile_summary: Optional[Dict[str, Any]] = dict(
+                        last_profile_summary_raw
+                    )
+                elif last_profile_summary_raw is None:
+                    last_profile_summary = None
+                else:
+                    try:
+                        last_profile_summary = dict(last_profile_summary_raw)
+                    except Exception:
+                        last_profile_summary = None
+
+                last_profile_rows_raw = st.session_state.get(
+                    LAST_PROFILE_ROWS_STATE, []
+                )
+                if isinstance(last_profile_rows_raw, Sequence) and not isinstance(
+                    last_profile_rows_raw, (str, bytes, bytearray)
+                ):
+                    last_profile_rows = list(last_profile_rows_raw)
+                else:
+                    last_profile_rows = []
+
+                has_last_profile_payload = (
+                    last_profile_summary is not None and len(last_profile_rows) > 0
+                )
+
                 if not save_enabled:
                     st.session_state.pop(ui_keys.PROFILE_SAVE_TOGGLE, None)
                     st.session_state.pop(ui_keys.PROFILE_SAVE_TOGGLE_PREV, None)
@@ -1369,7 +1398,11 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
                     if save_enabled
                     else ui_strings.PROFILE_SAVE_HELP_DISABLED
                 )
-                save_disabled = (not save_enabled) or busy_profiling
+                save_disabled = (
+                    (not save_enabled)
+                    or busy_profiling
+                    or not has_last_profile_payload
+                )
                 save_toggle = st.toggle(
                     ui_strings.PROFILE_SAVE_LABEL,
                     key=ui_keys.PROFILE_SAVE_TOGGLE,
@@ -1386,25 +1419,45 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
                     and save_enabled
                     and not prev_toggle
                     and not busy_profiling
+                    and has_last_profile_payload
                 )
                 if should_save_profile:
                     st.session_state["busy_profiling"] = True
                     busy_profiling = True
-                    run_info = {**(profile_result.get("summary") or {})}
+                    summary_payload = dict(last_profile_summary or {})
+                    run_info = {**summary_payload}
+                    target_table_value = st.session_state.get(
+                        LAST_PROFILE_TARGET_STATE
+                    ) or run_info.get("target_table") or profile_result.get(
+                        "target_table"
+                    )
+                    if target_table_value:
+                        run_info["target_table"] = str(target_table_value)
+                    top_n_value = st.session_state.get(LAST_PROFILE_TOP_N_STATE)
+                    normalized_top_n = _safe_int(top_n_value)
+                    if normalized_top_n is None:
+                        normalized_top_n = _safe_int(run_info.get("top_n"))
+                    if normalized_top_n is not None:
+                        run_info["top_n"] = normalized_top_n
                     run_info.update(
                         {
-                            "target_table": profile_result.get("target_table"),
-                            "top_n": profile_result.get("top_n"),
                             "saved_at": datetime.utcnow().isoformat() + "Z",
                         }
                     )
                     rows_payload: List[Dict[str, Any]] = []
-                    for column_profile in profile_result.get("columns", []):
-                        normalized_column = normalize_profile_row(column_profile)
+                    for column_profile in last_profile_rows:
+                        if not isinstance(column_profile, dict):
+                            continue
+                        normalized_column = normalize_profile_row(
+                            dict(column_profile)
+                        )
                         column_name = normalized_column.get("column_name")
                         if not column_name:
                             continue
                         rows_payload.append(normalized_column)
+
+                    if rows_payload and "columns" not in run_info:
+                        run_info["columns"] = len(rows_payload)
 
                     try:
                         save_result = save_profile_results(
