@@ -1193,7 +1193,13 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
 
         profile_result = stored_profile_result
 
+        current_editor_fqn = st.session_state.get("editor_target_fqn") or ""
+
         run_profile = bool(run_requested and not busy_profiling and not busy_saving)
+        if run_profile and not current_editor_fqn:
+            st.warning("Select a table first.")
+            run_profile = False
+
         if run_profile:
             st.session_state["busy_profiling"] = True
             busy_profiling = True
@@ -1204,7 +1210,6 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
                 fqn = st.session_state.get("editor_target_fqn") or ""
                 if not fqn:
                     st.warning("Select a table first.")
-                    st.session_state[LAST_PROFILE_ERROR_STATE] = None
                     return
 
                 st.session_state.pop(ui_keys.PROFILE_LOADED_RUN_ID, None)
@@ -2280,6 +2285,16 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
                         canonical_fqn = str(canon_candidate)
 
             with st.expander("Debug · Profiling Diagnostics", expanded=False):
+                debug_fqn_override = st.text_input(
+                    "DB.SCHEMA.TABLE",
+                    key="profile_debug_fqn_override",
+                    placeholder="DB.SCHEMA.TABLE",
+                )
+                if st.button("Set FQN", key="profile_debug_set_fqn"):
+                    val = (debug_fqn_override or "").replace("\"", "").strip().upper()
+                    if val.count(".") == 2:
+                        st.session_state["editor_target_fqn"] = val
+                        logging.info("debug:set_fqn %s", val)
                 if render_inputs is not None:
                     st.text(json.dumps(render_inputs, sort_keys=True, separators=(",", ": ")))
                 if DEBUG_PROFILING:
