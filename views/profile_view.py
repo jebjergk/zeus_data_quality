@@ -32,6 +32,7 @@ from __future__ import annotations
 import html
 import json
 import logging
+import traceback
 import math
 import textwrap
 import time
@@ -1048,7 +1049,8 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
         else:
             with st.spinner(ui_strings.PROFILE_RUN_SPINNER):
                 start = time.time()
-                profile_error: Optional[Exception] = None
+                st.session_state.pop("profiling_last_error", None)
+                st.session_state.pop("profiling_last_error_trace", None)
                 summary_raw: Dict[str, Any] = {}
                 column_rows: List[Dict[str, Any]] = []
                 try:
@@ -1059,34 +1061,37 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
                         top_n=int(min(top_n, MAX_TOP_N)),
                     )
                 except Exception as exc:  # pragma: no cover - Snowflake specific
-                    profile_error = exc
+                    logging.exception("profiling:unhandled")
+                    st.session_state["profiling_last_error"] = (
+                        f"{type(exc).__name__}: {exc}"
+                    )
+                    st.session_state["profiling_last_error_trace"] = (
+                        traceback.format_exc()
+                    )
+                    st.error("Profiling failed — see debug panel for details.")
+                    st.stop()
                 duration = time.time() - start
 
-            if profile_error is not None:
-                st.error(
-                    ui_strings.PROFILE_RUN_ERROR_GENERIC.format(error=profile_error)
-                )
-            else:
-                rows_profiled = int(summary_raw.get("rows_profiled") or 0)
-                profiles: List[ColumnProfile] = []
-                columns_payload: List[Dict[str, Any]] = []
-                for column in column_rows:
-                    normalized_column = normalize_profile_row(column)
-                    columns_payload.append(normalized_column)
-                    profiles.append(_column_profile_from_payload(normalized_column))
-                profile_result = {
-                    "target_table": selected_fqn,
-                    "summary": {
-                        "rows_profiled": rows_profiled,
-                        "sample_pct": summary_raw.get("sample_pct"),
-                        "duration_sec": duration,
-                        "columns": len(profiles),
-                    },
-                    "columns": columns_payload,
-                    "top_n": int(top_n),
-                }
-                st.session_state[ui_keys.PROFILE_RESULTS_STATE] = profile_result
-                st.rerun()
+            rows_profiled = int(summary_raw.get("rows_profiled") or 0)
+            profiles: List[ColumnProfile] = []
+            columns_payload: List[Dict[str, Any]] = []
+            for column in column_rows:
+                normalized_column = normalize_profile_row(column)
+                columns_payload.append(normalized_column)
+                profiles.append(_column_profile_from_payload(normalized_column))
+            profile_result = {
+                "target_table": selected_fqn,
+                "summary": {
+                    "rows_profiled": rows_profiled,
+                    "sample_pct": summary_raw.get("sample_pct"),
+                    "duration_sec": duration,
+                    "columns": len(profiles),
+                },
+                "columns": columns_payload,
+                "top_n": int(top_n),
+            }
+            st.session_state[ui_keys.PROFILE_RESULTS_STATE] = profile_result
+            st.rerun()
 
     def _load_suggestion(
         profile_payload: Dict[str, Any],
@@ -1786,6 +1791,13 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
                     canonical_fqn = str(canon_candidate)
 
         with st.expander("Debug · Profiling Diagnostics", expanded=False):
+            last_error = st.session_state.get("profiling_last_error")
+            if last_error:
+                st.text(f"last_error: {last_error}")
+                last_error_trace = st.session_state.get("profiling_last_error_trace")
+                if last_error_trace:
+                    st.code(last_error_trace, language="text")
+
             st.text(f"editor_target_fqn: {str(editor_target_fqn or '')}")
             st.text(f"canonical_fqn: {canonical_fqn}")
             st.text(f"store_fqn: {store_fqn}")
