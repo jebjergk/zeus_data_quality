@@ -41,9 +41,18 @@ def _get_session():
 
 
 def _with_extended_timeout(seconds: int):
+    try:
+        timeout = int(seconds)
+    except (TypeError, ValueError):
+        timeout = 0
+
+    if timeout < 1:
+        timeout = 1
+    if timeout > 3600:
+        timeout = 3600
+
     _get_session().sql(
-        "ALTER SESSION SET STATEMENT_TIMEOUT_IN_SECONDS = ?",
-        params=[seconds],
+        f"ALTER SESSION SET STATEMENT_TIMEOUT_IN_SECONDS = {timeout}"
     ).collect()
 
 
