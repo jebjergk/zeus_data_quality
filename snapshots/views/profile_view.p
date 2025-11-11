@@ -1638,7 +1638,7 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
                     )
                 ]
 
-            grid_columns = [
+            grid_columns = ["Include"] + [
                 column
                 for column in ui_strings.PROFILE_GRID_COLUMNS
                 if column != "Select"
