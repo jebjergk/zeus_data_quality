@@ -728,19 +728,16 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
     else:
         st.session_state.pop(SAVED_PROFILES_STATE, None)
 
-    dropdown_options: List[Tuple[str, str]] = []
+    dropdown_options: List[str] = []
+    dropdown_labels: Dict[str, str] = {}
     for entry in saved_profile_entries:
         run_id = str(entry.get("id", "")).strip()
         if not run_id:
             continue
-        label_name = entry.get("name") or "Unnamed"
-        created_at_iso = (
-            entry.get("created_at_iso")
-            or entry.get("timestamp")
-            or ""
-        )
-        label_suffix = created_at_iso or run_id
-        dropdown_options.append((run_id, f"{label_name} — {label_suffix}"))
+        label_name = str(entry.get("name") or "Unnamed")
+        created_at_iso = str(entry.get("created_at_iso") or "")
+        dropdown_options.append(run_id)
+        dropdown_labels[run_id] = f"{label_name} — {created_at_iso}"
 
     controls = st.columns(3)
     suggested_pct = 10.0
@@ -792,16 +789,73 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
             step=1,
             help=ui_strings.PROFILE_TOP_N_HELP.format(max_top_n=MAX_TOP_N),
         )
+    def _trigger_profile_load(run_id: Optional[str]) -> None:
+        if not saved_profiles_enabled:
+            st.warning(ui_strings.PROFILE_LOAD_WARNING_NO_SESSION)
+            return
+
+        selected_run_id = str(run_id or "").strip()
+        if not selected_run_id:
+            st.warning(ui_strings.PROFILE_LOAD_WARNING_NO_SELECTION)
+            return
+
+        try:
+            summary_payload, column_payloads = load_saved_profile_run(
+                session,
+                meta_db,
+                meta_schema,
+                selected_run_id,
+            )
+        except Exception as exc:  # pragma: no cover - Snowflake specific
+            st.error(ui_strings.PROFILE_LOAD_ERROR_GENERIC.format(error=exc))
+        else:
+            if summary_payload is None and not column_payloads:
+                st.info(
+                    "No saved profiles found (or metadata tables haven’t been created yet). "
+                    "Run and save a profile first."
+                )
+            else:
+                try:
+                    loaded_profile = load_profile_run(
+                        session=session,
+                        meta_db=meta_db,
+                        meta_schema=meta_schema,
+                        run_id=selected_run_id,
+                        summary_record=summary_payload,
+                        column_records=column_payloads,
+                    )
+                except Exception as exc:  # pragma: no cover - Snowflake specific
+                    st.error(ui_strings.PROFILE_LOAD_ERROR_GENERIC.format(error=exc))
+                else:
+                    if not loaded_profile:
+                        st.warning(ui_strings.PROFILE_WARNING_SAVED_EMPTY)
+                    else:
+                        st.session_state[ui_keys.PROFILE_RESULTS_STATE] = loaded_profile
+                        st.session_state[ui_keys.PROFILE_LOADED_RUN_ID] = selected_run_id
+                        target_table = loaded_profile.get("target_table")
+                        if target_table:
+                            st.session_state[ui_keys.PROFILE_TARGET_FQN] = target_table
+                        st.success(
+                            ui_strings.PROFILE_SUCCESS_LOAD_SAVED.format(
+                                run_id=selected_run_id
+                            )
+                        )
+                        st.rerun()
+
     load_selected_run_id: Optional[str] = None
     load_button_clicked = False
     with controls[2]:
-        selectbox_disabled = len(dropdown_options) == 0
+        selectbox_disabled = len(saved_profile_entries) == 0
         if dropdown_options:
 
-            def _format_dropdown_option(option: Optional[Tuple[str, str]]) -> str:
-                if isinstance(option, tuple) and len(option) == 2:
-                    return option[1]
-                return ""
+            def _format_dropdown_option(option: Optional[str]) -> str:
+                if not option:
+                    return ""
+                return dropdown_labels.get(option, "")
+
+            def _on_select_saved_profile() -> None:
+                selected_option_value = st.session_state.get(ui_keys.PROFILE_LOAD_SELECT)
+                _trigger_profile_load(selected_option_value)
 
             selected_option = st.selectbox(
                 ui_strings.PROFILE_LOAD_SELECT_LABEL,
@@ -811,9 +865,10 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
                 disabled=selectbox_disabled,
                 index=None,
                 placeholder=ui_strings.PROFILE_LOAD_SELECT_PLACEHOLDER,
+                on_change=_on_select_saved_profile,
             )
-            if isinstance(selected_option, tuple) and len(selected_option) == 2:
-                load_selected_run_id = selected_option[0]
+            if isinstance(selected_option, str) and selected_option:
+                load_selected_run_id = selected_option
         else:
             st.selectbox(
                 ui_strings.PROFILE_LOAD_SELECT_LABEL,
@@ -832,53 +887,7 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
             st.caption(ui_strings.PROFILE_LOAD_CAPTION_EMPTY)
 
     if load_button_clicked:
-        if not saved_profiles_enabled:
-            st.warning(ui_strings.PROFILE_LOAD_WARNING_NO_SESSION)
-        elif not load_selected_run_id:
-            st.warning(ui_strings.PROFILE_LOAD_WARNING_NO_SELECTION)
-        else:
-            try:
-                summary_payload, column_payloads = load_saved_profile_run(
-                    session,
-                    meta_db,
-                    meta_schema,
-                    load_selected_run_id,
-                )
-            except Exception as exc:  # pragma: no cover - Snowflake specific
-                st.error(ui_strings.PROFILE_LOAD_ERROR_GENERIC.format(error=exc))
-            else:
-                if summary_payload is None and not column_payloads:
-                    st.info(
-                        "No saved profiles found (or metadata tables haven’t been created yet). "
-                        "Run and save a profile first."
-                    )
-                else:
-                    try:
-                        loaded_profile = load_profile_run(
-                            session=session,
-                            meta_db=meta_db,
-                            meta_schema=meta_schema,
-                            run_id=load_selected_run_id,
-                            summary_record=summary_payload,
-                            column_records=column_payloads,
-                        )
-                    except Exception as exc:  # pragma: no cover - Snowflake specific
-                        st.error(ui_strings.PROFILE_LOAD_ERROR_GENERIC.format(error=exc))
-                    else:
-                        if not loaded_profile:
-                            st.warning(ui_strings.PROFILE_WARNING_SAVED_EMPTY)
-                        else:
-                            st.session_state[ui_keys.PROFILE_RESULTS_STATE] = loaded_profile
-                            st.session_state[ui_keys.PROFILE_LOADED_RUN_ID] = load_selected_run_id
-                            target_table = loaded_profile.get("target_table")
-                            if target_table:
-                                st.session_state[ui_keys.PROFILE_TARGET_FQN] = target_table
-                            st.success(
-                                ui_strings.PROFILE_SUCCESS_LOAD_SAVED.format(
-                                    run_id=load_selected_run_id
-                                )
-                            )
-                            st.rerun()
+        _trigger_profile_load(load_selected_run_id)
 
     stored_profile_result = st.session_state.get(ui_keys.PROFILE_RESULTS_STATE)
     loaded_run_id = st.session_state.get(ui_keys.PROFILE_LOADED_RUN_ID)
