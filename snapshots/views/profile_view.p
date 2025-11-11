@@ -84,6 +84,69 @@ PROFILE_INCLUDE_COLS_STATE = "profile_include_cols"
 PROFILE_INCLUDE_TOKEN_STATE = "profile_include_token"
 
 
+LAST_PROFILE_SUMMARY_STATE = "last_profile_summary"
+LAST_PROFILE_ROWS_STATE = "last_profile_rows"
+LAST_PROFILE_ERROR_STATE = "last_profile_err"
+LAST_PROFILE_TARGET_STATE = "last_profile_target"
+LAST_PROFILE_TOP_N_STATE = "last_profile_top_n"
+
+
+def _ensure_last_profile_state_defaults() -> None:
+    if LAST_PROFILE_SUMMARY_STATE not in st.session_state:
+        st.session_state[LAST_PROFILE_SUMMARY_STATE] = None
+    if LAST_PROFILE_ROWS_STATE not in st.session_state:
+        st.session_state[LAST_PROFILE_ROWS_STATE] = []
+    if LAST_PROFILE_ERROR_STATE not in st.session_state:
+        st.session_state[LAST_PROFILE_ERROR_STATE] = None
+
+
+def _sync_last_profile_session(
+    profile_payload: Optional[Dict[str, Any]],
+    target_table: str,
+    top_n: Optional[int] = None,
+) -> None:
+    if profile_payload is None:
+        st.session_state[LAST_PROFILE_SUMMARY_STATE] = None
+        st.session_state[LAST_PROFILE_ROWS_STATE] = []
+        st.session_state.pop(LAST_PROFILE_TARGET_STATE, None)
+        st.session_state.pop(LAST_PROFILE_TOP_N_STATE, None)
+        return
+
+    summary_payload = dict(profile_payload.get("summary") or {})
+    derived_top_n = top_n if top_n is not None else profile_payload.get("top_n")
+    if derived_top_n is not None:
+        try:
+            top_n_value = int(derived_top_n)
+        except Exception:
+            top_n_value = derived_top_n
+        summary_payload.setdefault("top_n", top_n_value)
+        st.session_state[LAST_PROFILE_TOP_N_STATE] = top_n_value
+    else:
+        st.session_state.pop(LAST_PROFILE_TOP_N_STATE, None)
+
+    rows_payload = profile_payload.get("columns")
+    if isinstance(rows_payload, list):
+        st.session_state[LAST_PROFILE_ROWS_STATE] = rows_payload
+    else:
+        st.session_state[LAST_PROFILE_ROWS_STATE] = []
+
+    st.session_state[LAST_PROFILE_SUMMARY_STATE] = summary_payload
+    st.session_state[LAST_PROFILE_TARGET_STATE] = target_table
+    st.session_state[LAST_PROFILE_ERROR_STATE] = None
+
+
+def _record_last_profile_error(message: Optional[str]) -> None:
+    st.session_state[LAST_PROFILE_SUMMARY_STATE] = None
+    st.session_state[LAST_PROFILE_ROWS_STATE] = []
+    st.session_state[LAST_PROFILE_ERROR_STATE] = message if message else None
+    st.session_state.pop(LAST_PROFILE_TOP_N_STATE, None)
+    st.session_state.pop(LAST_PROFILE_TARGET_STATE, None)
+    st.session_state.pop(PROFILE_INCLUDE_COLS_STATE, None)
+    st.session_state.pop(PROFILE_INCLUDE_TOKEN_STATE, None)
+    st.session_state.pop(ui_keys.PROFILE_RESULTS_STATE, None)
+    st.session_state.pop(ui_keys.PROFILE_SELECTION_COUNTS, None)
+
+
 def _safe_int(value: Any) -> Optional[int]:
     """Convert a numeric-like value to an int when possible."""
 
@@ -668,6 +731,8 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
         if "busy_profiling" not in st.session_state:
             st.session_state["busy_profiling"] = False
 
+        _ensure_last_profile_state_defaults()
+
         st.header(ui_strings.PROFILE_HEADER_TITLE)
         st.caption(ui_strings.PROFILE_HEADER_CAPTION)
 
@@ -836,6 +901,15 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
                             st.warning(ui_strings.PROFILE_WARNING_SAVED_EMPTY)
                         else:
                             st.session_state[ui_keys.PROFILE_RESULTS_STATE] = loaded_profile
+                            _sync_last_profile_session(
+                                loaded_profile,
+                                str(
+                                    loaded_profile.get("target_table")
+                                    or selected_fqn
+                                    or ""
+                                ),
+                                loaded_profile.get("top_n"),
+                            )
                             st.session_state[ui_keys.PROFILE_LOADED_RUN_ID] = selected_run_id
                             target_table = loaded_profile.get("target_table")
                             if target_table:
@@ -895,6 +969,34 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
             _trigger_profile_load(load_selected_run_id)
 
         stored_profile_result = st.session_state.get(ui_keys.PROFILE_RESULTS_STATE)
+        last_summary_state = st.session_state.get(LAST_PROFILE_SUMMARY_STATE)
+        last_rows_state = st.session_state.get(LAST_PROFILE_ROWS_STATE)
+        last_target_state = st.session_state.get(LAST_PROFILE_TARGET_STATE)
+        if stored_profile_result:
+            _sync_last_profile_session(
+                stored_profile_result,
+                str(
+                    stored_profile_result.get("target_table")
+                    or last_target_state
+                    or selected_fqn
+                    or ""
+                ),
+                stored_profile_result.get("top_n"),
+            )
+        elif last_summary_state is not None or (
+            isinstance(last_rows_state, list) and last_rows_state
+        ):
+            stored_profile_result = {
+                "target_table": str(
+                    last_target_state or selected_fqn or ""
+                ),
+                "summary": last_summary_state or {},
+                "columns": last_rows_state or [],
+            }
+            saved_top_n = st.session_state.get(LAST_PROFILE_TOP_N_STATE)
+            if saved_top_n is not None:
+                stored_profile_result["top_n"] = saved_top_n
+
         loaded_run_id = st.session_state.get(ui_keys.PROFILE_LOADED_RUN_ID)
         if loaded_run_id and not stored_profile_result:
             st.session_state.pop(ui_keys.PROFILE_LOADED_RUN_ID, None)
@@ -905,7 +1007,7 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
                 stored_profile_result.get("target_table") or selected_fqn or ""
             )
         else:
-            current_target_fqn = str(selected_fqn or "")
+            current_target_fqn = str(last_target_state or selected_fqn or "")
 
         def _profile_signature(
             profile_payload: Optional[Dict[str, Any]],
@@ -1042,6 +1144,8 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
             loaded_run_id = None
             st.rerun()
 
+        inline_error_placeholder = st.empty()
+
         profile_result = stored_profile_result
 
         run_profile = bool(run_requested and not busy_profiling)
@@ -1052,9 +1156,13 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
                 st.session_state.pop(ui_keys.PROFILE_LOADED_RUN_ID, None)
                 loaded_run_id = None
                 if not session:
-                    st.error(ui_strings.PROFILE_RUN_ERROR_NO_SESSION)
+                    _record_last_profile_error(
+                        ui_strings.PROFILE_RUN_ERROR_NO_SESSION
+                    )
+                    profile_result = None
                 elif not selected_fqn:
                     st.warning(ui_strings.PROFILE_RUN_WARNING_NO_TABLE)
+                    st.session_state[LAST_PROFILE_ERROR_STATE] = None
                 else:
                     with st.spinner(ui_strings.PROFILE_RUN_SPINNER):
                         start = time.time()
@@ -1062,6 +1170,7 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
                         st.session_state.pop("profiling_last_error_trace", None)
                         summary_raw: Dict[str, Any] = {}
                         column_rows: List[Dict[str, Any]] = []
+                        error_message: Optional[str] = None
                         try:
                             summary_raw, column_rows = run_table_profile(
                                 session=session,
@@ -1077,34 +1186,55 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
                             st.session_state["profiling_last_error_trace"] = (
                                 traceback.format_exc()
                             )
-                            st.error("Profiling failed — see debug panel for details.")
-                            st.stop()
-                    duration = time.time() - start
+                            error_message = (
+                                "Profiling failed — see debug panel for details."
+                            )
+                        if error_message:
+                            _record_last_profile_error(error_message)
+                            profile_result = None
+                        else:
+                            duration = time.time() - start
 
-                    rows_profiled = int(summary_raw.get("rows_profiled") or 0)
-                    profiles: List[ColumnProfile] = []
-                    columns_payload: List[Dict[str, Any]] = []
-                    for column in column_rows:
-                        normalized_column = normalize_profile_row(column)
-                        columns_payload.append(normalized_column)
-                        profiles.append(_column_profile_from_payload(normalized_column))
-                    profile_result = {
-                        "target_table": selected_fqn,
-                        "summary": {
-                            "rows_profiled": rows_profiled,
-                            "sample_pct": summary_raw.get("sample_pct"),
-                            "duration_sec": duration,
-                            "columns": len(profiles),
-                        },
-                        "columns": columns_payload,
-                        "top_n": int(top_n),
-                    }
-                    st.session_state[ui_keys.PROFILE_RESULTS_STATE] = profile_result
-                    st.rerun()
+                            rows_profiled = int(summary_raw.get("rows_profiled") or 0)
+                            profiles: List[ColumnProfile] = []
+                            columns_payload: List[Dict[str, Any]] = []
+                            for column in column_rows:
+                                normalized_column = normalize_profile_row(column)
+                                columns_payload.append(normalized_column)
+                                profiles.append(
+                                    _column_profile_from_payload(normalized_column)
+                                )
+                            profile_result = {
+                                "target_table": selected_fqn,
+                                "summary": {
+                                    "rows_profiled": rows_profiled,
+                                    "sample_pct": summary_raw.get("sample_pct"),
+                                    "duration_sec": duration,
+                                    "columns": len(profiles),
+                                },
+                                "columns": columns_payload,
+                                "top_n": int(top_n),
+                            }
+                            _sync_last_profile_session(
+                                profile_result,
+                                str(selected_fqn),
+                                int(top_n),
+                            )
+                            st.session_state[ui_keys.PROFILE_RESULTS_STATE] = profile_result
+                            st.rerun()
             finally:
                 st.session_state["busy_profiling"] = False
 
         busy_profiling = bool(st.session_state.get("busy_profiling", False))
+
+        last_profile_error = st.session_state.get(LAST_PROFILE_ERROR_STATE)
+        if last_profile_error:
+            inline_error_placeholder.markdown(
+                f"<div style='color:#b00020;margin-top:0.25rem;'>⚠️ {html.escape(str(last_profile_error))}</div>",
+                unsafe_allow_html=True,
+            )
+        else:
+            inline_error_placeholder.empty()
 
         def _load_suggestion(
             profile_payload: Dict[str, Any],
