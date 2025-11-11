@@ -1260,15 +1260,6 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
 
         busy_profiling = bool(st.session_state.get("busy_profiling", False))
 
-        last_profile_error = st.session_state.get(LAST_PROFILE_ERROR_STATE)
-        if last_profile_error:
-            inline_error_placeholder.markdown(
-                f"<div style='color:#b00020;margin-top:0.25rem;'>⚠️ {html.escape(str(last_profile_error))}</div>",
-                unsafe_allow_html=True,
-            )
-        else:
-            inline_error_placeholder.empty()
-
         def _load_suggestion(
             profile_payload: Dict[str, Any],
             success_message: str,
@@ -1297,702 +1288,903 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
             st.success(success_message)
             st.rerun()
 
-        selected_columns_from_grid: List[str] = []
+        def _render_profile_results_from_session(
+            include_selection: Dict[str, bool],
+            inline_error_placeholder: Any,
+            *,
+            busy_profiling: bool,
+            suggest_cfg_pressed: bool,
+        ) -> Optional[Dict[str, Any]]:
+            summary_raw = st.session_state.get(LAST_PROFILE_SUMMARY_STATE)
+            rows_raw = st.session_state.get(LAST_PROFILE_ROWS_STATE) or []
 
-        if not profile_result:
-            if not DEBUG_PROFILING:
-                return
+            if isinstance(summary_raw, dict):
+                summary_payload: Optional[Dict[str, Any]] = dict(summary_raw)
+            elif summary_raw is None:
+                summary_payload = None
+            else:
+                try:
+                    summary_payload = dict(summary_raw)
+                except Exception:
+                    summary_payload = None
 
-        if profile_result:
-                summary = profile_result.get("summary", {})
-                metrics_cols = st.columns(3)
-                metrics_cols[0].metric(
-                    ui_strings.PROFILE_METRIC_ROWS,
-                    f"{summary.get('rows_profiled', 0):,}",
+            if isinstance(rows_raw, Sequence) and not isinstance(
+                rows_raw, (str, bytes, bytearray)
+            ):
+                rows_payload: List[Dict[str, Any]] = list(rows_raw)
+            else:
+                rows_payload = []
+
+            if summary_payload is None or not rows_payload:
+                last_profile_error = st.session_state.get(LAST_PROFILE_ERROR_STATE)
+                if last_profile_error:
+                    inline_error_placeholder.markdown(
+                        f"<div style='color:#b00020;margin-top:0.25rem;'>⚠️ {html.escape(str(last_profile_error))}</div>",
+                        unsafe_allow_html=True,
+                    )
+                else:
+                    inline_error_placeholder.empty()
+                return None
+
+            inline_error_placeholder.empty()
+
+            profile_result: Dict[str, Any] = {
+                "summary": summary_payload or {},
+                "columns": rows_payload,
+            }
+
+            target_table_state = st.session_state.get(LAST_PROFILE_TARGET_STATE)
+            if target_table_state:
+                profile_result["target_table"] = str(target_table_state)
+            elif current_target_fqn:
+                profile_result["target_table"] = str(current_target_fqn)
+
+            saved_top_n = st.session_state.get(LAST_PROFILE_TOP_N_STATE)
+            if saved_top_n is not None:
+                profile_result["top_n"] = saved_top_n
+
+            # Existing rendering logic follows, operating on `profile_result`.
+            # The block below is adapted from the previous in-line rendering.
+            summary = profile_result.get("summary", {})
+            metrics_cols = st.columns(3)
+            metrics_cols[0].metric(
+                ui_strings.PROFILE_METRIC_ROWS,
+                f"{summary.get('rows_profiled', 0):,}",
+            )
+            sample_pct_display = summary.get("sample_pct")
+            sample_label = (
+                ui_strings.PROFILE_SAMPLE_FULL_SCAN_LABEL
+                if sample_pct_display is None
+                else f"{float(sample_pct_display):.1f}%"
+            )
+            metrics_cols[1].metric(ui_strings.PROFILE_METRIC_SAMPLING, sample_label)
+            metrics_cols[2].metric(
+                ui_strings.PROFILE_METRIC_DURATION,
+                ui_strings.PROFILE_METRIC_DURATION_FORMAT.format(
+                    duration=float(summary.get("duration_sec", 0.0))
+                ),
+            )
+
+            if (
+                summary.get("sample_pct") is None
+                and summary.get("rows_profiled", 0) > FULL_SCAN_WARNING_THRESHOLD
+            ):
+                profiled = int(summary.get("rows_profiled", 0))
+                st.warning(
+                    ui_strings.PROFILE_FULL_SCAN_WARNING.format(rows=profiled),
+                    icon="⚠️",
                 )
-                sample_pct_display = summary.get("sample_pct")
-                sample_label = (
-                    ui_strings.PROFILE_SAMPLE_FULL_SCAN_LABEL
-                    if sample_pct_display is None
-                    else f"{float(sample_pct_display):.1f}%"
+
+            profiles_raw = profile_result.get("columns", [])
+            profiles = [_column_profile_from_payload(col) for col in profiles_raw]
+            df = _profiles_to_frame(profiles)
+            required_defaults: Dict[str, Any] = {
+                "dq_selected": False,
+                "dq_reason": "",
+                "whitespace_pct": None,
+                "whitespace_only_pct": None,
+            }
+            for column_name, default_value in required_defaults.items():
+                if column_name not in df.columns:
+                    df[column_name] = default_value
+            if "dq_selected" in df.columns:
+                df["dq_selected"] = df["dq_selected"].apply(
+                    lambda value: (_safe_bool(value) or False)
                 )
-                metrics_cols[1].metric(ui_strings.PROFILE_METRIC_SAMPLING, sample_label)
-                metrics_cols[2].metric(
-                    ui_strings.PROFILE_METRIC_DURATION,
-                    ui_strings.PROFILE_METRIC_DURATION_FORMAT.format(
-                        duration=float(summary.get("duration_sec", 0.0))
-                    ),
+            if "dq_reason" in df.columns:
+                df["dq_reason"] = df["dq_reason"].apply(
+                    lambda value: _stringify_for_display(value) or ""
+                )
+            for whitespace_column in ("whitespace_pct", "whitespace_only_pct"):
+                if whitespace_column in df.columns:
+                    df[whitespace_column] = pd.to_numeric(
+                        df[whitespace_column], errors="coerce"
+                    )
+
+            filter_box = st.container()
+            with filter_box:
+                st.subheader(ui_strings.PROFILE_FILTERS_SUBHEADER, anchor=False)
+                filter_cols = st.columns(4)
+                high_null = filter_cols[0].toggle(
+                    ui_strings.PROFILE_FILTER_HIGH_NULL, value=False
+                )
+                unique_candidates = filter_cols[1].toggle(
+                    ui_strings.PROFILE_FILTER_UNIQUE, value=False
+                )
+                low_cardinality = filter_cols[2].toggle(
+                    ui_strings.PROFILE_FILTER_LOW_CARD, value=False
+                )
+                whitespace_risk = filter_cols[3].toggle(
+                    ui_strings.PROFILE_FILTER_WHITESPACE, value=False
+                )
+                st.markdown(f"**{ui_strings.PROFILE_FILTER_SEMANTIC_LABEL}**")
+                semantic_cols = st.columns(7)
+                filter_identifiers = semantic_cols[0].checkbox(
+                    ui_strings.PROFILE_FILTER_SEMANTIC_IDENTIFIERS, value=False
+                )
+                filter_financial = semantic_cols[1].checkbox(
+                    ui_strings.PROFILE_FILTER_SEMANTIC_FINANCIAL, value=False
+                )
+                filter_instrument = semantic_cols[2].checkbox(
+                    ui_strings.PROFILE_FILTER_SEMANTIC_INSTRUMENT, value=False
+                )
+                filter_geo = semantic_cols[3].checkbox(
+                    ui_strings.PROFILE_FILTER_SEMANTIC_GEO, value=False
+                )
+                filter_contact = semantic_cols[4].checkbox(
+                    ui_strings.PROFILE_FILTER_SEMANTIC_CONTACT, value=False
+                )
+                filter_date_text = semantic_cols[5].checkbox(
+                    ui_strings.PROFILE_FILTER_SEMANTIC_DATE_TEXT, value=False
+                )
+                filter_ref_codes = semantic_cols[6].checkbox(
+                    ui_strings.PROFILE_FILTER_SEMANTIC_REFERENCE, value=False
                 )
 
-                if summary.get("sample_pct") is None and summary.get("rows_profiled", 0) > FULL_SCAN_WARNING_THRESHOLD:
-                    profiled = int(summary.get("rows_profiled", 0))
-                    st.warning(
-                        ui_strings.PROFILE_FULL_SCAN_WARNING.format(rows=profiled),
-                        icon="⚠️",
-                    )
-
-                profiles_raw = profile_result.get("columns", [])
-                profiles = [_column_profile_from_payload(col) for col in profiles_raw]
-                df = _profiles_to_frame(profiles)
-                required_defaults: Dict[str, Any] = {
-                    "dq_selected": False,
-                    "dq_reason": "",
-                    "whitespace_pct": None,
-                    "whitespace_only_pct": None,
-                }
-                for column_name, default_value in required_defaults.items():
-                    if column_name not in df.columns:
-                        df[column_name] = default_value
-                if "dq_selected" in df.columns:
-                    df["dq_selected"] = df["dq_selected"].apply(lambda value: (_safe_bool(value) or False))
-                if "dq_reason" in df.columns:
-                    df["dq_reason"] = df["dq_reason"].apply(
-                        lambda value: _stringify_for_display(value) or ""
-                    )
-                for whitespace_column in ("whitespace_pct", "whitespace_only_pct"):
-                    if whitespace_column in df.columns:
-                        df[whitespace_column] = pd.to_numeric(df[whitespace_column], errors="coerce")
-
-                filter_box = st.container()
-                with filter_box:
-                    st.subheader(ui_strings.PROFILE_FILTERS_SUBHEADER, anchor=False)
-                    filter_cols = st.columns(4)
-                    high_null = filter_cols[0].toggle(ui_strings.PROFILE_FILTER_HIGH_NULL, value=False)
-                    unique_candidates = filter_cols[1].toggle(
-                        ui_strings.PROFILE_FILTER_UNIQUE, value=False
-                    )
-                    low_cardinality = filter_cols[2].toggle(
-                        ui_strings.PROFILE_FILTER_LOW_CARD, value=False
-                    )
-                    whitespace_risk = filter_cols[3].toggle(
-                        ui_strings.PROFILE_FILTER_WHITESPACE, value=False
-                    )
-                    st.markdown(f"**{ui_strings.PROFILE_FILTER_SEMANTIC_LABEL}**")
-                    semantic_cols = st.columns(7)
-                    filter_identifiers = semantic_cols[0].checkbox(
-                        ui_strings.PROFILE_FILTER_SEMANTIC_IDENTIFIERS, value=False
-                    )
-                    filter_financial = semantic_cols[1].checkbox(
-                        ui_strings.PROFILE_FILTER_SEMANTIC_FINANCIAL, value=False
-                    )
-                    filter_instrument = semantic_cols[2].checkbox(
-                        ui_strings.PROFILE_FILTER_SEMANTIC_INSTRUMENT, value=False
-                    )
-                    filter_geo = semantic_cols[3].checkbox(
-                        ui_strings.PROFILE_FILTER_SEMANTIC_GEO, value=False
-                    )
-                    filter_contact = semantic_cols[4].checkbox(
-                        ui_strings.PROFILE_FILTER_SEMANTIC_CONTACT, value=False
-                    )
-                    filter_date_text = semantic_cols[5].checkbox(
-                        ui_strings.PROFILE_FILTER_SEMANTIC_DATE_TEXT, value=False
-                    )
-                    filter_ref_codes = semantic_cols[6].checkbox(
-                        ui_strings.PROFILE_FILTER_SEMANTIC_REFERENCE, value=False
-                    )
-
-                save_enabled = bool(session and meta_db and meta_schema)
-                last_profile_summary_raw = st.session_state.get(
-                    LAST_PROFILE_SUMMARY_STATE
-                )
-                if isinstance(last_profile_summary_raw, dict):
-                    last_profile_summary: Optional[Dict[str, Any]] = dict(
-                        last_profile_summary_raw
-                    )
-                elif last_profile_summary_raw is None:
+            save_enabled = bool(session and meta_db and meta_schema)
+            last_profile_summary_raw = st.session_state.get(
+                LAST_PROFILE_SUMMARY_STATE
+            )
+            if isinstance(last_profile_summary_raw, dict):
+                last_profile_summary = dict(last_profile_summary_raw)
+            elif last_profile_summary_raw is None:
+                last_profile_summary = None
+            else:
+                try:
+                    last_profile_summary = dict(last_profile_summary_raw)
+                except Exception:
                     last_profile_summary = None
-                else:
-                    try:
-                        last_profile_summary = dict(last_profile_summary_raw)
-                    except Exception:
-                        last_profile_summary = None
 
-                last_profile_rows_raw = st.session_state.get(
-                    LAST_PROFILE_ROWS_STATE, []
-                )
-                if isinstance(last_profile_rows_raw, Sequence) and not isinstance(
-                    last_profile_rows_raw, (str, bytes, bytearray)
-                ):
-                    last_profile_rows = list(last_profile_rows_raw)
-                else:
-                    last_profile_rows = []
+            last_profile_rows_raw = st.session_state.get(
+                LAST_PROFILE_ROWS_STATE, []
+            )
+            if isinstance(last_profile_rows_raw, Sequence) and not isinstance(
+                last_profile_rows_raw, (str, bytes, bytearray)
+            ):
+                last_profile_rows = list(last_profile_rows_raw)
+            else:
+                last_profile_rows = []
 
-                has_last_profile_payload = (
-                    last_profile_summary is not None and len(last_profile_rows) > 0
-                )
+            has_last_profile_payload = (
+                last_profile_summary is not None and len(last_profile_rows) > 0
+            )
 
-                if not save_enabled:
-                    st.session_state.pop(ui_keys.PROFILE_SAVE_TOGGLE, None)
-                    st.session_state.pop(ui_keys.PROFILE_SAVE_TOGGLE_PREV, None)
-                    st.session_state.pop(ui_keys.PROFILE_SAVE_RUN_ID, None)
+            if not save_enabled:
+                st.session_state.pop(ui_keys.PROFILE_SAVE_TOGGLE, None)
+                st.session_state.pop(ui_keys.PROFILE_SAVE_TOGGLE_PREV, None)
+                st.session_state.pop(ui_keys.PROFILE_SAVE_RUN_ID, None)
 
-                save_help = (
-                    ui_strings.PROFILE_SAVE_HELP_ENABLED
-                    if save_enabled
-                    else ui_strings.PROFILE_SAVE_HELP_DISABLED
-                )
-                save_disabled = (
-                    (not save_enabled)
-                    or busy_profiling
-                    or not has_last_profile_payload
-                )
-                save_toggle = st.toggle(
-                    ui_strings.PROFILE_SAVE_LABEL,
-                    key=ui_keys.PROFILE_SAVE_TOGGLE,
-                    value=False,
-                    disabled=save_disabled,
-                    help=save_help,
-                )
+            save_help = (
+                ui_strings.PROFILE_SAVE_HELP_ENABLED
+                if save_enabled
+                else ui_strings.PROFILE_SAVE_HELP_DISABLED
+            )
+            save_disabled = (
+                (not save_enabled)
+                or busy_profiling
+                or not has_last_profile_payload
+            )
+            save_toggle = st.toggle(
+                ui_strings.PROFILE_SAVE_LABEL,
+                key=ui_keys.PROFILE_SAVE_TOGGLE,
+                value=False,
+                disabled=save_disabled,
+                help=save_help,
+            )
 
-                prev_toggle = st.session_state.get(ui_keys.PROFILE_SAVE_TOGGLE_PREV, False)
-                st.session_state[ui_keys.PROFILE_SAVE_TOGGLE_PREV] = save_toggle
+            prev_toggle = st.session_state.get(
+                ui_keys.PROFILE_SAVE_TOGGLE_PREV, False
+            )
+            st.session_state[ui_keys.PROFILE_SAVE_TOGGLE_PREV] = save_toggle
 
-                should_save_profile = (
-                    save_toggle
-                    and save_enabled
-                    and not prev_toggle
-                    and not busy_profiling
-                    and has_last_profile_payload
+            should_save_profile = (
+                save_toggle
+                and save_enabled
+                and not prev_toggle
+                and not busy_profiling
+                and has_last_profile_payload
+            )
+            if should_save_profile:
+                st.session_state["busy_profiling"] = True
+                summary_payload = dict(last_profile_summary or {})
+                run_info = {**summary_payload}
+                target_table_value = st.session_state.get(
+                    LAST_PROFILE_TARGET_STATE
+                ) or run_info.get("target_table") or profile_result.get(
+                    "target_table"
                 )
-                if should_save_profile:
-                    st.session_state["busy_profiling"] = True
-                    busy_profiling = True
-                    summary_payload = dict(last_profile_summary or {})
-                    run_info = {**summary_payload}
-                    target_table_value = st.session_state.get(
-                        LAST_PROFILE_TARGET_STATE
-                    ) or run_info.get("target_table") or profile_result.get(
-                        "target_table"
+                if target_table_value:
+                    run_info["target_table"] = str(target_table_value)
+                top_n_value = st.session_state.get(LAST_PROFILE_TOP_N_STATE)
+                normalized_top_n = _safe_int(top_n_value)
+                if normalized_top_n is None:
+                    normalized_top_n = _safe_int(run_info.get("top_n"))
+                if normalized_top_n is not None:
+                    run_info["top_n"] = normalized_top_n
+                run_info.update(
+                    {
+                        "saved_at": datetime.utcnow().isoformat() + "Z",
+                    }
+                )
+                rows_payload: List[Dict[str, Any]] = []
+                for column_profile in last_profile_rows:
+                    if not isinstance(column_profile, dict):
+                        continue
+                    normalized_column = normalize_profile_row(
+                        dict(column_profile)
                     )
-                    if target_table_value:
-                        run_info["target_table"] = str(target_table_value)
-                    top_n_value = st.session_state.get(LAST_PROFILE_TOP_N_STATE)
-                    normalized_top_n = _safe_int(top_n_value)
-                    if normalized_top_n is None:
-                        normalized_top_n = _safe_int(run_info.get("top_n"))
-                    if normalized_top_n is not None:
-                        run_info["top_n"] = normalized_top_n
-                    run_info.update(
-                        {
-                            "saved_at": datetime.utcnow().isoformat() + "Z",
-                        }
+                    column_name = normalized_column.get("column_name")
+                    if not column_name:
+                        continue
+                    rows_payload.append(normalized_column)
+
+                if rows_payload and "columns" not in run_info:
+                    run_info["columns"] = len(rows_payload)
+
+                try:
+                    save_result = save_profile_results(
+                        session=session,
+                        meta_db=meta_db,
+                        meta_schema=meta_schema,
+                        run_info=run_info,
+                        rows=rows_payload,
                     )
-                    rows_payload: List[Dict[str, Any]] = []
-                    for column_profile in last_profile_rows:
-                        if not isinstance(column_profile, dict):
-                            continue
-                        normalized_column = normalize_profile_row(
-                            dict(column_profile)
-                        )
-                        column_name = normalized_column.get("column_name")
-                        if not column_name:
-                            continue
-                        rows_payload.append(normalized_column)
-
-                    if rows_payload and "columns" not in run_info:
-                        run_info["columns"] = len(rows_payload)
-
-                    try:
-                        save_result = save_profile_results(
-                            session=session,
-                            meta_db=meta_db,
-                            meta_schema=meta_schema,
-                            run_info=run_info,
-                            rows=rows_payload,
-                        )
-                    except Exception as exc:  # pragma: no cover - Snowflake specific
-                        st.error(ui_strings.PROFILE_SAVE_ERROR.format(error=exc))
-                    else:
-                        if isinstance(save_result, dict):
-                            if not save_result.get("ok", False):
-                                error_text = save_result.get("error") or "Unknown error"
-                                st.error(ui_strings.PROFILE_SAVE_ERROR.format(error=error_text))
-                                run_id = ""
-                            else:
-                                run_id = str(save_result.get("run_id") or "")
+                except Exception as exc:  # pragma: no cover - Snowflake specific
+                    st.error(ui_strings.PROFILE_SAVE_ERROR.format(error=exc))
+                else:
+                    if isinstance(save_result, dict):
+                        if not save_result.get("ok", False):
+                            error_text = save_result.get("error") or "Unknown error"
+                            st.error(
+                                ui_strings.PROFILE_SAVE_ERROR.format(
+                                    error=error_text
+                                )
+                            )
+                            run_id = ""
                         else:
-                            run_id = str(save_result)
+                            run_id = str(save_result.get("run_id") or "")
+                    else:
+                        run_id = str(save_result)
 
-                        if run_id:
-                            st.session_state[ui_keys.PROFILE_SAVE_RUN_ID] = run_id
-                            st.success(ui_strings.PROFILE_SAVE_SUCCESS.format(run_id=run_id))
-                    finally:
-                        st.session_state["busy_profiling"] = False
-                    busy_profiling = bool(st.session_state.get("busy_profiling", False))
+                    if run_id:
+                        st.session_state[ui_keys.PROFILE_SAVE_RUN_ID] = run_id
+                        st.success(
+                            ui_strings.PROFILE_SAVE_SUCCESS.format(run_id=run_id)
+                        )
+                finally:
+                    st.session_state["busy_profiling"] = False
 
-                if not save_toggle:
-                    st.session_state.pop(ui_keys.PROFILE_SAVE_RUN_ID, None)
+            if not save_toggle:
+                st.session_state.pop(ui_keys.PROFILE_SAVE_RUN_ID, None)
 
-                filtered_df = df.copy()
-                if high_null:
-                    filtered_df = filtered_df[(filtered_df["null_pct"].fillna(0) > 0.20)]
-                if unique_candidates and summary.get("rows_profiled"):
-                    rows = float(summary["rows_profiled"])
-                    filtered_df = filtered_df[(filtered_df["distincts"].fillna(0) >= rows) & (filtered_df["nulls"].fillna(0) == 0)]
-                if low_cardinality and summary.get("rows_profiled"):
-                    rows = float(summary["rows_profiled"])
-                    filtered_df = filtered_df[(filtered_df["distincts"].fillna(rows) <= max(20, rows * 0.1))]
-                if whitespace_risk:
-                    filtered_df = filtered_df[(filtered_df["whitespace_pct"].fillna(0) > 5)]
+            filtered_df = df.copy()
+            if high_null:
+                filtered_df = filtered_df[(filtered_df["null_pct"].fillna(0) > 0.20)]
+            if unique_candidates and summary.get("rows_profiled"):
+                rows = float(summary["rows_profiled"])
+                filtered_df = filtered_df[
+                    (filtered_df["distincts"].fillna(0) >= rows)
+                    & (filtered_df["nulls"].fillna(0) == 0)
+                ]
+            if low_cardinality and summary.get("rows_profiled"):
+                rows = float(summary["rows_profiled"])
+                filtered_df = filtered_df[
+                    (filtered_df["distincts"].fillna(rows) <= max(20, rows * 0.1))
+                ]
+            if whitespace_risk:
+                filtered_df = filtered_df[(filtered_df["whitespace_pct"].fillna(0) > 5)]
 
-                semantic_filter_map = {
-                    "Identifiers": {"ACCOUNT_ID", "ORDER_ID", "TRADE_ID", "UUID", "IBAN", "REF_CODE"},
-                    "Financial": {"PRICE/AMOUNT/QUANTITY", "IBAN", "BIC"},
-                    "Instrument": {"ISIN", "TICKER/SYMBOL"},
-                    "Geo": {"COUNTRY_CODE/NAME", "CURRENCY_CODE", "BIC"},
-                    "Contact": {"EMAIL", "PHONE"},
-                    "Date (Text)": {"DATE_IN_TEXT"},
-                    "Reference Codes": {"REF_CODE"},
-                }
-                active_semantic_filters: List[str] = []
-                if filter_identifiers:
-                    active_semantic_filters.append("Identifiers")
-                if filter_financial:
-                    active_semantic_filters.append("Financial")
-                if filter_instrument:
-                    active_semantic_filters.append("Instrument")
-                if filter_geo:
-                    active_semantic_filters.append("Geo")
-                if filter_contact:
-                    active_semantic_filters.append("Contact")
-                if filter_date_text:
-                    active_semantic_filters.append("Date (Text)")
-                if filter_ref_codes:
-                    active_semantic_filters.append("Reference Codes")
+            semantic_filter_map = {
+                "Identifiers": {
+                    "ACCOUNT_ID",
+                    "ORDER_ID",
+                    "TRADE_ID",
+                    "UUID",
+                    "IBAN",
+                    "REF_CODE",
+                },
+                "Financial": {"PRICE/AMOUNT/QUANTITY", "IBAN", "BIC"},
+                "Instrument": {"ISIN", "TICKER/SYMBOL"},
+                "Geo": {"COUNTRY_CODE/NAME", "CURRENCY_CODE", "BIC"},
+                "Contact": {"EMAIL", "PHONE"},
+                "Date (Text)": {"DATE_IN_TEXT"},
+                "Reference Codes": {"REF_CODE"},
+            }
+            active_semantic_filters: List[str] = []
+            if filter_identifiers:
+                active_semantic_filters.append("Identifiers")
+            if filter_financial:
+                active_semantic_filters.append("Financial")
+            if filter_instrument:
+                active_semantic_filters.append("Instrument")
+            if filter_geo:
+                active_semantic_filters.append("Geo")
+            if filter_contact:
+                active_semantic_filters.append("Contact")
+            if filter_date_text:
+                active_semantic_filters.append("Date (Text)")
+            if filter_ref_codes:
+                active_semantic_filters.append("Reference Codes")
 
-                if active_semantic_filters:
-                    allowed_types = set()
-                    for key in active_semantic_filters:
-                        allowed_types.update(semantic_filter_map.get(key, set()))
-                    filtered_df = filtered_df[filtered_df["semantic_type"].isin(allowed_types)]
-                display_df = filtered_df.copy()
+            if active_semantic_filters:
+                filtered_df = filtered_df[
+                    filtered_df["semantic_type"].isin(
+                        set().union(
+                            *[
+                                semantic_filter_map.get(name, set())
+                                for name in active_semantic_filters
+                            ]
+                        )
+                    )
+                ]
+
+            grid_columns = ["Include"] + [
+                column
+                for column in ui_strings.PROFILE_GRID_COLUMNS
+                if column != "Select"
+            ]
+            confidence_legend_html = ui_strings.PROFILE_CONFIDENCE_LEGEND_HTML
+
+            def _confidence_badge_emoji(value: Optional[float]) -> str:
+                if value is None:
+                    return ""
+                if value >= CONFIDENCE_HIGH_THRESHOLD:
+                    return "🟢"
+                if value >= CONFIDENCE_MEDIUM_THRESHOLD:
+                    return "🟡"
+                return "🔴"
+
+            def _format_confidence_display(value):
+                if value is None or (
+                    isinstance(value, float) and math.isnan(value)
+                ):
+                    return ""
+                v = float(value)
+                if v < 10.0:
+                    s = f"{v:.1f}".rstrip("0").rstrip(".")
+                else:
+                    s = f"{v:.0f}"
+                badge = _confidence_badge_emoji(v)
+                return f"{badge} {s}%".strip()
+
+            def _confidence_style(value):
+                if value is None or (
+                    isinstance(value, float) and math.isnan(value)
+                ):
+                    return ""
+                v = float(value)
+                if v >= CONFIDENCE_HIGH_THRESHOLD:
+                    return "background-color: #2e7d32; color: #ffffff;"
+                if v >= CONFIDENCE_MEDIUM_THRESHOLD:
+                    return "background-color: #f9a825; color: #000000;"
+                return "background-color: #9e9e9e; color: #ffffff;"
+
+            selected_columns_from_grid: List[str] = []
+
+            if not filtered_df.empty:
+                def _is_string_type_name(type_name: Any) -> bool:
+                    upper = str(type_name or "").upper()
+                    return any(
+                        token in upper
+                        for token in ("CHAR", "STRING", "TEXT", "VARCHAR")
+                    )
+
+                def _is_numeric_type_name(type_name: Any) -> bool:
+                    upper = str(type_name or "").upper()
+                    return any(
+                        token in upper
+                        for token in (
+                            "NUMBER",
+                            "NUMERIC",
+                            "DECIMAL",
+                            "INT",
+                            "INTEGER",
+                            "BIGINT",
+                            "SMALLINT",
+                            "TINYINT",
+                            "BYTEINT",
+                            "FLOAT",
+                            "DOUBLE",
+                            "REAL",
+                        )
+                    )
+
+                def _format_count_with_pct(
+                    count_value: Any, pct_value: Any
+                ) -> str:
+                    count_int = _safe_int(count_value)
+                    pct_ratio = _safe_float(pct_value)
+                    if count_int is None and pct_ratio is None:
+                        return "—"
+                    parts: List[str] = []
+                    if count_int is not None:
+                        parts.append(f"{count_int:,}")
+                    if pct_ratio is not None:
+                        pct_value = max(0.0, pct_ratio * 100.0)
+                        parts.append(f"({pct_value:.1f}%)")
+                    return " ".join(parts) if parts else "—"
+
+                def _format_length_stats_cell(row: pd.Series) -> str:
+                    data_type = row.get("data_type")
+                    if not (
+                        _is_string_type_name(data_type)
+                        or _is_numeric_type_name(data_type)
+                    ):
+                        return "—"
+
+                    len_min_value = _safe_float(row.get("len_min"))
+                    avg_value = _safe_float(row.get("avg_len"))
+                    len_max_value = _safe_float(row.get("len_max"))
+
+                    def _fmt_bound(value: Optional[float]) -> str:
+                        if value is None:
+                            return "—"
+                        try:
+                            return f"{int(round(value))}"
+                        except Exception:
+                            return "—"
+
+                    min_display = _fmt_bound(len_min_value)
+                    avg_display = f"{avg_value:.1f}" if avg_value is not None else "—"
+                    max_display = _fmt_bound(len_max_value)
+
+                    return "/".join([min_display, avg_display, max_display])
+
+                def _format_value_cell(raw_value: Any) -> str:
+                    text_value = _stringify_for_display(raw_value)
+                    if text_value is None:
+                        return "—"
+                    text = str(text_value).strip()
+                    if not text or text.lower() == "nan":
+                        return "—"
+                    if len(text) > 50:
+                        return text[:47] + "..."
+                    return text
+
+                def _format_semantic_label(value: Any) -> str:
+                    if value is None:
+                        return "Unknown"
+                    text_value = str(value).strip()
+                    if not text_value:
+                        return "Unknown"
+                    normalized = text_value.replace("_", " ")
+                    return normalized.title()
+
+                def _format_whitespace_display(value: Any) -> str:
+                    numeric = _safe_float(value)
+                    if numeric is None or math.isclose(
+                        numeric, 0.0, abs_tol=1e-9
+                    ):
+                        return "—"
+                    return f"{numeric:.1f}%"
+
+                def _compose_note(row: pd.Series) -> str:
+                    text_value = _stringify_for_display(row.get("dq_reason"))
+                    if not text_value:
+                        text_value = _stringify_for_display(row.get("rationale"))
+                    if not text_value:
+                        text_value = _stringify_for_display(row.get("error"))
+                    note = str(text_value or "").strip()
+                    if len(note) > 120:
+                        return note[:117] + "..."
+                    return note
+
+                display_df_local = filtered_df.copy()
                 for dup in [
                     c
-                    for c in display_df.columns
+                    for c in display_df_local.columns
                     if c and c.strip().lower() in {"include", "include "}
                 ]:
-                    display_df.drop(columns=[dup], inplace=True, errors="ignore")
-                grid_columns = ["Include"] + [
-                    column
-                    for column in ui_strings.PROFILE_GRID_COLUMNS
-                    if column != "Select"
-                ]
-                confidence_legend_html = ui_strings.PROFILE_CONFIDENCE_LEGEND_HTML
+                    display_df_local.drop(columns=[dup], inplace=True, errors="ignore")
+                display_df_local["Column"] = (
+                    display_df_local.get("column_name", "").fillna("").astype(str)
+                )
+                display_df_local["Physical Type"] = (
+                    display_df_local.get("data_type", "").fillna("").astype(str)
+                )
+                display_df_local["Nulls"] = display_df_local.apply(
+                    lambda row: _format_count_with_pct(
+                        row.get("nulls"), row.get("null_pct")
+                    ),
+                    axis=1,
+                )
+                display_df_local["Distinct"] = display_df_local.apply(
+                    lambda row: _format_count_with_pct(
+                        row.get("distincts"), row.get("distinct_pct")
+                    ),
+                    axis=1,
+                )
+                display_df_local["Avg Length"] = display_df_local.apply(
+                    _format_length_stats_cell, axis=1
+                )
+                display_df_local["Min Value"] = display_df_local["min_val"].apply(
+                    _format_value_cell
+                )
+                display_df_local["Max Value"] = display_df_local["max_val"].apply(
+                    _format_value_cell
+                )
+                display_df_local["Guessed Type"] = display_df_local[
+                    "semantic_type"
+                ].apply(_format_semantic_label)
+                display_df_local["Whitespace %"] = display_df_local[
+                    "whitespace_pct"
+                ].apply(_format_whitespace_display)
 
-                def _confidence_badge_emoji(value: Optional[float]) -> str:
-                    if value is None:
-                        return ""
-                    if value >= CONFIDENCE_HIGH_THRESHOLD:
-                        return "🟢"
-                    if value >= CONFIDENCE_MEDIUM_THRESHOLD:
-                        return "🟡"
-                    return "🔴"
+                def _normalize_confidence(
+                    raw_value: Any
+                ) -> Optional[float]:
+                    confidence_raw = _safe_float(raw_value)
+                    if confidence_raw is None:
+                        return None
+                    if confidence_raw <= 1.0:
+                        confidence_raw *= 100.0
+                    confidence_raw = max(0.0, min(confidence_raw, 100.0))
+                    return confidence_raw
 
-                def _format_confidence_display(value):
-                    if value is None or (isinstance(value, float) and math.isnan(value)):
-                        return ""
-                    v = float(value)
-                    if v < 10.0:
-                        s = f"{v:.1f}".rstrip("0").rstrip(".")
-                    else:
-                        s = f"{v:.0f}"
-                    badge = _confidence_badge_emoji(v)
-                    return f"{badge} {s}%".strip()
-
-                def _confidence_style(value):
-                    if value is None or (isinstance(value, float) and math.isnan(value)):
-                        return ""
-                    v = float(value)
-                    if v >= CONFIDENCE_HIGH_THRESHOLD:
-                        return "background-color: #2e7d32; color: #ffffff;"
-                    if v >= CONFIDENCE_MEDIUM_THRESHOLD:
-                        return "background-color: #f9a825; color: #000000;"
-                    return "background-color: #9e9e9e; color: #ffffff;"
-
-                target_table = str(profile_result.get("target_table") or current_target_fqn)
-                if not display_df.empty:
-                    def _is_string_type_name(type_name: Any) -> bool:
-                        upper = str(type_name or "").upper()
-                        return any(token in upper for token in ("CHAR", "STRING", "TEXT", "VARCHAR"))
-
-                    def _is_numeric_type_name(type_name: Any) -> bool:
-                        upper = str(type_name or "").upper()
-                        return any(
-                            token in upper
-                            for token in (
-                                "NUMBER",
-                                "NUMERIC",
-                                "DECIMAL",
-                                "INT",
-                                "INTEGER",
-                                "BIGINT",
-                                "SMALLINT",
-                                "TINYINT",
-                                "BYTEINT",
-                                "FLOAT",
-                                "DOUBLE",
-                                "REAL",
-                            )
-                        )
-
-                    def _format_count_with_pct(count_value: Any, pct_value: Any) -> str:
-                        count_int = _safe_int(count_value)
-                        pct_ratio = _safe_float(pct_value)
-                        if count_int is None and pct_ratio is None:
-                            return "—"
-                        parts: List[str] = []
-                        if count_int is not None:
-                            parts.append(f"{count_int:,}")
-                        if pct_ratio is not None:
-                            pct_value = max(0.0, pct_ratio * 100.0)
-                            parts.append(f"({pct_value:.1f}%)")
-                        return " ".join(parts) if parts else "—"
-
-                    def _format_length_stats_cell(row: pd.Series) -> str:
-                        data_type = row.get("data_type")
-                        if not (_is_string_type_name(data_type) or _is_numeric_type_name(data_type)):
-                            return "—"
-
-                        len_min_value = _safe_float(row.get("len_min"))
-                        avg_value = _safe_float(row.get("avg_len"))
-                        len_max_value = _safe_float(row.get("len_max"))
-
-                        def _fmt_bound(value: Optional[float]) -> str:
-                            if value is None:
-                                return "—"
-                            try:
-                                return f"{int(round(value))}"
-                            except Exception:
-                                return "—"
-
-                        min_display = _fmt_bound(len_min_value)
-                        avg_display = f"{avg_value:.1f}" if avg_value is not None else "—"
-                        max_display = _fmt_bound(len_max_value)
-
-                        return "/".join([min_display, avg_display, max_display])
-
-                    def _format_value_cell(raw_value: Any) -> str:
-                        text_value = _stringify_for_display(raw_value)
-                        if text_value is None:
-                            return "—"
-                        text = str(text_value).strip()
-                        if not text or text.lower() == "nan":
-                            return "—"
-                        if len(text) > 50:
-                            return text[:47] + "..."
-                        return text
-
-                    def _format_semantic_label(value: Any) -> str:
-                        if value is None:
-                            return "Unknown"
-                        text_value = str(value).strip()
-                        if not text_value:
-                            return "Unknown"
-                        normalized = text_value.replace("_", " ")
-                        return normalized.title()
-
-                    def _format_whitespace_display(value: Any) -> str:
-                        numeric = _safe_float(value)
-                        if numeric is None or math.isclose(numeric, 0.0, abs_tol=1e-9):
-                            return "—"
-                        return f"{numeric:.1f}%"
-
-                    def _compose_note(row: pd.Series) -> str:
-                        text_value = _stringify_for_display(row.get("dq_reason"))
-                        if not text_value:
-                            text_value = _stringify_for_display(row.get("rationale"))
-                        if not text_value:
-                            text_value = _stringify_for_display(row.get("error"))
-                        note = str(text_value or "").strip()
-                        if len(note) > 120:
-                            return note[:117] + "..."
-                        return note
-
-                    display_df_local = display_df.copy()
-                    for dup in [
-                        c
-                        for c in display_df_local.columns
-                        if c and c.strip().lower() in {"include", "include "}
-                    ]:
-                        display_df_local.drop(columns=[dup], inplace=True, errors="ignore")
-                    display_df_local["Column"] = display_df_local.get("column_name", "").fillna("").astype(str)
-                    display_df_local["Physical Type"] = (
-                        display_df_local.get("data_type", "").fillna("").astype(str)
-                    )
-                    display_df_local["Nulls"] = display_df_local.apply(
-                        lambda row: _format_count_with_pct(row.get("nulls"), row.get("null_pct")), axis=1
-                    )
-                    display_df_local["Distinct"] = display_df_local.apply(
-                        lambda row: _format_count_with_pct(row.get("distincts"), row.get("distinct_pct")), axis=1
-                    )
-                    display_df_local["Avg Length"] = display_df_local.apply(
-                        _format_length_stats_cell, axis=1
-                    )
-                    display_df_local["Min Value"] = display_df_local["min_val"].apply(_format_value_cell)
-                    display_df_local["Max Value"] = display_df_local["max_val"].apply(_format_value_cell)
-                    display_df_local["Guessed Type"] = display_df_local["semantic_type"].apply(
-                        _format_semantic_label
-                    )
-                    display_df_local["Whitespace %"] = display_df_local["whitespace_pct"].apply(
-                        _format_whitespace_display
-                    )
-
-                    def _normalize_confidence(raw_value: Any) -> Optional[float]:
-                        confidence_raw = _safe_float(raw_value)
-                        if confidence_raw is None:
-                            return None
-                        if confidence_raw <= 1.0:
-                            confidence_raw *= 100.0
-                        confidence_raw = max(0.0, min(confidence_raw, 100.0))
-                        return confidence_raw
-
-                    display_df_local["_confidence_pct"] = display_df_local["confidence"].apply(
-                        _normalize_confidence
-                    )
-                    display_df_local["Note"] = display_df_local.apply(_compose_note, axis=1)
-                    confidence_numeric = pd.to_numeric(
-                        display_df_local["_confidence_pct"], errors="coerce"
-                    ).clip(lower=0.0, upper=100.0)
-                    display_df_local["Confidence"] = confidence_numeric
-                    records = display_df_local.to_dict("records")
-                    grid_container = st.container()
-                    with grid_container:
-                        st.markdown(confidence_legend_html, unsafe_allow_html=True)
-                        grid_df: Optional[pd.DataFrame] = None
-                        if records:
-                            include_values: List[bool] = []
-                            record_column_names: List[str] = []
-                            for record in records:
-                                column_label = str(record.get("Column") or "")
-                                column_name_raw = record.get("column_name")
-                                resolved_name = str(
-                                    column_name_raw if column_name_raw not in (None, "") else column_label
-                                )
-                                column_name = resolved_name.strip() or resolved_name
-                                include_default = bool(
-                                    include_selection.get(column_name, False)
-                                )
-                                include_values.append(include_default)
-                                record_column_names.append(column_name)
-
-                            if include_values:
-                                display_df_local.insert(0, "Include", include_values)
-                            display_df_local["Include"] = (
-                                display_df_local["Include"].fillna(False).astype(bool)
-                            )
-                            grid_df = display_df_local[grid_columns].copy()
-                            grid_render_allowed = _validate_grid_columns(
-                                grid_df.columns, grid_columns, ui_strings.PROFILE_GRID_NAME
-                            )
-                            if grid_render_allowed:
-                                grid_df["Include"] = grid_df["Include"].fillna(False).astype(bool)
-                                grid_df["Confidence"] = grid_df["Confidence"].apply(_safe_float)
-                                grid_df_formatted = grid_df.copy()
-                                grid_df_formatted["Confidence"] = grid_df_formatted[
-                                    "Confidence"
-                                ].apply(_format_confidence_display)
-                                disabled_columns = [
-                                    column_name for column_name in grid_columns if column_name != "Include"
-                                ]
-                                edited_df = st.data_editor(
-                                    grid_df_formatted,
-                                    hide_index=True,
-                                    use_container_width=True,
-                                    column_config={"Include": {"editable": True}},
-                                    disabled=disabled_columns,
-                                )
-                                _warn_invalid_include_column(grid_df, "profile_results_grid")
-                                if edited_df is not None:
-                                    include_series = edited_df.get("Include")
-                                    if include_series is not None:
-                                        updated_selection = dict(include_selection)
-                                        selected_columns_from_grid = []
-                                        for column_name, include_flag in zip(
-                                            record_column_names,
-                                            include_series.tolist(),
-                                        ):
-                                            updated_selection[column_name] = bool(include_flag)
-                                            if bool(include_flag):
-                                                selected_columns_from_grid.append(column_name)
-                                        st.session_state[PROFILE_INCLUDE_COLS_STATE] = updated_selection
-                                        include_selection = updated_selection
-                            else:
-                                grid_df = None
-
-                    selection_counts = _sync_profile_selection(
-                        profile_result,
-                        include_selection,
-                    )
-                    st.session_state[ui_keys.PROFILE_RESULTS_STATE] = profile_result
-                    st.session_state[ui_keys.PROFILE_SELECTION_COUNTS] = selection_counts
-
-                else:
-                    empty_df = pd.DataFrame(
-                        {
-                            column: pd.Series(dtype="bool" if column == "Include" else "object")
-                            for column in grid_columns
-                        }
-                    )
+                display_df_local["_confidence_pct"] = display_df_local[
+                    "confidence"
+                ].apply(_normalize_confidence)
+                display_df_local["Note"] = display_df_local.apply(
+                    _compose_note, axis=1
+                )
+                confidence_numeric = pd.to_numeric(
+                    display_df_local["_confidence_pct"], errors="coerce"
+                ).clip(lower=0.0, upper=100.0)
+                display_df_local["Confidence"] = confidence_numeric
+                records = display_df_local.to_dict("records")
+                grid_container = st.container()
+                with grid_container:
                     st.markdown(confidence_legend_html, unsafe_allow_html=True)
-                    empty_df["Confidence"] = empty_df["Confidence"].apply(
-                        lambda value: _format_confidence_display(value)
-                    )
-                    disabled_columns = [
-                        column_name for column_name in grid_columns if column_name != "Include"
-                    ]
-                    st.data_editor(
-                        empty_df,
-                        hide_index=True,
-                        use_container_width=True,
-                        column_config={"Include": {"editable": True}},
-                        disabled=disabled_columns,
-                    )
-                    _warn_invalid_include_column(empty_df, "profile_results_grid_empty")
+                    grid_df: Optional[pd.DataFrame] = None
+                    if records:
+                        include_values: List[bool] = []
+                        record_column_names: List[str] = []
+                        for record in records:
+                            column_label = str(record.get("Column") or "")
+                            column_name_raw = record.get("column_name")
+                            resolved_name = str(
+                                column_name_raw
+                                if column_name_raw not in (None, "")
+                                else column_label
+                            )
+                            column_name = resolved_name.strip() or resolved_name
+                            include_default = bool(
+                                include_selection.get(column_name, False)
+                            )
+                            include_values.append(include_default)
+                            record_column_names.append(column_name)
 
-                if suggest_cfg_pressed and profile_result:
-                    if not selected_columns_from_grid:
-                        st.warning(ui_strings.PROFILE_SUGGEST_WARNING_EMPTY)
-                    else:
-                        _load_suggestion(
-                            profile_result,
-                            ui_strings.PROFILE_SUGGEST_SUCCESS,
-                            only_columns=set(selected_columns_from_grid),
+                        if include_values:
+                            display_df_local.insert(0, "Include", include_values)
+                        display_df_local["Include"] = (
+                            display_df_local["Include"].fillna(False).astype(bool)
+                        )
+                        grid_df = display_df_local[grid_columns].copy()
+                        grid_render_allowed = _validate_grid_columns(
+                            grid_df.columns,
+                            grid_columns,
+                            ui_strings.PROFILE_GRID_NAME,
+                        )
+                        if grid_render_allowed:
+                            grid_df["Include"] = (
+                                grid_df["Include"].fillna(False).astype(bool)
+                            )
+                            grid_df["Confidence"] = grid_df["Confidence"].apply(
+                                _safe_float
+                            )
+                            grid_df_formatted = grid_df.copy()
+                            grid_df_formatted["Confidence"] = grid_df_formatted[
+                                "Confidence"
+                            ].apply(_format_confidence_display)
+                            disabled_columns = [
+                                column_name
+                                for column_name in grid_columns
+                                if column_name != "Include"
+                            ]
+                            edited_df = st.data_editor(
+                                grid_df_formatted,
+                                hide_index=True,
+                                use_container_width=True,
+                                column_config={"Include": {"editable": True}},
+                                disabled=disabled_columns,
+                            )
+                            _warn_invalid_include_column(
+                                grid_df, "profile_results_grid"
+                            )
+                            if edited_df is not None:
+                                include_series = edited_df.get("Include")
+                                if include_series is not None:
+                                    updated_selection = dict(include_selection)
+                                    selected_columns_from_grid = []
+                                    for column_name, include_flag in zip(
+                                        record_column_names,
+                                        include_series.tolist(),
+                                    ):
+                                        updated_selection[column_name] = bool(
+                                            include_flag
+                                        )
+                                        if bool(include_flag):
+                                            selected_columns_from_grid.append(
+                                                column_name
+                                            )
+                                    st.session_state[
+                                        PROFILE_INCLUDE_COLS_STATE
+                                    ] = updated_selection
+                                    include_selection = updated_selection
+                        else:
+                            grid_df = None
+
+                selection_counts = _sync_profile_selection(
+                    profile_result, include_selection
+                )
+                st.session_state[ui_keys.PROFILE_SELECTION_COUNTS] = (
+                    selection_counts
+                )
+
+                st.caption(
+                    ui_strings.PROFILE_SELECTION_STATUS.format(
+                        selected=int(selection_counts[0]),
+                        total=int(selection_counts[1]),
+                    )
+                )
+
+                display_df_local = display_df_local.rename(
+                    columns={"Include": "Select"}
+                )
+                display_df_local = display_df_local[
+                    [
+                        "Select",
+                        "Column",
+                        "Physical Type",
+                        "Nulls",
+                        "Distinct",
+                        "Avg Length",
+                        "Min Value",
+                        "Max Value",
+                        "Whitespace %",
+                        "Guessed Type",
+                        "Confidence",
+                        "Note",
+                    ]
+                ]
+                st.dataframe(
+                    display_df_local,
+                    use_container_width=True,
+                    height=min(600, 100 + 35 * len(display_df_local)),
+                )
+
+            else:
+                empty_df = pd.DataFrame(
+                    columns=[
+                        "Include",
+                        "Column",
+                        "Physical Type",
+                        "Nulls",
+                        "Distinct",
+                        "Avg Length",
+                        "Min Value",
+                        "Max Value",
+                        "Whitespace %",
+                        "Guessed Type",
+                        "Confidence",
+                        "Note",
+                    ]
+                )
+                disabled_columns = [
+                    column_name
+                    for column_name in grid_columns
+                    if column_name != "Include"
+                ]
+                st.data_editor(
+                    empty_df,
+                    hide_index=True,
+                    use_container_width=True,
+                    column_config={"Include": {"editable": True}},
+                    disabled=disabled_columns,
+                )
+                _warn_invalid_include_column(
+                    empty_df, "profile_results_grid_empty"
+                )
+
+            if suggest_cfg_pressed and profile_result:
+                if not selected_columns_from_grid:
+                    st.warning(ui_strings.PROFILE_SUGGEST_WARNING_EMPTY)
+                else:
+                    _load_suggestion(
+                        profile_result,
+                        ui_strings.PROFILE_SUGGEST_SUCCESS,
+                        only_columns=set(selected_columns_from_grid),
+                    )
+
+            if filtered_df.empty:
+                st.info(ui_strings.PROFILE_INFO_NO_FILTER_RESULTS)
+
+            st.subheader(ui_strings.PROFILE_TOP_VALUES_SUBHEADER, anchor=False)
+            for _, row in filtered_df.iterrows():
+                values = row.get("top_values", [])
+                non_nulls_value = _safe_int(row.get("non_nulls"))
+                label_suffix = f"{len(values)} values"
+                with st.expander(f"{row['column_name']} ({label_suffix})"):
+                    if not values:
+                        if non_nulls_value is not None and non_nulls_value <= 0:
+                            st.info(ui_strings.PROFILE_INFO_NO_NON_NULL_VALUES)
+                        else:
+                            st.info(ui_strings.PROFILE_INFO_NO_VALUES)
+                        continue
+
+                    tv_df = pd.DataFrame(values)
+                    if tv_df.empty:
+                        if non_nulls_value is not None and non_nulls_value <= 0:
+                            st.info(ui_strings.PROFILE_INFO_NO_NON_NULL_VALUES)
+                        else:
+                            st.info(ui_strings.PROFILE_INFO_NO_VALUES)
+                        continue
+
+                    rename_map: Dict[Any, str] = {}
+                    value_column_name: Optional[str] = None
+                    count_column_name: Optional[str] = None
+                    for candidate in tv_df.columns:
+                        lowered = str(candidate).lower()
+                        if lowered in {"value", "val", "values"} and value_column_name is None:
+                            value_column_name = candidate
+                        if lowered in {"count", "cnt"} and count_column_name is None:
+                            count_column_name = candidate
+                    if value_column_name is not None:
+                        rename_map[value_column_name] = "Value"
+                    if count_column_name is not None:
+                        rename_map[count_column_name] = "Count"
+                    if rename_map:
+                        tv_df = tv_df.rename(columns=rename_map)
+                        if value_column_name is not None:
+                            value_column_name = "Value"
+                        if count_column_name is not None:
+                            count_column_name = "Count"
+
+                    pct_columns = [
+                        col
+                        for col in tv_df.columns
+                        if "pct" in str(col).lower()
+                    ]
+                    value_column_name = value_column_name or (
+                        "Value" if "Value" in tv_df.columns else None
+                    )
+                    count_column_name = count_column_name or (
+                        "Count" if "Count" in tv_df.columns else None
+                    )
+
+                    if value_column_name and value_column_name not in tv_df.columns:
+                        tv_df[value_column_name] = tv_df.index.astype(str)
+                    if count_column_name and count_column_name not in tv_df.columns:
+                        tv_df[count_column_name] = 0
+
+                    total_empty = 0
+                    if value_column_name and value_column_name in tv_df.columns:
+                        empty_mask = tv_df[value_column_name].isna() | (
+                            tv_df[value_column_name].astype(str).str.strip() == ""
+                        )
+                        total_empty = int(empty_mask.sum())
+
+                    if PROFILE_TOP_VALUES_NULLS and value_column_name:
+                        tv_df[value_column_name] = tv_df[value_column_name].replace(
+                            {None: "__NULL__"}
                         )
 
-                if filtered_df.empty:
-                    st.info(ui_strings.PROFILE_INFO_NO_FILTER_RESULTS)
-
-                st.subheader(ui_strings.PROFILE_TOP_VALUES_SUBHEADER, anchor=False)
-                for _, row in filtered_df.iterrows():
-                    values = row.get("top_values", [])
-                    non_nulls_value = _safe_int(row.get("non_nulls"))
-                    label_suffix = f"{len(values)} values"
-                    with st.expander(f"{row['column_name']} ({label_suffix})"):
-                        if not values:
-                            if non_nulls_value is not None and non_nulls_value <= 0:
-                                st.info(ui_strings.PROFILE_INFO_NO_NON_NULL_VALUES)
+                    if total_empty > 0 and value_column_name:
+                        if count_column_name and count_column_name in tv_df.columns:
+                            count_series = tv_df[count_column_name]
+                            if count_series.dtype.kind in {"i", "u", "f"}:
+                                tv_df.loc[empty_mask, count_column_name] = count_series.loc[
+                                    empty_mask
+                                ].fillna(0).astype(float)
+                        new_row = {col: None for col in tv_df.columns}
+                        new_row[value_column_name] = "__EMPTY__"
+                        new_row[count_column_name] = total_empty
+                        if pct_columns:
+                            denom_raw = non_nulls_value
+                            if denom_raw is None or denom_raw <= 0:
+                                pct_value = 0.0
                             else:
-                                st.info(ui_strings.PROFILE_INFO_NO_VALUES)
-                            continue
+                                pct_value = (float(total_empty) / float(denom_raw)) * 100.0
+                            for pct_col in pct_columns:
+                                new_row[pct_col] = pct_value
+                        tv_df = pd.concat(
+                            [tv_df, pd.DataFrame([new_row])], ignore_index=True
+                        )
 
-                        tv_df = pd.DataFrame(values)
-                        if tv_df.empty:
-                            if non_nulls_value is not None and non_nulls_value <= 0:
-                                st.info(ui_strings.PROFILE_INFO_NO_NON_NULL_VALUES)
-                            else:
-                                st.info(ui_strings.PROFILE_INFO_NO_VALUES)
-                            continue
-
-                        # Normalize common column names when present; otherwise fall back gracefully
-                        rename_map: Dict[Any, str] = {}
-                        value_column_name: Optional[str] = None
-                        count_column_name: Optional[str] = None
-                        for candidate in tv_df.columns:
-                            lowered = str(candidate).lower()
-                            if lowered in {"value", "val", "values"} and value_column_name is None:
-                                value_column_name = candidate
-                            if lowered in {"count", "cnt"} and count_column_name is None:
-                                count_column_name = candidate
-                        if value_column_name is not None:
-                            rename_map[value_column_name] = "Value"
-                        if count_column_name is not None:
-                            rename_map[count_column_name] = "Count"
-                        if rename_map:
-                            tv_df = tv_df.rename(columns=rename_map)
-                            if value_column_name is not None:
-                                value_column_name = "Value"
-                            if count_column_name is not None:
-                                count_column_name = "Count"
-                        elif tv_df.shape[1] == 2:
-                            tv_df.columns = ["Value", "Count"]
-                            value_column_name = "Value"
-                            count_column_name = "Count"
-
-                        if value_column_name is None and len(tv_df.columns) > 0:
-                            value_column_name = tv_df.columns[0]
-                        if count_column_name is None and "Count" in tv_df.columns:
-                            count_column_name = "Count"
-
-                        pct_columns = [col for col in tv_df.columns if "pct" in str(col).lower()]
-
-                        if value_column_name and count_column_name:
-                            empty_mask = tv_df[value_column_name] == "__EMPTY__"
-                            if empty_mask.any() and PROFILE_TOP_VALUES_NULLS:
-                                total_empty = (
-                                    tv_df.loc[empty_mask, count_column_name]
-                                    .apply(lambda x: _safe_int(x) or 0)
-                                    .sum()
-                                )
-                                tv_df = tv_df.loc[~empty_mask].copy()
-                                new_row = {col: None for col in tv_df.columns}
-                                new_row[value_column_name] = "__EMPTY__"
-                                new_row[count_column_name] = total_empty
-                                if pct_columns:
-                                    denom_raw = non_nulls_value
-                                    if denom_raw is None or denom_raw <= 0:
-                                        pct_value = 0.0
-                                    else:
-                                        pct_value = (float(total_empty) / float(denom_raw)) * 100.0
-                                    for pct_col in pct_columns:
-                                        new_row[pct_col] = pct_value
-                                tv_df = pd.concat([tv_df, pd.DataFrame([new_row])], ignore_index=True)
-
-                        if value_column_name and value_column_name in tv_df.columns:
-                            null_bucket_mask = tv_df[value_column_name] == "__NULL__"
-                            if null_bucket_mask.any():
-                                tv_df = tv_df.loc[~null_bucket_mask].copy()
-                            tv_df = tv_df.loc[~tv_df[value_column_name].isna()].copy()
-                            if PROFILE_TOP_VALUES_NULLS:
-                                tv_df[value_column_name] = tv_df[value_column_name].replace(
-                                    {"__EMPTY__": '"" (empty/whitespace)'}
-                                )
-
-                        if tv_df.empty:
-                            if non_nulls_value is not None and non_nulls_value <= 0:
-                                st.info(ui_strings.PROFILE_INFO_NO_NON_NULL_VALUES)
-                            else:
-                                st.info(ui_strings.PROFILE_INFO_NO_VALUES)
-                            continue
-
-                        for pct_col in pct_columns:
-                            tv_df[pct_col] = tv_df[pct_col].apply(_safe_float)
-                            tv_df[pct_col] = tv_df[pct_col].apply(
-                                lambda x: None if x is None else min(100.0, max(0.0, x))
+                    if value_column_name and value_column_name in tv_df.columns:
+                        null_bucket_mask = tv_df[value_column_name] == "__NULL__"
+                        if null_bucket_mask.any():
+                            tv_df = tv_df.loc[~null_bucket_mask].copy()
+                        tv_df = tv_df.loc[~tv_df[value_column_name].isna()].copy()
+                        if PROFILE_TOP_VALUES_NULLS:
+                            tv_df[value_column_name] = tv_df[value_column_name].replace(
+                                {"__EMPTY__": '"" (empty/whitespace)'}
                             )
 
-                        nulls = _safe_int(row.get("nulls"))
-                        row_cnt = _safe_int(row.get("row_cnt"))
-                        null_pct = _safe_float(row.get("null_pct"))
-                        is_all_null = False
-                        if nulls is not None and row_cnt is not None and row_cnt > 0:
-                            is_all_null = nulls >= row_cnt
-                        if not is_all_null and null_pct is not None:
-                            if math.isclose(null_pct, 1.0, rel_tol=1e-9) or math.isclose(
-                                null_pct, 100.0, rel_tol=1e-9
-                            ):
-                                is_all_null = True
+                    if tv_df.empty:
+                        if non_nulls_value is not None and non_nulls_value <= 0:
+                            st.info(ui_strings.PROFILE_INFO_NO_NON_NULL_VALUES)
+                        else:
+                            st.info(ui_strings.PROFILE_INFO_NO_VALUES)
+                        continue
 
-                        if is_all_null and value_column_name in tv_df.columns:
-                            value_series = tv_df[value_column_name]
-                            null_mask = value_series.isna()
-                            if null_mask.any():
-                                tv_df = tv_df[null_mask].head(1).copy()
-                            else:
-                                tv_df = tv_df.head(1).copy()
+                    for pct_col in pct_columns:
+                        tv_df[pct_col] = tv_df[pct_col].apply(_safe_float)
+                        tv_df[pct_col] = tv_df[pct_col].apply(
+                            lambda x: None if x is None else min(100.0, max(0.0, x))
+                        )
 
-                        if count_column_name and count_column_name in tv_df.columns:
-                            tv_df[count_column_name] = tv_df[count_column_name].apply(_format_count)
-                        for col in tv_df.columns:
-                            if count_column_name and col == count_column_name:
-                                continue
-                            if value_column_name and col == value_column_name:
-                                tv_df[col] = tv_df[col].apply(_format_top_value_cell)
-                            else:
-                                tv_df[col] = tv_df[col].apply(_stringify_for_display)
-                            if "pct" in col.lower():
-                                tv_df[col] = tv_df[col].apply(_format_percentage)
+                    nulls = _safe_int(row.get("nulls"))
+                    row_cnt = _safe_int(row.get("row_cnt"))
+                    null_pct = _safe_float(row.get("null_pct"))
+                    is_all_null = False
+                    if nulls is not None and row_cnt is not None and row_cnt > 0:
+                        is_all_null = nulls >= row_cnt
+                    if not is_all_null and null_pct is not None:
+                        if math.isclose(null_pct, 1.0, rel_tol=1e-9) or math.isclose(
+                            null_pct, 100.0, rel_tol=1e-9
+                        ):
+                            is_all_null = True
 
-                        st.table(tv_df)
+                    if is_all_null and value_column_name in tv_df.columns:
+                        value_series = tv_df[value_column_name]
+                        null_mask = value_series.isna()
+                        if null_mask.any():
+                            tv_df = tv_df[null_mask].head(1).copy()
+                        else:
+                            tv_df = tv_df.head(1).copy()
+
+                    if count_column_name and count_column_name in tv_df.columns:
+                        tv_df[count_column_name] = tv_df[count_column_name].apply(
+                            _format_count
+                        )
+                    for col in tv_df.columns:
+                        if count_column_name and col == count_column_name:
+                            continue
+                        if value_column_name and col == value_column_name:
+                            tv_df[col] = tv_df[col].apply(_format_top_value_cell)
+                        else:
+                            tv_df[col] = tv_df[col].apply(_stringify_for_display)
+                        if "pct" in col.lower():
+                            tv_df[col] = tv_df[col].apply(_format_percentage)
+
+                    st.table(tv_df)
+
+            st.session_state[ui_keys.PROFILE_RESULTS_STATE] = profile_result
+
+            return profile_result
+
+        profile_result = _render_profile_results_from_session(
+            include_selection,
+            inline_error_placeholder,
+            busy_profiling=busy_profiling,
+            suggest_cfg_pressed=suggest_cfg_pressed,
+        )
+
+        if not profile_result and not DEBUG_PROFILING:
+            return
+
+
         if DEBUG_PROFILING:
             if profile_result:
                 with st.expander(ui_strings.PROFILE_DEBUG_PAYLOAD_TITLE, expanded=False):
