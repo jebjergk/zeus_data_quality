@@ -8,7 +8,7 @@ import sys
 from datetime import date, datetime
 from decimal import Decimal
 from typing import Any, Dict, Iterable, List, MutableMapping, Optional, Sequence, Tuple
-from uuid import UUID
+from uuid import UUID, uuid4
 
 try:
     import numpy as _np
@@ -726,400 +726,99 @@ def has_profiles_for_fqn(table_fqn: str) -> Dict[str, Any]:
     return {"ok": True, "count": count, "canon": canon}
 
 
-def save_profile(profile: Any) -> Dict[str, Any]:
-    """Persist a saved profile payload into session state."""
+def save_profile(table_fqn: str, name: Optional[str], payload: Any) -> Dict[str, Any]:
+    """Persist a saved profile payload into the metadata table."""
 
-    context = {"where": "save_profile", "store_fqn": PROFILES_TABLE_FQN}
-    context_with_table = dict(context)
-    try:
-        normalized_profile = normalize_saved_profile(profile)
-        if not normalized_profile:
-            raise ValueError("Profile payload is empty or invalid")
+    canon = _canon_fqn(table_fqn or "")
+    profile_name = (name or "").strip() or "Unnamed"
+    run_id = uuid4().hex
+    context = {
+        "where": "save_profile",
+        "store_fqn": PROFILES_TABLE_FQN,
+        "table_fqn": table_fqn or "",
+        "table_fqn_canon": canon,
+        "profile_id": run_id,
+        "profile_name": profile_name,
+    }
 
-        run_map = _to_mapping(normalized_profile)
-        if not run_map:
-            raise ValueError("Profile payload is not a mapping")
-
-        run_id, summary_map = _extract_run_identity(run_map)
-        if not run_id:
-            raise ValueError("Profile payload is missing a run identifier")
-
-        table_fqn_raw = _extract_table_identifiers(run_map, summary_map)[2]
-        canonical_table_fqn = _canon_fqn(table_fqn_raw)
-
-        if not canonical_table_fqn:
-            for candidate in (
-                run_map.get("target_fqn"),
-                summary_map.get("target_fqn"),
-                summary_map.get("target_table"),
-                summary_map.get("target"),
-                run_map.get("target"),
-            ):
-                if candidate is None:
-                    continue
-                candidate_text = str(candidate).strip()
-                if not candidate_text:
-                    continue
-                candidate_canon = _canon_fqn(candidate_text)
-                if candidate_canon:
-                    table_fqn_raw = candidate_text
-                    canonical_table_fqn = candidate_canon
-                    break
-
-        context_with_table = {
-            **context,
-            "table_fqn_raw": table_fqn_raw or "",
-            "table_fqn_canonical": canonical_table_fqn,
-            "table_fqn_canon": canonical_table_fqn,
-        }
-
-        if not canonical_table_fqn:
-            logger.error(
-                "Cannot save profile without a table FQN",
-                extra={
-                    **context_with_table,
-                    "profile_id": run_id,
-                    "reason": "empty_fqn",
-                },
-            )
-            return {"ok": False, "err": "empty_fqn"}
-
-        verification = verify_profiles_store()
-        if not verification.get("ok"):
-            logger.info(
-                "Profiles store unavailable",
-                extra={
-                    **context_with_table,
-                    "profile_id": run_id,
-                    "verification_err": verification.get("err") or "",
-                },
-            )
-            return {
-                "ok": False,
-                "err": "profiles table missing",
-                "fqn": PROFILES_TABLE_FQN,
-            }
-
-        existing = normalize_saved_profiles(
-            st.session_state.get(SAVED_PROFILES_STATE, [])
+    if not canon:
+        logger.error(
+            "Cannot save profile without a canonical table FQN",
+            extra={**context, "reason": "empty_fqn"},
         )
-        current_run_dict = dict(run_map)
-        updated: List[Dict[str, Any]] = []
-        replaced = False
-        for run in existing:
-            existing_run_dict = _to_mapping(run)
-            existing_id, _ = _extract_run_identity(existing_run_dict)
-            if existing_id == run_id:
-                updated.append(current_run_dict)
-                replaced = True
-            else:
-                updated.append(dict(existing_run_dict))
-        if not replaced:
-            updated.append(current_run_dict)
+        return {"ok": False, "err": "empty_fqn"}
 
-        st.session_state[SAVED_PROFILES_STATE] = updated
+    try:
+        payload_json = _json_dumps_safe(payload)
+    except Exception as exc:  # pragma: no cover - defensive
+        err_msg = str(exc) or "payload_serialization_failed"
+        logger.error(
+            "Failed to serialise profile payload",
+            extra={**context, "err": err_msg},
+            exc_info=True,
+        )
+        return {"ok": False, "err": err_msg}
 
-        current_run_dict["table_fqn"] = canonical_table_fqn
+    sql = (
+        f"INSERT INTO {PROFILES_TABLE_FQN}(ID, TABLE_FQN, NAME, CREATED_AT, PAYLOAD) "
+        "SELECT ?, ?, ?, CURRENT_TIMESTAMP(), PARSE_JSON(?)"
+    )
+    params = [run_id, canon, profile_name, payload_json]
 
-        serialized_profile = _json_dumps_safe(current_run_dict)
-
+    try:
+        _get_session().sql(sql, params=params).collect()
         logger.info(
             "Saved profile payload",
-            extra={
-                **context_with_table,
-                "profile_id": run_id,
-                "store_size": len(updated),
-            },
+            extra={**context, "insert_sql": "VALUES(?, ?, ?, CURRENT_TIMESTAMP(), PARSE_JSON(?))"},
         )
-        return {"ok": True, "id": run_id, "item_json": serialized_profile}
+        return {"ok": True, "id": run_id, "table_fqn_canon": canon}
     except Exception as exc:  # pragma: no cover - defensive
-        err_msg = str(exc)
+        err_msg = str(exc) or "profile_save_failed"
         logger.error(
             "Failed to save profile",
-            extra={**context_with_table, "err": err_msg},
+            extra={**context, "err": err_msg},
             exc_info=True,
         )
         return {"ok": False, "err": err_msg}
 
 
+
 def list_saved_profiles(table_fqn: Optional[str]) -> _ProfileListResult:
-    """Return normalised saved profile entries for the dropdown."""
+    """Return saved profile metadata for the given table FQN."""
 
-    canon_filter = _canon_fqn(table_fqn or "")
-    if not (table_fqn and canon_filter):
-        empty_context = {
-            "where": "list_profiles",
-            "table_fqn": table_fqn or "",
-            "table_fqn_raw": table_fqn or "",
-            "canonical_table_fqn": canon_filter,
-            "table_fqn_canon": canon_filter,
-            "filter_canon_fqn": canon_filter,
-            "reason": "empty_fqn",
-        }
-        logger.info(
-            "Skipping saved profile listing due to empty table FQN",
-            extra=empty_context,
-        )
-        return _ProfileListResult(
-            {"ok": True, "items": [], "debug": {"reason": "empty_fqn"}}
-        )
-
-    filter_db, filter_schema, filter_table, canonical_fqn = _normalise_table_filter(
-        table_fqn
-    )
+    canon = _canon_fqn(table_fqn or "")
     context = {
         "where": "list_profiles",
         "table_fqn": table_fqn or "",
-        "table_fqn_raw": table_fqn or "",
-        "canonical_table_fqn": canonical_fqn or canon_filter,
-        "table_fqn_canon": canonical_fqn or canon_filter,
-        "filter_canon_fqn": canon_filter,
-        "filter_db": filter_db,
-        "filter_schema": filter_schema,
-        "filter_table": filter_table,
-        "final_sql": "SESSION_STATE_FILTER(UPPER(table_fqn)=?)",
+        "table_fqn_canon": canon,
         "store_fqn": PROFILES_TABLE_FQN,
     }
 
-    select_verification = verify_profiles_store_select()
-    if not select_verification.get("ok"):
-        err_msg = select_verification.get("err") or "profiles_select_failed"
-        logger.error(
-            "Profiles store SELECT check failed",
-            extra={**context, "err": err_msg},
+    if not canon:
+        logger.info(
+            "Skipping saved profile listing due to empty table FQN",
+            extra={**context, "reason": "empty_fqn"},
         )
         return _ProfileListResult(
             {
-                "ok": False,
-                "err": err_msg,
-                "fqn": PROFILES_TABLE_FQN,
+                "ok": True,
                 "items": [],
+                "canonical_table_fqn": canon,
+                "debug": {"reason": "empty_fqn"},
             }
         )
 
-    verification = verify_profiles_store()
-    if not verification.get("ok"):
-        logger.info(
-            "Profiles store unavailable",
-            extra={
-                **context,
-                "verification_err": verification.get("err") or "",
-            },
-        )
-        return _ProfileListResult(
-            {
-                "ok": False,
-                "err": "profiles table missing",
-                "fqn": PROFILES_TABLE_FQN,
-                "items": [],
-            }
-        )
+    sql = (
+        "SELECT ID, TABLE_FQN, NAME, CREATED_AT, PAYLOAD "
+        f"FROM {PROFILES_TABLE_FQN} "
+        "WHERE UPPER(TABLE_FQN) = ? "
+        "ORDER BY CREATED_AT DESC"
+    )
 
     try:
-        stored = st.session_state.get(SAVED_PROFILES_STATE, [])
-        if not stored:
-            logger.info(
-                "Saved profile store missing or empty",
-                extra={**context, "rowcount": 0, "reason": "store_missing"},
-            )
-
-        runs = normalize_saved_profiles(stored) if stored else []
-        if stored and not runs:
-            logger.info(
-                "Saved profile store normalized to zero rows",
-                extra={**context, "rowcount": 0, "reason": "normalised_empty"},
-            )
-
-        prepared_runs: List[Dict[str, Any]] = []
-        missing_id = 0
-        sample_values: List[str] = []
-        sample_keys = set()
-
-        for run in runs:
-            run_map = _to_mapping(run)
-            if not run_map:
-                missing_id += 1
-                continue
-
-            run_id, summary_map = _extract_run_identity(run_map)
-            if not run_id:
-                missing_id += 1
-                continue
-
-            schema_clean, table_clean, table_name = _extract_table_identifiers(
-                run_map, summary_map
-            )
-
-            fqn_candidates = [
-                run_map.get("target_fqn"),
-                summary_map.get("target_fqn"),
-                summary_map.get("target_table"),
-                summary_map.get("target"),
-                run_map.get("target"),
-            ]
-            if table_name:
-                fqn_candidates.append(table_name)
-
-            stored_fqn_raw = ""
-            for candidate in fqn_candidates:
-                if candidate is None:
-                    continue
-                candidate_text = str(candidate).strip()
-                if candidate_text:
-                    stored_fqn_raw = candidate_text
-                    break
-
-            if not stored_fqn_raw and schema_clean and table_clean:
-                stored_fqn_raw = f"{schema_clean}.{table_clean}"
-
-            stored_canon = _canon_fqn(stored_fqn_raw)
-            sample_key = stored_canon or stored_fqn_raw.upper()
-            if sample_key and sample_key not in sample_keys:
-                sample_keys.add(sample_key)
-                if len(sample_values) < 5:
-                    sample_values.append(stored_fqn_raw or stored_canon)
-
-            timestamp_iso = _profile_timestamp(run_map, summary_map)
-            display_name = _profile_display_name(run_map, summary_map)
-            run_dict = dict(run_map)
-
-            prepared_runs.append(
-                {
-                    "id": run_id,
-                    "entry": {
-                        "id": run_id,
-                        "name": display_name,
-                        "table_fqn": table_name,
-                        "created_at_iso": timestamp_iso,
-                        "timestamp": timestamp_iso,
-                        "run": run_dict,
-                        "run_json": _json_dumps_safe(run_dict),
-                    },
-                    "stored_canon": stored_canon,
-                    "schema_key": schema_clean.upper() if schema_clean else "",
-                    "table_key": table_clean.upper() if table_clean else "",
-                    "legacy_keys": set(_table_fqn_upper_variants(stored_fqn_raw, stored_canon)),
-                }
-            )
-
-        total_runs = len(runs)
-
-        def _apply_filter(match_func):
-            matched: List[Dict[str, Any]] = []
-            counters = {"missing_target": 0, "filter_mismatch": 0}
-            for info in prepared_runs:
-                matched_flag, reason = match_func(info)
-                if matched_flag:
-                    matched.append(info)
-                elif reason in counters:
-                    counters[reason] += 1
-            return matched, counters
-
-        def _primary_match(info: Dict[str, Any]):
-            if canon_filter:
-                if info["stored_canon"] == canon_filter:
-                    return True, None
-                if filter_schema and filter_table:
-                    if not (info["schema_key"] and info["table_key"]):
-                        return False, "missing_target"
-                    if (
-                        info["schema_key"] == filter_schema
-                        and info["table_key"] == filter_table
-                    ):
-                        return True, None
-                    return False, "filter_mismatch"
-                return False, "filter_mismatch"
-            if filter_schema and filter_table:
-                if not (info["schema_key"] and info["table_key"]):
-                    return False, "missing_target"
-                if (
-                    info["schema_key"] == filter_schema
-                    and info["table_key"] == filter_table
-                ):
-                    return True, None
-                return False, "filter_mismatch"
-            return True, None
-
-        primary_matches, primary_counters = _apply_filter(_primary_match)
-
-        entries_by_id: Dict[str, Dict[str, Any]] = {}
-        final_counters = primary_counters
-        final_matches = primary_matches
-        fallback_used = False
-        legacy_variant_keys: List[str] = []
-
-        if not primary_matches and canon_filter:
-            session_variants = [
-                table_fqn,
-                canonical_fqn,
-                st.session_state.get("profile_target_fqn"),
-                st.session_state.get("editor_target_fqn"),
-            ]
-            legacy_variant_keys = _table_fqn_upper_variants(*session_variants)
-            legacy_key_set = {key for key in legacy_variant_keys if key}
-
-            if legacy_key_set:
-
-                def _legacy_match(info: Dict[str, Any]):
-                    if info["legacy_keys"] & legacy_key_set:
-                        return True, None
-                    if filter_schema and filter_table:
-                        if not (info["schema_key"] and info["table_key"]):
-                            return False, "missing_target"
-                        if (
-                            info["schema_key"] == filter_schema
-                            and info["table_key"] == filter_table
-                        ):
-                            return True, None
-                    return False, "filter_mismatch"
-
-                legacy_matches, legacy_counters = _apply_filter(_legacy_match)
-                if legacy_matches:
-                    final_matches = legacy_matches
-                    final_counters = legacy_counters
-                    fallback_used = True
-                    context["final_sql"] = "SESSION_STATE_FILTER(UPPER(table_fqn) IN (?…))"
-                else:
-                    final_counters = legacy_counters
-
-        for info in final_matches:
-            entry = info["entry"]
-            entry_id = entry.get("id")
-            if entry_id and entry_id not in entries_by_id:
-                entries_by_id[entry_id] = entry
-
-        entries = list(entries_by_id.values())
-
-        log_extra = {
-            **context,
-            "rowcount": len(entries),
-            "total_saved_profiles": total_runs,
-            "skipped_missing_id": missing_id,
-            "skipped_missing_target": final_counters["missing_target"],
-            "skipped_filter_mismatch": final_counters["filter_mismatch"],
-        }
-        if fallback_used:
-            log_extra["fallback_variants"] = legacy_variant_keys
-
-        if not entries:
-            debug_payload = {
-                "total_rows": total_runs,
-                "samples": sample_values,
-                "canon": canon_filter,
-            }
-            if legacy_variant_keys:
-                debug_payload["legacy_variants"] = legacy_variant_keys
-            logger.info(
-                "Saved profile list empty after filtering",
-                extra={**log_extra, "debug": debug_payload},
-            )
-            return _ProfileListResult({"ok": True, "items": [], "debug": debug_payload})
-
-        logger.info("Listed saved profiles", extra=log_extra)
-
-        return _ProfileListResult({"ok": True, "items": entries})
+        rows = _get_session().sql(sql, params=[canon]).collect()
     except Exception as exc:  # pragma: no cover - defensive
-        err_msg = str(exc)
+        err_msg = str(exc) or "profile_list_failed"
         logger.error(
             "Failed to list saved profiles",
             extra={**context, "err": err_msg},
@@ -1127,9 +826,59 @@ def list_saved_profiles(table_fqn: Optional[str]) -> _ProfileListResult:
         )
         return _ProfileListResult({"ok": False, "err": err_msg, "items": []})
 
+    items: List[Dict[str, Any]] = []
+    for row in rows:
+        row_id = str(row[0] or "").strip()
+        table_value = str(row[1] or "").strip()
+        row_name = str(row[2] or "").strip() or "Unnamed"
+        created_at_iso = _ensure_iso_timestamp(row[3]) if len(row) > 3 else ""
+
+        if not row_id:
+            continue
+
+        items.append(
+            {
+                "id": row_id,
+                "name": row_name or "Unnamed",
+                "created_at_iso": created_at_iso,
+                "table_fqn": table_value or canon,
+            }
+        )
+
+    logger.info(
+        "Listed saved profiles",
+        extra={**context, "rowcount": len(items)},
+    )
+
+    return _ProfileListResult(
+        {"ok": True, "items": items, "canonical_table_fqn": canon}
+    )
+
+
+def _variant_to_json(value: Any) -> str:
+    """Return a JSON string representation of a VARIANT payload."""
+
+    if value is None:
+        return ""
+    try:
+        if hasattr(value, "to_json"):
+            return str(value.to_json())
+        if hasattr(value, "as_json"):
+            return str(value.as_json())
+    except Exception:  # pragma: no cover - defensive
+        return ""
+
+    if isinstance(value, str):
+        return value
+
+    try:
+        return _json_dumps_safe(value)
+    except Exception:  # pragma: no cover - defensive
+        return ""
+
 
 def load_profile_by_id(profile_id: str) -> Dict[str, Any]:
-    """Load a saved profile payload from session state by identifier."""
+    """Load a saved profile payload from the metadata table by identifier."""
 
     context = {
         "where": "load_profile",
@@ -1137,55 +886,66 @@ def load_profile_by_id(profile_id: str) -> Dict[str, Any]:
         "store_fqn": PROFILES_TABLE_FQN,
     }
 
-    try:
-        if not profile_id:
-            raise ValueError("Profile identifier is required")
-
-        stored = st.session_state.get(SAVED_PROFILES_STATE, [])
-        if not stored:
-            logger.info(
-                "Saved profile store missing while loading",
-                extra={**context, "reason": "store_missing"},
-            )
-            return {"ok": False, "err": "Saved profile store is empty"}
-
-        runs = normalize_saved_profiles(stored)
-        for run in runs:
-            run_map = _to_mapping(run)
-            if not run_map:
-                continue
-            run_id, summary_map = _extract_run_identity(run_map)
-            if run_id == str(profile_id).strip():
-                table_fqn = _extract_table_identifiers(run_map, summary_map)[2]
-                logger.info(
-                    "Loaded saved profile",
-                    extra={
-                        **context,
-                        "table_fqn": table_fqn,
-                        "table_fqn_raw": table_fqn,
-                        "table_fqn_canon": _canon_fqn(table_fqn),
-                    },
-                )
-                item_dict = dict(run_map)
-                return {
-                    "ok": True,
-                    "item": item_dict,
-                    "item_json": _json_dumps_safe(item_dict),
-                }
-
-        logger.info(
-            "Saved profile not found",
-            extra={**context, "reason": "not_found"},
+    if not profile_id:
+        logger.error(
+            "Profile identifier is required",
+            extra={**context, "reason": "empty_id"},
         )
-        return {"ok": False, "err": f"Profile '{profile_id}' not found"}
+        return {"ok": False, "err": "profile_id_required"}
+
+    sql = (
+        "SELECT ID, TABLE_FQN, NAME, CREATED_AT, PAYLOAD "
+        f"FROM {PROFILES_TABLE_FQN} "
+        "WHERE ID = ?"
+    )
+
+    try:
+        rows = _get_session().sql(sql, params=[str(profile_id)]).collect()
     except Exception as exc:  # pragma: no cover - defensive
-        err_msg = str(exc)
+        err_msg = str(exc) or "profile_load_failed"
         logger.error(
             "Failed to load saved profile",
             extra={**context, "err": err_msg},
             exc_info=True,
         )
         return {"ok": False, "err": err_msg}
+
+    if not rows:
+        logger.info(
+            "Saved profile not found",
+            extra={**context, "reason": "not_found"},
+        )
+        return {"ok": False, "err": f"Profile '{profile_id}' not found"}
+
+    row = rows[0]
+    row_id = str(row[0] or "").strip()
+    table_fqn_value = str(row[1] or "").strip()
+    name_value = str(row[2] or "").strip() or "Unnamed"
+    created_at_value = _ensure_iso_timestamp(row[3]) if len(row) > 3 else ""
+    payload_json = _variant_to_json(row[4] if len(row) > 4 else None)
+    payload_dict = normalize_saved_profile(payload_json) if payload_json else {}
+
+    item = {
+        "id": row_id,
+        "table_fqn": table_fqn_value,
+        "table_fqn_canon": _canon_fqn(table_fqn_value),
+        "name": name_value,
+        "created_at_iso": created_at_value,
+        "payload": payload_dict,
+    }
+    if payload_json:
+        item["payload_json"] = payload_json
+
+    logger.info(
+        "Loaded saved profile",
+        extra={
+            **context,
+            "table_fqn": table_fqn_value,
+            "table_fqn_canon": item["table_fqn_canon"],
+        },
+    )
+
+    return {"ok": True, "item": item}
 
 
 _json_dumps_original = json.dumps
