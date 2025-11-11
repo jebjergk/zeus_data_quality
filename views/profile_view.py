@@ -1175,6 +1175,7 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
                         summary_raw: Dict[str, Any] = {}
                         column_rows: List[Dict[str, Any]] = []
                         error_message: Optional[str] = None
+                        run_ok = False
                         try:
                             summary_raw, column_rows = run_table_profile(
                                 session=session,
@@ -1182,6 +1183,7 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
                                 sample_pct=sample_pct,
                                 top_n=int(min(top_n, MAX_TOP_N)),
                             )
+                            run_ok = True
                         except Exception as exc:  # pragma: no cover - Snowflake specific
                             logging.exception("profiling:unhandled")
                             st.session_state["profiling_last_error"] = (
@@ -1193,6 +1195,14 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
                             error_message = (
                                 "Profiling failed — see debug panel for details."
                             )
+                        finally:
+                            if DEBUG_PROFILING:
+                                logger.debug(
+                                    "profile_run ok=%s rows=%s err=%s",
+                                    run_ok,
+                                    len(column_rows) if column_rows else 0,
+                                    error_message if error_message else None,
+                                )
                         if error_message:
                             _record_last_profile_error(error_message)
                             profile_result = None
