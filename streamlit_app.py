@@ -49,6 +49,34 @@ from uuid import uuid4
 
 import streamlit as st
 
+ALLOWED_PAGES = {"home", "cfg", "profile", "monitor", "docs"}
+
+if "active_view" not in st.session_state:
+    default_view = "home"
+    try:
+        params = dict(st.query_params)  # type: ignore[attr-defined]
+    except Exception:
+        params = {}
+    page_param = params.get("page") if isinstance(params, dict) else None
+    candidate: Optional[str]
+    if isinstance(page_param, list):
+        candidate = next((item for item in page_param if isinstance(item, str)), None)
+    elif isinstance(page_param, str):
+        candidate = page_param
+    else:
+        candidate = None
+    if candidate:
+        candidate_lower = candidate.strip().lower()
+        if candidate_lower in ALLOWED_PAGES:
+            default_view = candidate_lower
+    st.session_state["active_view"] = default_view
+    if "page" not in st.session_state:
+        st.session_state["page"] = default_view
+    st.session_state["_last_query_page"] = default_view
+    logging.info("route:init %s", st.session_state["active_view"])
+elif "_last_query_page" not in st.session_state:
+    st.session_state["_last_query_page"] = st.session_state.get("active_view", "home")
+
 try:
     import altair as alt
 except ModuleNotFoundError:
@@ -95,8 +123,6 @@ from views import profile_view
 from views.table_picker import stateless_table_picker, session_cache_token
 from views.docs_view import render_docs as render_docs_view
 from views.config_editor import render_row_count_preview
-
-ALLOWED_PAGES = {"home", "cfg", "profile", "monitor", "docs"}
 
 METADATA_DB, METADATA_SCHEMA = get_metadata_namespace()
 PROC_NAME = get_proc_name()
@@ -218,7 +244,9 @@ def _get_page_from_query_params() -> Optional[str]:
 
 def navigate_to(page: str) -> None:
     """Update the current page selection in session state."""
+    st.session_state["active_view"] = page
     st.session_state["page"] = page
+    st.session_state["_last_query_page"] = page
     try:
         current = dict(st.query_params)  # type: ignore[attr-defined]
     except Exception:
@@ -1655,19 +1683,33 @@ def render_docs() -> None:
 # ---------- Sidebar + routing ----------
 state = get_state()
 query_page = _get_page_from_query_params()
-if "page" not in st.session_state:
-    st.session_state["page"] = query_page or "home"
-elif query_page and query_page != st.session_state["page"]:
-    st.session_state["page"] = query_page
+last_query_page = st.session_state.get("_last_query_page")
+if query_page and query_page != last_query_page:
+    st.session_state["_last_query_page"] = query_page
+    if query_page != st.session_state.get("active_view"):
+        st.session_state["active_view"] = query_page
+        st.session_state["page"] = query_page
+elif query_page is None:
+    if "_last_query_page" not in st.session_state:
+        st.session_state["_last_query_page"] = st.session_state.get("active_view")
+    elif last_query_page is not None:
+        st.session_state["_last_query_page"] = None
+
+page_state_value = st.session_state.get("page")
+if (
+    page_state_value in ALLOWED_PAGES
+    and page_state_value != st.session_state.get("active_view")
+):
+    navigate_to(page_state_value)
 if "cfg_mode" not in st.session_state:
     st.session_state["cfg_mode"] = "list"
-current_page = st.session_state.get("page", "home")
+current_view = st.session_state.get("active_view", "home")
 with st.sidebar:
     st.header("Zeus DQ")
     st.button(
         "🏠 Overview",
         use_container_width=True,
-        type="primary" if current_page == "home" else "secondary",
+        type="primary" if current_view == "home" else "secondary",
         key="nav_home",
         on_click=navigate_to,
         args=("home",),
@@ -1675,7 +1717,7 @@ with st.sidebar:
     st.button(
         "⚙️ Configurations",
         use_container_width=True,
-        type="primary" if current_page == "cfg" else "secondary",
+        type="primary" if current_view == "cfg" else "secondary",
         key="nav_cfg",
         on_click=navigate_to,
         args=("cfg",),
@@ -1683,7 +1725,7 @@ with st.sidebar:
     st.button(
         "🧪 Profile Table",
         use_container_width=True,
-        type="primary" if current_page == "profile" else "secondary",
+        type="primary" if current_view == "profile" else "secondary",
         key="nav_profile",
         on_click=navigate_to,
         args=("profile",),
@@ -1691,7 +1733,7 @@ with st.sidebar:
     st.button(
         "📊 Monitor",
         use_container_width=True,
-        type="primary" if current_page == "monitor" else "secondary",
+        type="primary" if current_view == "monitor" else "secondary",
         key="nav_monitor",
         on_click=navigate_to,
         args=("monitor",),
@@ -1699,13 +1741,13 @@ with st.sidebar:
     st.button(
         "📘 Documentation",
         use_container_width=True,
-        type="primary" if current_page == "docs" else "secondary",
+        type="primary" if current_view == "docs" else "secondary",
         key="nav_docs",
         on_click=navigate_to,
         args=("docs",),
     )
     st.divider()
-    if current_page == "cfg" and st.session_state.get("cfg_mode", "list") == "list":
+    if current_view == "cfg" and st.session_state.get("cfg_mode", "list") == "list":
         if st.button(
             "➕ Create configuration",
             use_container_width=True,
@@ -1721,21 +1763,21 @@ with st.sidebar:
 # and the main content area.
 st.markdown("<div class='sf-hr'></div>", unsafe_allow_html=True)
 
-page = st.session_state.get("page", "home")
-if page == "cfg":
+active_view = st.session_state.get("active_view", "home")
+if active_view == "cfg":
     if st.session_state.get("cfg_mode","list") == "list":
         render_config_list()
     else:
         render_config_editor()
-elif page == "profile":
+elif active_view == "profile":
     if DEBUG_PROFILING_ENABLED:
         st.caption("🛠️ Debug: entering Profile view")
         target_fqn = st.session_state.get("editor_target_fqn") or "—"
         st.caption(f"🧭 Target FQN: {target_fqn}")
     profile_view.render_profile(session, METADATA_DB, METADATA_SCHEMA)
-elif page == "monitor":
+elif active_view == "monitor":
     render_monitor()
-elif page == "docs":
+elif active_view == "docs":
     render_docs()
 else:
     render_home()
