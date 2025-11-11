@@ -1653,6 +1653,41 @@ def normalize_profile_row(row: Dict[str, Any]) -> Dict[str, Any]:
             else:
                 payload[key] = None
 
+    rows_profiled_raw = payload.get("rows_profiled")
+    if rows_profiled_raw is None:
+        rows_profiled_raw = payload.get("row_cnt")
+    try:
+        rows_profiled_val = float(rows_profiled_raw)
+    except Exception:
+        try:
+            rows_profiled_val = float(str(rows_profiled_raw)) if rows_profiled_raw is not None else 0.0
+        except Exception:
+            rows_profiled_val = 0.0
+    if math.isnan(rows_profiled_val) or rows_profiled_val <= 0:
+        rows_profiled_val = 0.0
+
+    coverage_total = 0
+    for entry in payload.get("top_values") or []:
+        count_raw = entry.get("count") if isinstance(entry, dict) else None
+        if count_raw is None:
+            continue
+        try:
+            count_int = int(count_raw)
+        except Exception:
+            try:
+                count_int = int(float(count_raw))
+            except Exception:
+                continue
+        if count_int <= 0:
+            continue
+        coverage_total += count_int
+
+    coverage_pct = 0.0
+    if rows_profiled_val > 0:
+        coverage_pct = (float(coverage_total) / rows_profiled_val) * 100.0
+    coverage_pct = max(0.0, min(100.0, coverage_pct))
+    payload["top_coverage_pct"] = coverage_pct
+
     if "date_valid_count" not in payload:
         payload["date_valid_count"] = payload.get("non_nulls") or 0
     try:
