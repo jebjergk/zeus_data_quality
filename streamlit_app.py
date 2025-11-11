@@ -1763,6 +1763,16 @@ with st.sidebar:
 # and the main content area.
 st.markdown("<div class='sf-hr'></div>", unsafe_allow_html=True)
 
+if DEBUG_PROFILING:
+    st.caption(
+        "🛠 route="
+        f"{st.session_state.get('active_view')} "
+        "busy_prof="
+        f"{st.session_state.get('busy_profiling')} "
+        "busy_save="
+        f"{st.session_state.get('busy_saving')}"
+    )
+
 active_view = st.session_state.get("active_view", "home")
 if active_view == "cfg":
     if st.session_state.get("cfg_mode","list") == "list":

@@ -1815,6 +1815,10 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
                     canonical_fqn = str(canon_candidate)
 
         with st.expander("Debug · Profiling Diagnostics", expanded=False):
+            if DEBUG_PROFILING:
+                st.caption(
+                    f"last_error={st.session_state.get('profiling_last_error')}"
+                )
             last_error = st.session_state.get("profiling_last_error")
             if last_error:
                 st.text(f"last_error: {last_error}")
