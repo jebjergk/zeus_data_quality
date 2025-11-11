@@ -31,10 +31,8 @@ Forbidden patterns:
 • Do not allow manual editing of the configuration name or target caption formatting.
 """
 
-import logging
+import streamlit as st, logging
 import sys
-
-import streamlit as st
 
 logging.basicConfig(
     level=logging.INFO,
@@ -53,7 +51,7 @@ ALLOWED_PAGES = {"home", "cfg", "profile", "monitor", "docs"}
 DEFAULT_ACTIVE_VIEW = "home"
 
 if "active_view" not in st.session_state:
-    st.session_state["active_view"] = DEFAULT_ACTIVE_VIEW
+    st.session_state["active_view"] = DEFAULT_ACTIVE_VIEW  # keep your preferred start view
     logging.info("route:init %s", st.session_state["active_view"])
 
 if "_last_query_page" not in st.session_state:
@@ -66,6 +64,7 @@ if "page" not in st.session_state:
 def set_view(view: str) -> None:
     """Update the active view explicitly via user navigation."""
     st.session_state["active_view"] = view
+    logging.info("route:set %s", view)
 
 try:
     import altair as alt
