@@ -1799,6 +1799,17 @@ def _collect_single_row(session, sql: str, params: Optional[Sequence[Any]] = Non
     return result[0] if result else None
 
 
+def _with_extended_timeout(session, seconds: int) -> None:
+    session.sql(
+        "ALTER SESSION SET STATEMENT_TIMEOUT_IN_SECONDS = ?",
+        params=[seconds],
+    ).collect()
+
+
+def _ping(session) -> None:
+    session.sql("SELECT 1").collect()
+
+
 def _extract_row_value(row, key: str, default=None):
     if row is None:
         return default
@@ -1873,10 +1884,14 @@ def run_table_profile(
     if not session or not fqn:
         return {}, []
 
+    _with_extended_timeout(session, 600)
+
     db, schema, table = _split_fqn(fqn)
     columns = list_columns(session, db, schema, table)
     if not columns:
         return {}, []
+
+    _ping(session)
 
     pct: Optional[float]
     if sample_pct is None:
@@ -1914,12 +1929,16 @@ def run_table_profile(
     except Exception:
         rows_profiled = 0
 
+    _ping(session)
+
     per_column: List[Dict[str, Any]] = []
     approx_threshold = 100000
 
     top_n_clamped = max(0, min(int(top_n), 10))
 
     reference_sets = _load_reference_sets(session, db, schema)
+
+    _ping(session)
 
     for meta in columns:
         name = meta.get("column_name")
@@ -2295,6 +2314,8 @@ def run_table_profile(
                     error_message = f"fallback failed: {fallback_message}"
                 row = None
 
+        _ping(session)
+
         row_cnt_raw = _extract_row_value(row, "ROW_CNT", rows_profiled)
         try:
             row_cnt = int(row_cnt_raw)
@@ -2638,6 +2659,8 @@ def run_table_profile(
                         top_values.append({"value": value, "count": count_int, "pct": pct})
                 except Exception:
                     top_values = []
+                finally:
+                    _ping(session)
 
         whitespace_length_counts: List[Tuple[int, int]] = []
         if is_string and ws_only_rows_int > 0 and rows_profiled_total:
@@ -2674,6 +2697,8 @@ def run_table_profile(
                     whitespace_length_counts.append((length_int, count_int))
             except Exception:
                 whitespace_length_counts = []
+            finally:
+                _ping(session)
 
         if is_string and whitespace_length_counts and non_nulls:
             for length_int, count_int in whitespace_length_counts:
@@ -3124,6 +3149,8 @@ def run_table_profile(
         column_entry["dq_checks"] = dq_checks or None
 
         per_column.append(column_entry)
+
+        _ping(session)
 
     summary = {
         "table": fqn,
