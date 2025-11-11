@@ -92,12 +92,9 @@ LAST_PROFILE_TOP_N_STATE = "last_profile_top_n"
 
 
 def _ensure_last_profile_state_defaults() -> None:
-    if LAST_PROFILE_SUMMARY_STATE not in st.session_state:
-        st.session_state[LAST_PROFILE_SUMMARY_STATE] = None
-    if LAST_PROFILE_ROWS_STATE not in st.session_state:
-        st.session_state[LAST_PROFILE_ROWS_STATE] = []
-    if LAST_PROFILE_ERROR_STATE not in st.session_state:
-        st.session_state[LAST_PROFILE_ERROR_STATE] = None
+    st.session_state.setdefault(LAST_PROFILE_SUMMARY_STATE, None)
+    st.session_state.setdefault(LAST_PROFILE_ROWS_STATE, [])
+    st.session_state.setdefault(LAST_PROFILE_ERROR_STATE, None)
 
 
 def _sync_last_profile_session(
@@ -749,6 +746,7 @@ def _render_metric_card(
 def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: ARG001 - interface matches requirement
     try:
         logger = logging.getLogger(__name__)
+        st.session_state.setdefault("editor_target_fqn", None)
         editor_target_fqn = st.session_state.get("editor_target_fqn")
         logger.info(
             '{"where":"profile_view_enter","fqn": %s}',
