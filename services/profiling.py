@@ -1830,6 +1830,30 @@ def _extract_row_value(row, key: str, default=None):
         return default
 
 
+def _quick_fqn_check(fqn: str) -> Optional[int]:
+    """Verify that the provided FQN is readable and return a quick row count."""
+
+    if not fqn:
+        return None
+
+    session = _get_session()
+    sql = f"SELECT COUNT(*) AS C FROM {fqn} LIMIT 1"
+
+    try:
+        result = session.sql(sql).collect()
+    except Exception as exc:  # pragma: no cover - defensive logging
+        raise RuntimeError(f"Unable to read {fqn}: {exc}") from exc
+
+    if not result:
+        return None
+
+    value = _extract_row_value(result[0], "C", None)
+    try:
+        return int(value) if value is not None else None
+    except Exception:
+        return None
+
+
 def _coerce_variant_map(value: Any) -> Dict[str, Any]:
     """Best-effort conversion of a Snowflake VARIANT payload into a dict."""
 
@@ -3635,18 +3659,39 @@ def run_table_profile(
     t0 = time.monotonic()
     ok = True
     err: Optional[str] = None
+    summary: Optional[Dict[str, Any]] = None
+    column_rows: List[Dict[str, Any]] = []
+    precheck_count: Optional[int] = None
 
     try:
-        summary, column_rows = _run_table_profile_raw(
-            session=session,
-            fqn=fqn,
-            sample_pct=sample_pct,
-            top_n=top_n,
-        )
+        precheck_count = _quick_fqn_check(fqn)
     except Exception as exc:  # pragma: no cover - defensive wrapper
-        logger.exception("run_table_profile failed for %s", fqn)
+        logger.warning("FQN precheck failed for %s: %s", fqn, exc)
         ok = False
-        err = f"{type(exc).__name__}: {exc}"
+        err = f"FQN precheck failed for {fqn} — {type(exc).__name__}: {exc}"
+    else:
+        try:
+            summary, column_rows = _run_table_profile_raw(
+                session=session,
+                fqn=fqn,
+                sample_pct=sample_pct,
+                top_n=top_n,
+            )
+        except Exception as exc:  # pragma: no cover - defensive wrapper
+            logger.exception("run_table_profile failed for %s", fqn)
+            ok = False
+            err = f"{type(exc).__name__}: {exc}"
+            summary = None
+            column_rows = []
+        else:
+            if precheck_count is not None:
+                summary_detail = summary.get("summary") if isinstance(summary, dict) else None
+                if isinstance(summary_detail, dict):
+                    summary_detail["precheck_count"] = precheck_count
+                elif isinstance(summary, dict):
+                    summary["precheck_count"] = precheck_count
+
+    if not ok:
         summary = None
         column_rows = []
 
