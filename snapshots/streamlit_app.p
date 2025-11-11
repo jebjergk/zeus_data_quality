@@ -1774,6 +1774,13 @@ with st.sidebar:
 st.markdown("<div class='sf-hr'></div>", unsafe_allow_html=True)
 
 active_view = st.session_state.get("active_view", DEFAULT_ACTIVE_VIEW)
+if DEBUG_PROFILING:
+    st.caption(
+        "🛠 route="
+        f"{st.session_state.get('active_view')} "
+        f"busy_prof={st.session_state.get('busy_profiling')} "
+        f"busy_save={st.session_state.get('busy_saving')}"
+    )
 if active_view == "cfg":
     if st.session_state.get("cfg_mode","list") == "list":
         render_config_list()
