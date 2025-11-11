@@ -965,7 +965,6 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
                                     run_id=selected_run_id
                                 )
                             )
-                            st.rerun()
 
         load_selected_run_id: Optional[str] = None
         load_button_clicked = False
@@ -1188,7 +1187,6 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
         if clear_loaded:
             st.session_state.pop(ui_keys.PROFILE_LOADED_RUN_ID, None)
             loaded_run_id = None
-            st.rerun()
 
         inline_error_placeholder = st.empty()
 
