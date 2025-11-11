@@ -1888,8 +1888,6 @@ def run_table_profile(
     if not session or not fqn:
         return {}, []
 
-    _with_extended_timeout(600)
-
     db, schema, table = _split_fqn(fqn)
     columns = list_columns(session, db, schema, table)
     if not columns:
