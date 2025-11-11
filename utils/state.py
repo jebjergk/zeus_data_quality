@@ -878,30 +878,6 @@ def list_saved_profiles(table_fqn: Optional[str]) -> _ProfileListResult:
     return _ProfileListResult(
         {"ok": True, "items": items, "canonical_table_fqn": canon}
     )
-
-
-def _variant_to_json(value: Any) -> str:
-    """Return a JSON string representation of a VARIANT payload."""
-
-    if value is None:
-        return ""
-    try:
-        if hasattr(value, "to_json"):
-            return str(value.to_json())
-        if hasattr(value, "as_json"):
-            return str(value.as_json())
-    except Exception:  # pragma: no cover - defensive
-        return ""
-
-    if isinstance(value, str):
-        return value
-
-    try:
-        return _json_dumps_safe(value)
-    except Exception:  # pragma: no cover - defensive
-        return ""
-
-
 def load_profile_by_id(profile_id: str) -> Dict[str, Any]:
     """Load a saved profile payload from the metadata table by identifier."""
 
@@ -919,7 +895,7 @@ def load_profile_by_id(profile_id: str) -> Dict[str, Any]:
         return {"ok": False, "err": "profile_id_required"}
 
     sql = (
-        "SELECT ID, TABLE_FQN, NAME, CREATED_AT, PAYLOAD "
+        "SELECT ID, TABLE_FQN, NAME, CREATED_AT, TO_JSON(PAYLOAD) AS PAYLOAD_JSON "
         f"FROM {PROFILES_TABLE_FQN} "
         "WHERE ID = ?"
     )
@@ -947,8 +923,25 @@ def load_profile_by_id(profile_id: str) -> Dict[str, Any]:
     table_fqn_value = str(row[1] or "").strip()
     name_value = str(row[2] or "").strip() or "Unnamed"
     created_at_value = _ensure_iso_timestamp(row[3]) if len(row) > 3 else ""
-    payload_json = _variant_to_json(row[4] if len(row) > 4 else None)
-    payload_dict = normalize_saved_profile(payload_json) if payload_json else {}
+
+    payload_json = ""
+    if len(row) > 4:
+        payload_json = str(getattr(row, "PAYLOAD_JSON", row[4]) or "")
+
+    raw_payload: Any = {}
+    if payload_json:
+        try:
+            raw_payload = json.loads(payload_json)
+        except Exception as exc:
+            err_msg = str(exc) or "payload_parse_error"
+            logger.error(
+                "Failed to parse profile payload JSON",
+                extra={**context, "err": err_msg},
+                exc_info=True,
+            )
+            return {"ok": False, "err": "payload_parse_error", "detail": err_msg}
+
+    payload_dict = normalize_saved_profile(raw_payload) if payload_json else {}
 
     item = {
         "id": row_id,
