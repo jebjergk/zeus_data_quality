@@ -48,10 +48,9 @@ from typing import Any, Dict, List, Optional, Tuple
 from uuid import uuid4
 
 ALLOWED_PAGES = {"home", "cfg", "profile", "monitor", "docs"}
-DEFAULT_ACTIVE_VIEW = "home"
 
 if "active_view" not in st.session_state:
-    st.session_state["active_view"] = DEFAULT_ACTIVE_VIEW  # keep your preferred start view
+    st.session_state["active_view"] = "home"  # or your desired start view
     logging.info("route:init %s", st.session_state["active_view"])
 
 if "_last_query_page" not in st.session_state:
@@ -1681,7 +1680,7 @@ if query_page and query_page != last_query_page:
 elif query_page is None:
     if "_last_query_page" not in st.session_state:
         st.session_state["_last_query_page"] = st.session_state.get(
-            "active_view", DEFAULT_ACTIVE_VIEW
+            "active_view", "home"
         )
     elif last_query_page is not None:
         st.session_state["_last_query_page"] = None
@@ -1694,7 +1693,7 @@ if (
     navigate_to(page_state_value)
 if "cfg_mode" not in st.session_state:
     st.session_state["cfg_mode"] = "list"
-view = st.session_state.get("active_view", DEFAULT_ACTIVE_VIEW)
+view = st.session_state.get("active_view", "home")
 with st.sidebar:
     st.header("Zeus DQ")
     st.button(
@@ -1754,7 +1753,7 @@ with st.sidebar:
 # and the main content area.
 st.markdown("<div class='sf-hr'></div>", unsafe_allow_html=True)
 
-view = st.session_state.get("active_view", DEFAULT_ACTIVE_VIEW)
+view = st.session_state.get("active_view", "home")
 if DEBUG_PROFILING:
     st.caption(
         "🛠 route="
