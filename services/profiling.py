@@ -40,20 +40,9 @@ def _get_session():
     return get_active_session()
 
 
-def _with_extended_timeout(seconds: int):
-    try:
-        timeout = int(seconds)
-    except (TypeError, ValueError):
-        timeout = 0
-
-    if timeout < 1:
-        timeout = 1
-    if timeout > 3600:
-        timeout = 3600
-
-    _get_session().sql(
-        f"ALTER SESSION SET STATEMENT_TIMEOUT_IN_SECONDS = {timeout}"
-    ).collect()
+def _with_extended_timeout(seconds: int) -> None:
+    # No-op in SP/UDF/Streamlit-in-Snowflake: ALTER SESSION not permitted.
+    return
 
 
 def _ping():
