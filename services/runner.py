@@ -1,13 +1,40 @@
 # services/runner.py
-from typing import Dict, Any, List
+import json
+from typing import Any, Dict, List, Sequence
+from utils.checkdefs import _RULE_PARAMS_KEY
 from utils.meta import DQCheck, DQConfig
 
 AGG_PREFIX = "AGG:"
+
+
+def _extract_rule_params(check: DQCheck) -> Sequence[Any]:
+    if not check.params_json:
+        return ()
+    try:
+        parsed = json.loads(check.params_json)
+    except Exception:
+        return ()
+    if not isinstance(parsed, dict):
+        return ()
+    params = parsed.get(_RULE_PARAMS_KEY, ())
+    if params is None:
+        return ()
+    if isinstance(params, (list, tuple)):
+        return tuple(params)
+    return (params,)
+
+
+def _sql_with_params(session, sql: str, params: Sequence[Any]):
+    if params:
+        return session.sql(sql, params=tuple(params))
+    return session.sql(sql)
+
 
 def run_now(session, cfg: DQConfig, checks: List[DQCheck]) -> Dict[str, Any]:
     results: Dict[str, Any] = {"config_id": cfg.config_id, "checks": []}
     for chk in checks:
         rule = (chk.rule_expr or '').strip()
+        rule_params = _extract_rule_params(chk)
         if rule.upper().startswith(AGG_PREFIX):
             sql = rule[len(AGG_PREFIX):].strip()
             if sql:
@@ -25,7 +52,7 @@ def run_now(session, cfg: DQConfig, checks: List[DQCheck]) -> Dict[str, Any]:
                 while sql and sql[-1] in {'"', "'"}:
                     sql = sql[:-1].rstrip()
             try:
-                df = session.sql(sql)
+                df = _sql_with_params(session, sql, rule_params)
             except Exception as exc:
                 raise RuntimeError(f"Failed to execute aggregate check SQL: {exc}\nSQL:\n{sql}") from exc
             r = df.collect()[0]
@@ -42,7 +69,7 @@ def run_now(session, cfg: DQConfig, checks: List[DQCheck]) -> Dict[str, Any]:
         else:
             failure_sql = f"SELECT COUNT(*) AS FAILURES FROM {chk.table_fqn} WHERE NOT ({rule})"
             try:
-                df = session.sql(failure_sql)
+                df = _sql_with_params(session, failure_sql, rule_params)
             except Exception as exc:
                 raise RuntimeError(f"Failed to execute row check SQL: {exc}\nSQL:\n{failure_sql}") from exc
             failures = int(df.collect()[0][0])
@@ -52,7 +79,7 @@ def run_now(session, cfg: DQConfig, checks: List[DQCheck]) -> Dict[str, Any]:
                     f"SELECT * FROM {chk.table_fqn} WHERE NOT ({rule}) LIMIT {int(chk.sample_rows)}"
                 )
                 try:
-                    s_df = session.sql(sample_sql)
+                    s_df = _sql_with_params(session, sample_sql, rule_params)
                 except Exception as exc:
                     raise RuntimeError(f"Failed to fetch sample rows using SQL: {exc}\nSQL:\n{sample_sql}") from exc
                 sample = [r.asDict() if hasattr(r, 'asDict') else dict(r) for r in s_df.collect()]
