@@ -834,7 +834,7 @@ def list_saved_profiles(table_fqn: Optional[str]) -> _ProfileListResult:
         )
 
     sql = (
-        "SELECT ID, TABLE_FQN, NAME, CREATED_AT, PAYLOAD "
+        "SELECT ID, TABLE_FQN, NAME, CREATED_AT, TO_JSON(PAYLOAD) AS PAYLOAD_JSON "
         f"FROM {PROFILES_TABLE_FQN} "
         "WHERE UPPER(TABLE_FQN) = ? "
         "ORDER BY CREATED_AT DESC"
@@ -926,7 +926,12 @@ def load_profile_by_id(profile_id: str) -> Dict[str, Any]:
 
     payload_json = ""
     if len(row) > 4:
-        payload_json = str(getattr(row, "PAYLOAD_JSON", row[4]) or "")
+        payload_value: Any = ""
+        try:
+            payload_value = row["PAYLOAD_JSON"]  # type: ignore[index]
+        except Exception:
+            payload_value = row[4]
+        payload_json = str(payload_value or "")
 
     raw_payload: Any = {}
     if payload_json:
@@ -939,7 +944,7 @@ def load_profile_by_id(profile_id: str) -> Dict[str, Any]:
                 extra={**context, "err": err_msg},
                 exc_info=True,
             )
-            return {"ok": False, "err": "payload_parse_error", "detail": err_msg}
+            return {"ok": False, "err": f"payload_parse_error: {err_msg}"}
 
     payload_dict = normalize_saved_profile(raw_payload) if payload_json else {}
 
