@@ -73,6 +73,10 @@ def _list_tables_cached(session_obj, database: str, schema: str) -> List[str]:
     return _load_tables((session_cache_token(session_obj), database, schema))
 
 
+def _canonicalize_identifier(value: Optional[str]) -> str:
+    return (value or "").strip('"').upper()
+
+
 def stateless_table_picker(session_obj, preselect_fqn: Optional[str]):
     """Simple, stateless DB → Schema → Table picker. Returns (db, schema, table, fqn)."""
 
@@ -114,9 +118,9 @@ def stateless_table_picker(session_obj, preselect_fqn: Optional[str]):
     if not tables or tbl_sel == "— none —":
         return db_sel, sch_sel, None, ""
 
-    db = (db_sel or "").strip('"').upper()
-    schema = (sch_sel or "").strip('"').upper()
-    table = (tbl_sel or "").strip('"').upper()
+    db = _canonicalize_identifier(db_sel)
+    schema = _canonicalize_identifier(sch_sel)
+    table = _canonicalize_identifier(tbl_sel)
 
     fqn = ""
     if db and schema and table:
