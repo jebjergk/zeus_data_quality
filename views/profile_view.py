@@ -1169,24 +1169,28 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
 
         run_profile = bool(run_requested and not busy_profiling)
         if run_profile:
+            editor_target_fqn = st.session_state.get("editor_target_fqn")
+            if not editor_target_fqn:
+                inline_error_placeholder.warning("Select a table first.")
+                st.session_state[LAST_PROFILE_ERROR_STATE] = None
+                st.session_state["busy_profiling"] = False
+                return
+
             st.session_state["busy_profiling"] = True
             busy_profiling = True
             try:
                 st.session_state.pop(ui_keys.PROFILE_LOADED_RUN_ID, None)
                 loaded_run_id = None
-                editor_target_fqn = st.session_state.get("editor_target_fqn")
                 if not session:
                     _record_last_profile_error(
                         ui_strings.PROFILE_RUN_ERROR_NO_SESSION
                     )
                     profile_result = None
-                elif not editor_target_fqn:
-                    st.warning("Select a table first.")
-                    st.session_state[LAST_PROFILE_ERROR_STATE] = None
                 elif not selected_fqn:
                     st.warning(ui_strings.PROFILE_RUN_WARNING_NO_TABLE)
                     st.session_state[LAST_PROFILE_ERROR_STATE] = None
                 else:
+                    logger.info("profile:run fqn=%s", selected_fqn)
                     with st.spinner(ui_strings.PROFILE_RUN_SPINNER):
                         start = time.time()
                         st.session_state.pop("profiling_last_error", None)
