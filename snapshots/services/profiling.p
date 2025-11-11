@@ -7,6 +7,7 @@ import logging
 import math
 import os
 import random
+import time
 import re
 from datetime import datetime
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple, Union
@@ -1872,7 +1873,7 @@ def _coerce_variant_value(value: Any) -> Any:
     return value
 
 
-def run_table_profile(
+def _run_table_profile_raw(
     session,
     fqn: str,
     sample_pct: Optional[float] = 10.0,
@@ -3616,4 +3617,54 @@ def load_profile_run(
         "summary": summary_out,
         "columns": columns,
         "top_n": top_n,
+    }
+
+
+def run_table_profile(
+    session,
+    fqn: str,
+    sample_pct: Optional[float] = 10.0,
+    top_n: int = 10,
+) -> Dict[str, Any]:
+    """Profile a table and return a structured result contract.
+
+    The return payload always includes the keys:
+      ok (bool), summary (dict|None), column_rows (list), err (str|None), timing_ms (int).
+    """
+
+    t0 = time.monotonic()
+    ok = True
+    err: Optional[str] = None
+
+    try:
+        summary, column_rows = _run_table_profile_raw(
+            session=session,
+            fqn=fqn,
+            sample_pct=sample_pct,
+            top_n=top_n,
+        )
+    except Exception as exc:  # pragma: no cover - defensive wrapper
+        logger.exception("run_table_profile failed for %s", fqn)
+        ok = False
+        err = f"{type(exc).__name__}: {exc}"
+        summary = None
+        column_rows = []
+
+    timing_ms = int((time.monotonic() - t0) * 1000)
+
+    if ok:
+        return {
+            "ok": True,
+            "summary": summary,
+            "column_rows": column_rows,
+            "err": None,
+            "timing_ms": timing_ms,
+        }
+
+    return {
+        "ok": False,
+        "summary": None,
+        "column_rows": [],
+        "err": err,
+        "timing_ms": timing_ms,
     }
