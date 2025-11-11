@@ -1064,24 +1064,23 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
                     st.session_state.pop("profiling_last_error_trace", None)
                     summary_raw: Dict[str, Any] = {}
                     column_rows: List[Dict[str, Any]] = []
-                try:
-                    summary_raw, column_rows = run_table_profile(
-                        session=session,
-                        fqn=selected_fqn,
-                        sample_pct=sample_pct,
-                        top_n=int(min(top_n, MAX_TOP_N)),
-                    )
-                except Exception as exc:  # pragma: no cover - Snowflake specific
-                    logging.exception("profiling:unhandled")
-                    st.session_state["profiling_last_error"] = (
-                        f"{type(exc).__name__}: {exc}"
-                    )
-                    st.session_state["profiling_last_error_trace"] = (
-                        traceback.format_exc()
-                    )
-                    st.error("Profiling failed — see debug panel for details.")
-                    st.session_state["busy_profiling"] = False
-                    st.stop()
+                    try:
+                        summary_raw, column_rows = run_table_profile(
+                            session=session,
+                            fqn=selected_fqn,
+                            sample_pct=sample_pct,
+                            top_n=int(min(top_n, MAX_TOP_N)),
+                        )
+                    except Exception as exc:  # pragma: no cover - Snowflake specific
+                        logging.exception("profiling:unhandled")
+                        st.session_state["profiling_last_error"] = (
+                            f"{type(exc).__name__}: {exc}"
+                        )
+                        st.session_state["profiling_last_error_trace"] = (
+                            traceback.format_exc()
+                        )
+                        st.error("Profiling failed — see debug panel for details.")
+                        st.stop()
                 duration = time.time() - start
 
                 rows_profiled = int(summary_raw.get("rows_profiled") or 0)
