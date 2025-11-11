@@ -1013,7 +1013,7 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
     busy_profiling = bool(st.session_state.get("busy_profiling", False))
     run_disabled = bool(loaded_run_id) or busy_profiling
     with button_cols[0]:
-        run_profile = st.button(
+        run_requested = st.button(
             ui_strings.PROFILE_RUN_BUTTON_LABEL,
             type="primary",
             disabled=run_disabled,
@@ -1043,13 +1043,10 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
 
     profile_result = stored_profile_result
 
+    run_profile = bool(run_requested and not busy_profiling)
     if run_profile:
-        if st.session_state.get("busy_profiling", False):
-            run_profile = False
-        else:
-            st.session_state["busy_profiling"] = True
-
-    if run_profile:
+        st.session_state["busy_profiling"] = True
+        busy_profiling = True
         try:
             st.session_state.pop(ui_keys.PROFILE_LOADED_RUN_ID, None)
             loaded_run_id = None
@@ -1102,10 +1099,11 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
                     "top_n": int(top_n),
                 }
                 st.session_state[ui_keys.PROFILE_RESULTS_STATE] = profile_result
-                st.session_state["busy_profiling"] = False
                 st.rerun()
         finally:
             st.session_state["busy_profiling"] = False
+
+    busy_profiling = bool(st.session_state.get("busy_profiling", False))
 
     def _load_suggestion(
         profile_payload: Dict[str, Any],
@@ -1240,9 +1238,7 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
                 if save_enabled
                 else ui_strings.PROFILE_SAVE_HELP_DISABLED
             )
-            save_disabled = (not save_enabled) or st.session_state.get(
-                "busy_profiling", False
-            )
+            save_disabled = (not save_enabled) or busy_profiling
             save_toggle = st.toggle(
                 ui_strings.PROFILE_SAVE_LABEL,
                 key=ui_keys.PROFILE_SAVE_TOGGLE,
@@ -1254,13 +1250,15 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
             prev_toggle = st.session_state.get(ui_keys.PROFILE_SAVE_TOGGLE_PREV, False)
             st.session_state[ui_keys.PROFILE_SAVE_TOGGLE_PREV] = save_toggle
 
-            if (
+            should_save_profile = (
                 save_toggle
                 and save_enabled
                 and not prev_toggle
-                and not st.session_state.get("busy_profiling", False)
-            ):
+                and not busy_profiling
+            )
+            if should_save_profile:
                 st.session_state["busy_profiling"] = True
+                busy_profiling = True
                 run_info = {**(profile_result.get("summary") or {})}
                 run_info.update(
                     {
@@ -1303,6 +1301,7 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
                         st.success(ui_strings.PROFILE_SAVE_SUCCESS.format(run_id=run_id))
                 finally:
                     st.session_state["busy_profiling"] = False
+                busy_profiling = bool(st.session_state.get("busy_profiling", False))
 
             if not save_toggle:
                 st.session_state.pop(ui_keys.PROFILE_SAVE_RUN_ID, None)
