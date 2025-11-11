@@ -1155,11 +1155,15 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
             try:
                 st.session_state.pop(ui_keys.PROFILE_LOADED_RUN_ID, None)
                 loaded_run_id = None
+                editor_target_fqn = st.session_state.get("editor_target_fqn")
                 if not session:
                     _record_last_profile_error(
                         ui_strings.PROFILE_RUN_ERROR_NO_SESSION
                     )
                     profile_result = None
+                elif not editor_target_fqn:
+                    st.warning("Select a table first.")
+                    st.session_state[LAST_PROFILE_ERROR_STATE] = None
                 elif not selected_fqn:
                     st.warning(ui_strings.PROFILE_RUN_WARNING_NO_TABLE)
                     st.session_state[LAST_PROFILE_ERROR_STATE] = None
