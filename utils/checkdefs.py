@@ -1,4 +1,6 @@
 import re
+from dataclasses import dataclass
+from typing import Iterator, Tuple
 
 
 SUPPORTED_COLUMN_CHECKS = ["UNIQUE","NULL_COUNT","MIN_MAX","WHITESPACE","FORMAT_DISTRIBUTION","VALUE_DISTRIBUTION"]
@@ -11,6 +13,19 @@ _WRAPPING_DELIMS = {
     '`': '`',
     '[': ']',
 }
+
+_RULE_PARAMS_KEY = "__rule_params__"
+
+
+@dataclass(frozen=True)
+class RuleExpr:
+    sql: str
+    is_aggregate: bool
+    params: Tuple[object, ...] = ()
+
+    def __iter__(self) -> Iterator[object]:
+        yield self.sql
+        yield self.is_aggregate
 
 
 def _strip_wrapping_delimiters(value: str) -> str:
@@ -96,6 +111,10 @@ def build_rule_for_column_check(fqn: str, col: str, ctype: str, params: dict):
     colq = f'"{col}"'
     # return row predicate SQL, is_agg=False
     ctype = (ctype or "").upper()
+    if params is None:
+        params = {}
+    else:
+        params.pop(_RULE_PARAMS_KEY, None)
     if ctype == "UNIQUE":
         ignore_nulls = bool(params.get("ignore_nulls", True))
         if ignore_nulls:
@@ -121,18 +140,27 @@ def build_rule_for_column_check(fqn: str, col: str, ctype: str, params: dict):
         return f"({colq} IS NOT NULL AND LENGTH(TRIM({colq})) > 0)", False
     if ctype == "FORMAT_DISTRIBUTION":
         regex = params.get("regex", ".*")
-        return f"({colq} IS NULL OR {colq} RLIKE '{regex}')", False
+        if regex in (None, ""):
+            regex = ".*"
+        if not isinstance(regex, str):
+            regex = str(regex)
+        params[_RULE_PARAMS_KEY] = [regex]
+        return RuleExpr(f"({colq} IS NULL OR REGEXP_LIKE({colq}, ?))", False, (regex,))
     if ctype == "VALUE_DISTRIBUTION":
         allowed_csv = params.get("allowed_values_csv", "")
         values = [v.strip() for v in allowed_csv.split(",") if v.strip() != ""]
-        if not values: return "(TRUE)", False
+        if not values:
+            params.pop(_RULE_PARAMS_KEY, None)
+            return RuleExpr("(TRUE)", False)
         quoted_values = []
         for raw in values:
             sanitized = raw.replace("'", "''")
             quoted_values.append("'" + sanitized + "'")
         quoted = ", ".join(quoted_values)
-        return f"({colq} IN ({quoted}))", False
-    return "(TRUE)", False
+        params.pop(_RULE_PARAMS_KEY, None)
+        return RuleExpr(f"({colq} IN ({quoted}))", False)
+    params.pop(_RULE_PARAMS_KEY, None)
+    return RuleExpr("(TRUE)", False)
 
 
 def build_rule_for_table_check(fqn: str, ttype: str, params: dict):
