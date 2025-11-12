@@ -64,6 +64,7 @@ from utils.flags import (
     UI_CONTRACT_STRICT,
 )
 from utils.meta import get_table_row_count
+from utils.version import build_sha, build_time
 from utils.state import (
     SAVED_PROFILES_STATE,
     list_saved_profiles,
@@ -2285,6 +2286,7 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
                         canonical_fqn = str(canon_candidate)
 
             with st.expander("Debug · Profiling Diagnostics", expanded=False):
+                st.caption(f"🧩 build={build_sha()} time={build_time()}")
                 debug_fqn_override = st.text_input(
                     "DB.SCHEMA.TABLE",
                     key="profile_debug_fqn_override",
