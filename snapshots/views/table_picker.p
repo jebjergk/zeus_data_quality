@@ -8,6 +8,12 @@ import streamlit as st
 from utils.meta import list_databases, list_schemas, list_tables
 
 
+def _canon_fqn(db, schema, table):
+    norm = lambda x: (x or "").replace('"', "").strip().upper()
+    d, s, t = norm(db), norm(schema), norm(table)
+    return f"{d}.{s}.{t}" if d and s and t else ""
+
+
 def session_cache_token(session_obj) -> str:
     """Return a stable identifier for the given Snowpark session."""
 
@@ -73,10 +79,6 @@ def _list_tables_cached(session_obj, database: str, schema: str) -> List[str]:
     return _load_tables((session_cache_token(session_obj), database, schema))
 
 
-def _canonicalize_identifier(value: Optional[str]) -> str:
-    return (value or "").strip('"').upper()
-
-
 def stateless_table_picker(session_obj, preselect_fqn: Optional[str]):
     """Simple, stateless DB → Schema → Table picker. Returns (db, schema, table, fqn)."""
 
@@ -118,13 +120,8 @@ def stateless_table_picker(session_obj, preselect_fqn: Optional[str]):
     if not tables or tbl_sel == "— none —":
         return db_sel, sch_sel, None, ""
 
-    db = _canonicalize_identifier(db_sel)
-    schema = _canonicalize_identifier(sch_sel)
-    table = _canonicalize_identifier(tbl_sel)
-
-    fqn = ""
-    if db and schema and table:
-        fqn = f"{db}.{schema}.{table}"
+    fqn = _canon_fqn(db_sel, sch_sel, tbl_sel)
+    if fqn:
         st.session_state["editor_target_fqn"] = fqn
         logging.info("picker:set_fqn %s", fqn)
 
