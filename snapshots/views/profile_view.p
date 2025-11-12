@@ -1207,121 +1207,174 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
         current_editor_fqn = st.session_state.get("editor_target_fqn") or ""
 
         run_clicked = bool(run_requested)
-        if run_clicked and not st.session_state.get("busy_profiling", False):
-            st.session_state["busy_profiling"] = True
-            st.session_state["freeze_view"] = True
-            busy_profiling = True
+        if run_clicked:
 
-            def _execute_profile_run() -> None:
+            def _handle_profile_run() -> None:
                 nonlocal profile_result, stored_profile_result, loaded_run_id
+                nonlocal busy_profiling
 
                 fqn = st.session_state.get("editor_target_fqn") or ""
                 if not fqn:
                     st.warning("Select a table first.")
                     return
 
-                st.session_state.pop(ui_keys.PROFILE_LOADED_RUN_ID, None)
-                loaded_run_id = None
-
-                if not session:
-                    _record_last_profile_error(
-                        ui_strings.PROFILE_RUN_ERROR_NO_SESSION
-                    )
-                    profile_result = None
-                    stored_profile_result = None
+                if st.session_state.get("busy_profiling", False):
                     return
 
-                target_fqn = selected_fqn or fqn
-                if not target_fqn:
-                    st.warning(ui_strings.PROFILE_RUN_WARNING_NO_TABLE)
-                    st.session_state[LAST_PROFILE_ERROR_STATE] = None
-                    return
+                st.session_state["busy_profiling"] = True
+                st.session_state["freeze_view"] = True
+                busy_profiling = True
 
-                if DEBUG_PROFILING:
-                    logger.info("profile:run fqn=%s", target_fqn)
+                try:
+                    st.session_state.pop(ui_keys.PROFILE_LOADED_RUN_ID, None)
+                    loaded_run_id = None
 
-                with st.spinner(ui_strings.PROFILE_RUN_SPINNER):
-                    start = time.time()
-                    st.session_state.pop("profiling_last_error", None)
-                    st.session_state.pop("profiling_last_error_trace", None)
-                    summary_raw: Dict[str, Any] = {}
-                    column_rows: List[Dict[str, Any]] = []
-                    error_message: Optional[str] = None
-                    run_ok = False
-                    try:
-                        summary_raw, column_rows = run_table_profile(
-                            session=session,
-                            fqn=target_fqn,
-                            sample_pct=sample_pct,
-                            top_n=int(min(top_n, MAX_TOP_N)),
+                    if not session:
+                        _record_last_profile_error(
+                            ui_strings.PROFILE_RUN_ERROR_NO_SESSION
                         )
-                        run_ok = True
-                    except Exception as exc:  # pragma: no cover - Snowflake specific
-                        logging.exception("profiling:unhandled")
-                        st.session_state["profiling_last_error"] = (
-                            f"{type(exc).__name__}: {exc}"
-                        )
-                        st.session_state["profiling_last_error_trace"] = (
-                            traceback.format_exc()
-                        )
-                        error_message = (
-                            "Profiling failed — see debug panel for details."
-                        )
-                    finally:
-                        if DEBUG_PROFILING:
-                            logger.debug(
-                                "profile_run ok=%s rows=%s err=%s",
-                                run_ok,
-                                len(column_rows) if column_rows else 0,
-                                error_message if error_message else None,
-                            )
-
-                    if error_message:
-                        st.session_state[LAST_PROFILE_ERROR_STATE] = error_message
-                        _record_last_profile_error(error_message)
                         profile_result = None
                         stored_profile_result = None
                         return
 
-                    duration = time.time() - start
+                    target_fqn = selected_fqn or fqn
+                    if not target_fqn:
+                        st.warning(ui_strings.PROFILE_RUN_WARNING_NO_TABLE)
+                        st.session_state[LAST_PROFILE_ERROR_STATE] = None
+                        return
 
-                    rows_profiled = int(summary_raw.get("rows_profiled") or 0)
-                    profiles: List[ColumnProfile] = []
-                    columns_payload: List[Dict[str, Any]] = []
-                    for column in column_rows:
-                        normalized_column = normalize_profile_row(column)
-                        columns_payload.append(normalized_column)
-                        profiles.append(
-                            _column_profile_from_payload(normalized_column)
+                    if DEBUG_PROFILING:
+                        logger.info("profile:run fqn=%s", target_fqn)
+
+                    with st.spinner(ui_strings.PROFILE_RUN_SPINNER):
+                        start = time.time()
+                        st.session_state.pop("profiling_last_error", None)
+                        st.session_state.pop("profiling_last_error_trace", None)
+
+                        try:
+                            res = run_table_profile(
+                                session=session,
+                                fqn=target_fqn,
+                                sample_pct=sample_pct,
+                                top_n=int(min(top_n, MAX_TOP_N)),
+                            )
+                        except Exception as exc:  # pragma: no cover - Snowflake specific
+                            logging.exception("profiling:unhandled")
+                            error_text = f"{type(exc).__name__}: {exc}"
+                            st.session_state[LAST_PROFILE_SUMMARY_STATE] = None
+                            st.session_state[LAST_PROFILE_ROWS_STATE] = []
+                            st.session_state[LAST_PROFILE_ERROR_STATE] = error_text
+                            st.session_state["profiling_last_error"] = error_text
+                            st.session_state["profiling_last_error_trace"] = (
+                                traceback.format_exc()
+                            )
+                            st.session_state.pop(
+                                LAST_PROFILE_TARGET_STATE, None
+                            )
+                            st.session_state.pop(LAST_PROFILE_TOP_N_STATE, None)
+                            st.session_state.pop(PROFILE_INCLUDE_COLS_STATE, None)
+                            st.session_state.pop(PROFILE_INCLUDE_TOKEN_STATE, None)
+                            st.session_state.pop(
+                                ui_keys.PROFILE_RESULTS_STATE, None
+                            )
+                            st.session_state.pop(
+                                ui_keys.PROFILE_SELECTION_COUNTS, None
+                            )
+                            profile_result = None
+                            stored_profile_result = None
+                            return
+
+                        if not isinstance(res, dict):
+                            res = {
+                                "ok": False,
+                                "summary": None,
+                                "column_rows": [],
+                                "err": "Unexpected profiling response.",
+                            }
+
+                        if not res.get("ok"):
+                            error_message = res.get("err") or (
+                                "Profiling failed — see debug panel for details."
+                            )
+                            st.session_state[LAST_PROFILE_SUMMARY_STATE] = None
+                            st.session_state[LAST_PROFILE_ROWS_STATE] = []
+                            st.session_state[LAST_PROFILE_ERROR_STATE] = (
+                                error_message
+                            )
+                            st.session_state["profiling_last_error"] = error_message
+                            st.session_state["profiling_last_error_trace"] = None
+                            st.session_state.pop(
+                                LAST_PROFILE_TARGET_STATE, None
+                            )
+                            st.session_state.pop(LAST_PROFILE_TOP_N_STATE, None)
+                            st.session_state.pop(PROFILE_INCLUDE_COLS_STATE, None)
+                            st.session_state.pop(PROFILE_INCLUDE_TOKEN_STATE, None)
+                            st.session_state.pop(
+                                ui_keys.PROFILE_RESULTS_STATE, None
+                            )
+                            st.session_state.pop(
+                                ui_keys.PROFILE_SELECTION_COUNTS, None
+                            )
+                            profile_result = None
+                            stored_profile_result = None
+                            return
+
+                        summary_raw = (
+                            res.get("summary") if isinstance(res, dict) else {}
+                        ) or {}
+                        column_rows = (
+                            res.get("column_rows") if isinstance(res, dict) else []
+                        ) or []
+
+                        duration = time.time() - start
+                        rows_profiled = int(
+                            (summary_raw or {}).get("rows_profiled") or 0
                         )
-                    profile_result = {
-                        "target_table": str(target_fqn),
-                        "summary": {
-                            "rows_profiled": rows_profiled,
-                            "sample_pct": summary_raw.get("sample_pct"),
-                            "duration_sec": duration,
-                            "columns": len(profiles),
-                        },
-                        "columns": columns_payload,
-                        "top_n": int(top_n),
-                    }
-                    _sync_last_profile_session(
-                        profile_result,
-                        str(target_fqn),
-                        int(top_n),
-                    )
-                    st.session_state[ui_keys.PROFILE_RESULTS_STATE] = profile_result
-                    stored_profile_result = profile_result
 
-            try:
-                if not current_editor_fqn:
-                    st.warning("Select a table first.")
-                else:
-                    _execute_profile_run()
-            finally:
-                st.session_state["busy_profiling"] = False
-                st.session_state["freeze_view"] = False
-                busy_profiling = False
+                        columns_payload: List[Dict[str, Any]] = []
+                        profiles: List[ColumnProfile] = []
+                        for column in column_rows:
+                            normalized_column = normalize_profile_row(column)
+                            columns_payload.append(normalized_column)
+                            profiles.append(
+                                _column_profile_from_payload(normalized_column)
+                            )
+
+                        summary_payload = dict(summary_raw)
+                        summary_payload.setdefault("rows_profiled", rows_profiled)
+                        summary_payload.setdefault(
+                            "sample_pct", summary_raw.get("sample_pct")
+                        )
+                        summary_payload["duration_sec"] = float(
+                            summary_payload.get("duration_sec") or duration
+                        )
+                        summary_payload["columns"] = len(profiles)
+
+                        st.session_state[LAST_PROFILE_SUMMARY_STATE] = summary_payload
+                        st.session_state[LAST_PROFILE_ROWS_STATE] = column_rows
+                        st.session_state[LAST_PROFILE_ERROR_STATE] = None
+                        st.session_state[LAST_PROFILE_TARGET_STATE] = str(
+                            target_fqn
+                        )
+                        st.session_state[LAST_PROFILE_TOP_N_STATE] = int(top_n)
+
+                        profile_result = {
+                            "target_table": str(target_fqn),
+                            "summary": summary_payload,
+                            "columns": columns_payload,
+                            "top_n": int(top_n),
+                        }
+
+                        st.session_state[ui_keys.PROFILE_RESULTS_STATE] = (
+                            profile_result
+                        )
+                        stored_profile_result = profile_result
+                finally:
+                    st.session_state["busy_profiling"] = False
+                    st.session_state["freeze_view"] = False
+                    busy_profiling = False
+
+            _handle_profile_run()
 
         busy_profiling = bool(st.session_state.get("busy_profiling", False))
         busy_saving = bool(st.session_state.get("busy_saving", False))
