@@ -31,7 +31,22 @@ Forbidden patterns:
 • Do not allow manual editing of the configuration name or target caption formatting.
 """
 
-import streamlit as st, logging
+import logging, streamlit as st
+
+st.session_state.setdefault("_rerun_count", 0)
+st.session_state["_rerun_count"] += 1
+_active_route = st.session_state.get("active_view")
+_active_fqn = st.session_state.get("editor_target_fqn")
+_RERUN_TELEMETRY_LINE = (
+    f"rerun #{st.session_state['_rerun_count']} route={_active_route} fqn={_active_fqn}"
+)
+logging.info(
+    "rerun #%s route=%s fqn=%s",
+    st.session_state["_rerun_count"],
+    _active_route,
+    _active_fqn,
+)
+
 import sys
 
 logging.basicConfig(
@@ -144,6 +159,9 @@ DEBUG_PROFILING_ENABLED = bool(DEBUG_PROFILING or _debug_override)
 # the query parameter override without requiring signature changes.
 profile_view.DEBUG_PROFILING_OVERRIDE = DEBUG_PROFILING_ENABLED  # type: ignore[attr-defined]
 profile_view.DEBUG_PROFILING = DEBUG_PROFILING_ENABLED
+
+if DEBUG_PROFILING_ENABLED:
+    st.caption(_RERUN_TELEMETRY_LINE)
 
 # ---------- Styling (simple Snowflake-ish) ----------
 st.markdown("""
