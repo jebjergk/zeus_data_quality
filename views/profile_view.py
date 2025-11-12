@@ -1213,12 +1213,12 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
                 nonlocal profile_result, stored_profile_result, loaded_run_id
                 nonlocal busy_profiling
 
-                fqn = st.session_state.get("editor_target_fqn") or ""
+                fqn = (st.session_state.get("editor_target_fqn") or "").strip()
                 if not fqn:
                     st.warning("Select a table first.")
                     return
 
-                if st.session_state.get("busy_profiling", False):
+                if st.session_state.get("busy_profiling"):
                     return
 
                 st.session_state["busy_profiling"] = True
@@ -1237,7 +1237,7 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
                         stored_profile_result = None
                         return
 
-                    target_fqn = selected_fqn or fqn
+                    target_fqn = (selected_fqn or fqn).strip()
                     if not target_fqn:
                         st.warning(ui_strings.PROFILE_RUN_WARNING_NO_TABLE)
                         st.session_state[LAST_PROFILE_ERROR_STATE] = None
@@ -1292,7 +1292,13 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
                                 "err": "Unexpected profiling response.",
                             }
 
-                        if not res.get("ok"):
+                        if res.get("ok"):
+                            summary_raw = (res.get("summary") or {})
+                            column_rows = list(res.get("column_rows") or [])
+                            st.session_state[LAST_PROFILE_SUMMARY_STATE] = summary_raw
+                            st.session_state[LAST_PROFILE_ROWS_STATE] = column_rows
+                            st.session_state[LAST_PROFILE_ERROR_STATE] = None
+                        else:
                             error_message = res.get("err") or (
                                 "Profiling failed — see debug panel for details."
                             )
@@ -1320,11 +1326,11 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
                             return
 
                         summary_raw = (
-                            res.get("summary") if isinstance(res, dict) else {}
-                        ) or {}
+                            st.session_state.get(LAST_PROFILE_SUMMARY_STATE) or {}
+                        )
                         column_rows = (
-                            res.get("column_rows") if isinstance(res, dict) else []
-                        ) or []
+                            st.session_state.get(LAST_PROFILE_ROWS_STATE) or []
+                        )
 
                         duration = time.time() - start
                         rows_profiled = int(
@@ -1351,8 +1357,6 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
                         summary_payload["columns"] = len(profiles)
 
                         st.session_state[LAST_PROFILE_SUMMARY_STATE] = summary_payload
-                        st.session_state[LAST_PROFILE_ROWS_STATE] = column_rows
-                        st.session_state[LAST_PROFILE_ERROR_STATE] = None
                         st.session_state[LAST_PROFILE_TARGET_STATE] = str(
                             target_fqn
                         )
