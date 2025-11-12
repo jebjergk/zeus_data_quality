@@ -754,8 +754,8 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
         )
 
         st.session_state.setdefault("busy_profiling", False)
-        st.session_state.setdefault("busy_saving", False)
         st.session_state.setdefault("freeze_view", False)
+        st.session_state.setdefault("busy_saving", False)
 
         _ensure_last_profile_state_defaults()
 
@@ -1195,7 +1195,7 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
         current_editor_fqn = st.session_state.get("editor_target_fqn") or ""
 
         run_clicked = bool(run_requested)
-        if run_clicked and not st.session_state["busy_profiling"]:
+        if run_clicked and not st.session_state.get("busy_profiling", False):
             st.session_state["busy_profiling"] = True
             st.session_state["freeze_view"] = True
             busy_profiling = True
