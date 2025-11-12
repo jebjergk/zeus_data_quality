@@ -34,15 +34,6 @@ Forbidden patterns:
 import logging
 import streamlit as st
 
-# Simple rerun telemetry (replaces old _RERUN_TELEMETRY_LINE)
-st.session_state.setdefault("_rerun_count", 0)
-st.session_state["_rerun_count"] += 1
-st.caption(
-    f"rerun #{st.session_state['_rerun_count']} "
-    f"view={st.session_state.get('active_view')} "
-    f"fqn={st.session_state.get('editor_target_fqn')}"
-)
-
 logging.info(
     "rerun #%s route=%s fqn=%s freeze=%s",
     st.session_state["_rerun_count"],
@@ -149,6 +140,15 @@ CHECKS_TBL = f"{METADATA_DB}.{METADATA_SCHEMA}.DQ_CHECK"
 # RUN_RESULTS_TBL already defined above
 
 st.set_page_config(page_title="Zeus Data Quality", layout="wide")
+
+# Simple rerun telemetry (replaces old _RERUN_TELEMETRY_LINE)
+st.session_state.setdefault("_rerun_count", 0)
+st.session_state["_rerun_count"] += 1
+st.caption(
+    f"rerun #{st.session_state['_rerun_count']} "
+    f"view={st.session_state.get('active_view')} "
+    f"fqn={st.session_state.get('editor_target_fqn')}"
+)
 
 try:
     _debug_param = st.query_params.get("debug")  # type: ignore[attr-defined]
