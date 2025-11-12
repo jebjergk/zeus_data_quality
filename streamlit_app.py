@@ -68,6 +68,9 @@ if "active_view" not in st.session_state:
     st.session_state["active_view"] = "home"  # or your desired start view
     logging.info("route:init %s", st.session_state["active_view"])
 
+if st.session_state.get("freeze_view"):
+    st.session_state["active_view"] = "profile"
+
 if "_last_query_page" not in st.session_state:
     st.session_state["_last_query_page"] = st.session_state["active_view"]
 
