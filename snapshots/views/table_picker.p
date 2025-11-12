@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import logging
 from typing import List, Optional, Tuple
 
 import streamlit as st
@@ -12,13 +11,19 @@ def _canon(value: Optional[str]) -> str:
     return (value or "").replace('"', "").strip().upper()
 
 
-def _set_fqn(db: Optional[str], schema: Optional[str], table: Optional[str]) -> str:
+def _canon_fqn(db: Optional[str], schema: Optional[str], table: Optional[str]) -> str:
+    d, s, t = _canon(db), _canon(schema), _canon(table)
+    return f"{d}.{s}.{t}" if d and s and t else ""
+
+
+def _set_fqn_if_ready(
+    db: Optional[str], schema: Optional[str], table: Optional[str]
+) -> str:
     import logging
     import streamlit as st
 
-    d, s, t = _canon(db), _canon(schema), _canon(table)
-    fqn = f"{d}.{s}.{t}" if d and s and t else ""
-    if fqn:
+    fqn = _canon_fqn(db, schema, table)
+    if fqn and st.session_state.get("editor_target_fqn") != fqn:
         st.session_state["editor_target_fqn"] = fqn
         logging.info("picker:set_fqn %s", fqn)
     return fqn
@@ -27,7 +32,7 @@ def _set_fqn(db: Optional[str], schema: Optional[str], table: Optional[str]) -> 
 def _on_table_change():
     import streamlit as st
 
-    _set_fqn(
+    _set_fqn_if_ready(
         st.session_state.get("selected_db"),
         st.session_state.get("selected_schema"),
         st.session_state.get("selected_table"),
@@ -153,8 +158,17 @@ def stateless_table_picker(session_obj, preselect_fqn: Optional[str]):
         key="selected_table",
         on_change=_on_table_change,
     )
+    fqn = ""
+    if tables and tbl_sel != "— none —":
+        fqn = _set_fqn_if_ready(db_sel, sch_sel, tbl_sel)
+
+    _set_fqn_if_ready(
+        st.session_state.get("selected_db"),
+        st.session_state.get("selected_schema"),
+        st.session_state.get("selected_table"),
+    )
+
     if not tables or tbl_sel == "— none —":
         return db_sel, sch_sel, None, ""
 
-    fqn = _set_fqn(db_sel, sch_sel, tbl_sel)
     return db_sel, sch_sel, tbl_sel, fqn
