@@ -125,10 +125,14 @@ from services.state import get_state, set_state
 from utils.checkdefs import build_rule_for_column_check, build_rule_for_table_check
 from utils.configs import get_metadata_namespace, get_proc_name
 from utils.flags import DEBUG_PROFILING
+from utils.version import build_sha, build_time
 from views import profile_view
 from views.table_picker import stateless_table_picker, session_cache_token
 from views.docs_view import render_docs as render_docs_view
 from views.config_editor import render_row_count_preview
+
+if DEBUG_PROFILING:
+    st.caption(f"🧩 build={build_sha()} time={build_time()}")
 
 METADATA_DB, METADATA_SCHEMA = get_metadata_namespace()
 PROC_NAME = get_proc_name()
