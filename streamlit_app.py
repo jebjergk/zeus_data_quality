@@ -63,11 +63,6 @@ if "active_view" not in st.session_state:
     st.session_state["active_view"] = "home"  # or your desired start view
     logging.info("route:init %s", st.session_state["active_view"])
 
-st.session_state.setdefault("freeze_view", False)
-
-if st.session_state.get("freeze_view"):
-    st.session_state["active_view"] = "profile"
-
 if "_last_query_page" not in st.session_state:
     st.session_state["_last_query_page"] = st.session_state["active_view"]
 
@@ -140,6 +135,11 @@ CHECKS_TBL = f"{METADATA_DB}.{METADATA_SCHEMA}.DQ_CHECK"
 # RUN_RESULTS_TBL already defined above
 
 st.set_page_config(page_title="Zeus Data Quality", layout="wide")
+
+st.session_state.setdefault("freeze_view", False)
+
+if st.session_state.get("freeze_view"):
+    st.session_state["active_view"] = "profile"
 
 # Simple rerun telemetry (replaces old _RERUN_TELEMETRY_LINE)
 st.session_state.setdefault("_rerun_count", 0)
