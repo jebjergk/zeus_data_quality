@@ -34,6 +34,9 @@ Forbidden patterns:
 import logging
 import streamlit as st
 
+# Initialize counter safely before any access or logging
+st.session_state["_rerun_count"] = st.session_state.get("_rerun_count", 0) + 1
+
 logging.info(
     "rerun #%s route=%s fqn=%s freeze=%s",
     st.session_state["_rerun_count"],
@@ -123,9 +126,6 @@ from views.table_picker import stateless_table_picker, session_cache_token
 from views.docs_view import render_docs as render_docs_view
 from views.config_editor import render_row_count_preview
 
-if DEBUG_PROFILING:
-    st.caption(f"🧩 build={build_sha()} time={build_time()}")
-
 METADATA_DB, METADATA_SCHEMA = get_metadata_namespace()
 PROC_NAME = get_proc_name()
 RUN_RESULTS_TBL = f"{METADATA_DB}.{METADATA_SCHEMA}.DQ_RUN_RESULTS"
@@ -136,19 +136,19 @@ CHECKS_TBL = f"{METADATA_DB}.{METADATA_SCHEMA}.DQ_CHECK"
 
 st.set_page_config(page_title="Zeus Data Quality", layout="wide")
 
+st.caption(
+    f"rerun #{st.session_state.get('_rerun_count')} "
+    f"view={st.session_state.get('active_view')} "
+    f"fqn={st.session_state.get('editor_target_fqn')}"
+)
+
+if DEBUG_PROFILING:
+    st.caption(f"🧩 build={build_sha()} time={build_time()}")
+
 st.session_state.setdefault("freeze_view", False)
 
 if st.session_state.get("freeze_view"):
     st.session_state["active_view"] = "profile"
-
-# Simple rerun telemetry (replaces old _RERUN_TELEMETRY_LINE)
-st.session_state.setdefault("_rerun_count", 0)
-st.session_state["_rerun_count"] += 1
-st.caption(
-    f"rerun #{st.session_state['_rerun_count']} "
-    f"view={st.session_state.get('active_view')} "
-    f"fqn={st.session_state.get('editor_target_fqn')}"
-)
 
 try:
     _debug_param = st.query_params.get("debug")  # type: ignore[attr-defined]
