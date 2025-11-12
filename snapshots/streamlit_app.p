@@ -34,13 +34,24 @@ Forbidden patterns:
 import logging
 import streamlit as st
 
-# Initialize counter safely before any access or logging
+# safe inits
 st.session_state["_rerun_count"] = st.session_state.get("_rerun_count", 0) + 1
+st.session_state.setdefault("active_view", "home")
+st.session_state.setdefault("freeze_view", False)
+
+# EARLY FREEZE: pin both active_view and page if freeze is set
+if st.session_state.get("freeze_view"):
+    st.session_state["active_view"] = "profile"
+    st.session_state["page"] = "profile"
+
+st.session_state.setdefault("page", st.session_state["active_view"])
+
+current_view = st.session_state.get("active_view", "home")
 
 logging.info(
     "rerun #%s route=%s fqn=%s freeze=%s",
     st.session_state["_rerun_count"],
-    st.session_state.get("active_view"),
+    current_view,
     st.session_state.get("editor_target_fqn"),
     st.session_state.get("freeze_view"),
 )
@@ -62,15 +73,11 @@ from uuid import uuid4
 
 ALLOWED_PAGES = {"home", "cfg", "profile", "monitor", "docs"}
 
-if "active_view" not in st.session_state:
-    st.session_state["active_view"] = "home"  # or your desired start view
-    logging.info("route:init %s", st.session_state["active_view"])
+if st.session_state["_rerun_count"] == 1:
+    logging.info("route:init %s", current_view)
 
 if "_last_query_page" not in st.session_state:
-    st.session_state["_last_query_page"] = st.session_state["active_view"]
-
-if "page" not in st.session_state:
-    st.session_state["page"] = st.session_state["active_view"]
+    st.session_state["_last_query_page"] = current_view
 
 
 def set_view(view: str) -> None:
@@ -144,11 +151,6 @@ st.caption(
 
 if DEBUG_PROFILING:
     st.caption(f"🧩 build={build_sha()} time={build_time()}")
-
-st.session_state.setdefault("freeze_view", False)
-
-if st.session_state.get("freeze_view"):
-    st.session_state["active_view"] = "profile"
 
 try:
     _debug_param = st.query_params.get("debug")  # type: ignore[attr-defined]
