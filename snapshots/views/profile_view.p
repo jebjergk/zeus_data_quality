@@ -755,6 +755,7 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
 
         st.session_state.setdefault("busy_profiling", False)
         st.session_state.setdefault("busy_saving", False)
+        st.session_state.setdefault("freeze_view", False)
 
         _ensure_last_profile_state_defaults()
 
@@ -1193,13 +1194,10 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
 
         current_editor_fqn = st.session_state.get("editor_target_fqn") or ""
 
-        run_profile = bool(run_requested and not busy_profiling and not busy_saving)
-        if run_profile and not current_editor_fqn:
-            st.warning("Select a table first.")
-            run_profile = False
-
-        if run_profile:
+        run_clicked = bool(run_requested)
+        if run_clicked and not st.session_state["busy_profiling"]:
             st.session_state["busy_profiling"] = True
+            st.session_state["freeze_view"] = True
             busy_profiling = True
 
             def _execute_profile_run() -> None:
@@ -1304,9 +1302,13 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
                     stored_profile_result = profile_result
 
             try:
-                _execute_profile_run()
+                if not current_editor_fqn:
+                    st.warning("Select a table first.")
+                else:
+                    _execute_profile_run()
             finally:
                 st.session_state["busy_profiling"] = False
+                st.session_state["freeze_view"] = False
                 busy_profiling = False
 
         busy_profiling = bool(st.session_state.get("busy_profiling", False))
