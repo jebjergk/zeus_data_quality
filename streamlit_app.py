@@ -35,16 +35,12 @@ import logging, streamlit as st
 
 st.session_state.setdefault("_rerun_count", 0)
 st.session_state["_rerun_count"] += 1
-_active_route = st.session_state.get("active_view")
-_active_fqn = st.session_state.get("editor_target_fqn")
-_RERUN_TELEMETRY_LINE = (
-    f"rerun #{st.session_state['_rerun_count']} route={_active_route} fqn={_active_fqn}"
-)
 logging.info(
-    "rerun #%s route=%s fqn=%s",
+    "rerun #%s route=%s fqn=%s freeze=%s",
     st.session_state["_rerun_count"],
-    _active_route,
-    _active_fqn,
+    st.session_state.get("active_view"),
+    st.session_state.get("editor_target_fqn"),
+    st.session_state.get("freeze_view"),
 )
 
 import sys
