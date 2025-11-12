@@ -8,10 +8,30 @@ import streamlit as st
 from utils.meta import list_databases, list_schemas, list_tables
 
 
-def _canon_fqn(db, schema, table):
-    norm = lambda x: (x or "").replace('"', "").strip().upper()
-    d, s, t = norm(db), norm(schema), norm(table)
-    return f"{d}.{s}.{t}" if d and s and t else ""
+def _canon(value: Optional[str]) -> str:
+    return (value or "").replace('"', "").strip().upper()
+
+
+def _set_fqn(db: Optional[str], schema: Optional[str], table: Optional[str]) -> str:
+    import logging
+    import streamlit as st
+
+    d, s, t = _canon(db), _canon(schema), _canon(table)
+    fqn = f"{d}.{s}.{t}" if d and s and t else ""
+    if fqn:
+        st.session_state["editor_target_fqn"] = fqn
+        logging.info("picker:set_fqn %s", fqn)
+    return fqn
+
+
+def _on_table_change():
+    import streamlit as st
+
+    _set_fqn(
+        st.session_state.get("selected_db"),
+        st.session_state.get("selected_schema"),
+        st.session_state.get("selected_table"),
+    )
 
 
 def session_cache_token(session_obj) -> str:
@@ -96,7 +116,12 @@ def stateless_table_picker(session_obj, preselect_fqn: Optional[str]):
         if dbs
         else 0
     )
-    db_sel = st.selectbox("Database", dbs or ["— none —"], index=db_index if dbs else 0)
+    db_sel = st.selectbox(
+        "Database",
+        dbs or ["— none —"],
+        index=db_index if dbs else 0,
+        key="selected_db",
+    )
     if not dbs or db_sel == "— none —":
         return None, None, None, ""
 
@@ -106,7 +131,12 @@ def stateless_table_picker(session_obj, preselect_fqn: Optional[str]):
         if schemas
         else 0
     )
-    sch_sel = st.selectbox("Schema", schemas or ["— none —"], index=sch_index if schemas else 0)
+    sch_sel = st.selectbox(
+        "Schema",
+        schemas or ["— none —"],
+        index=sch_index if schemas else 0,
+        key="selected_schema",
+    )
     if not schemas or sch_sel == "— none —":
         return db_sel, None, None, ""
 
@@ -116,13 +146,15 @@ def stateless_table_picker(session_obj, preselect_fqn: Optional[str]):
         if tables
         else 0
     )
-    tbl_sel = st.selectbox("Table", tables or ["— none —"], index=tbl_index if tables else 0)
+    tbl_sel = st.selectbox(
+        "Table",
+        tables or ["— none —"],
+        index=tbl_index if tables else 0,
+        key="selected_table",
+        on_change=_on_table_change,
+    )
     if not tables or tbl_sel == "— none —":
         return db_sel, sch_sel, None, ""
 
-    fqn = _canon_fqn(db_sel, sch_sel, tbl_sel)
-    if fqn:
-        st.session_state["editor_target_fqn"] = fqn
-        logging.info("picker:set_fqn %s", fqn)
-
+    fqn = _set_fqn(db_sel, sch_sel, tbl_sel)
     return db_sel, sch_sel, tbl_sel, fqn
