@@ -760,6 +760,17 @@ def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: AR
 
         _ensure_last_profile_state_defaults()
 
+        logging.info(
+            "profile:store ok=%s rows=%s err=%s fqn=%s",
+            bool(
+                st.session_state.get("last_profile_summary")
+                and st.session_state.get("last_profile_rows")
+            ),
+            len(st.session_state.get("last_profile_rows") or []),
+            st.session_state.get("last_profile_err"),
+            st.session_state.get("editor_target_fqn"),
+        )
+
         st.header(ui_strings.PROFILE_HEADER_TITLE)
         st.caption(ui_strings.PROFILE_HEADER_CAPTION)
 
