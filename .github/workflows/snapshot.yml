@@ -1,9 +1,10 @@
 name: snapshot-on-merge
-
 on:
   push:
-    branches:
-      - V1.3-profiling
+    branches: [ V1.3-profiling ]
+
+permissions:
+  contents: write
 
 jobs:
   snapshot:
@@ -11,14 +12,27 @@ jobs:
     if: ${{ always() }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
       - name: Write build meta
         run: |
+          mkdir -p snapshots
           echo "$GITHUB_SHA" > snapshots/BUILD_SHA.txt
           date -u +"%Y-%m-%dT%H:%M:%SZ" > snapshots/BUILD_TIME_UTC.txt
-      - name: Commit snapshot
+
+      - name: Configure git user
         run: |
           git config user.name "snapshot-bot"
           git config user.email "snapshot-bot@users.noreply.github.com"
+
+      - name: Auth remote with GITHUB_TOKEN
+        run: |
+          git remote set-url origin https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git
+
+      - name: Commit & push snapshot
+        run: |
           git add snapshots/BUILD_SHA.txt snapshots/BUILD_TIME_UTC.txt
           git commit -m "snapshot: update build meta [skip ci]" || echo "No changes"
-          git push
+          git push origin HEAD:${{ github.ref_name }}
