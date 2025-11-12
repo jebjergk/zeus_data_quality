@@ -16,9 +16,7 @@ def _canon_fqn(db: Optional[str], schema: Optional[str], table: Optional[str]) -
     return f"{d}.{s}.{t}" if d and s and t else ""
 
 
-def _set_fqn_if_ready(
-    db: Optional[str], schema: Optional[str], table: Optional[str]
-) -> str:
+def _set_fqn_if_ready(db: Optional[str], schema: Optional[str], table: Optional[str]) -> None:
     import logging
     import streamlit as st
 
@@ -26,7 +24,6 @@ def _set_fqn_if_ready(
     if fqn and st.session_state.get("editor_target_fqn") != fqn:
         st.session_state["editor_target_fqn"] = fqn
         logging.info("picker:set_fqn %s", fqn)
-    return fqn
 
 
 def _on_table_change():
@@ -160,7 +157,8 @@ def stateless_table_picker(session_obj, preselect_fqn: Optional[str]):
     )
     fqn = ""
     if tables and tbl_sel != "— none —":
-        fqn = _set_fqn_if_ready(db_sel, sch_sel, tbl_sel)
+        fqn = _canon_fqn(db_sel, sch_sel, tbl_sel)
+        _set_fqn_if_ready(db_sel, sch_sel, tbl_sel)
 
     _set_fqn_if_ready(
         st.session_state.get("selected_db"),
