@@ -44,6 +44,12 @@ PROFILE_V2_RUNS_SUBHEADER = "Recent profiling runs"
 PROFILE_V2_RUNS_EMPTY = "No profiling runs have been logged yet."
 PROFILE_V2_VALUE_UNKNOWN = "—"
 PROFILE_V2_DEBUG_EXPANDER = "Debug · Profiling payload"
+PROFILE_V2_DEBUG_STATUS_HEADER = "Profiling status"
+PROFILE_V2_DEBUG_LAST_TABLE = "Last profiled table"
+PROFILE_V2_DEBUG_LAST_RUN_ID = "Last profile run ID"
+PROFILE_V2_DEBUG_FEATURE_ROWS = "Column feature rows"
+PROFILE_V2_DEBUG_CLASS_ROWS = "Classification rows"
+PROFILE_V2_DEBUG_SUGGESTION_ROWS = "Suggestion rows"
 
 # Config preview strings
 CONFIG_PREVIEW_CONTRACT_VIOLATION_FRAME = (
