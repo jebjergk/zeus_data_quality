@@ -36,16 +36,26 @@ def run_guard_checks() -> None:
     _check_tokens(
         PROFILE_VIEW_PATH,
         [
-            "Temporary Profiling v2 placeholder view.",
-            "render_profile",
-            "PROFILE_V2_PLACEHOLDER_MESSAGE",
+            "PROFILE_V2_HEADER_TITLE",
+            "PROFILE_V2_HEADER_CAPTION",
+            "PROFILE_V2_METADATA_NOTE",
+            "PROFILE_V2_RUN_BUTTON",
+            "PROFILE_V2_REFRESH_BUTTON",
+            "PROFILE_V2_TAB_FEATURES",
+            "PROFILE_V2_TAB_CLASSIFICATION",
+            "PROFILE_V2_TAB_SUGGESTIONS",
+            "PROFILE_V2_TAB_RUNS",
+            "PROFILE_V2_DEBUG_EXPANDER",
         ],
         "Profile view",
     )
 
     _check_tokens(
         CONFIG_VIEW_PATH,
-        ["render_row_count_preview", "UI contract violation"],
+        [
+            "render_row_count_preview",
+            "CONFIG_PREVIEW_CONTRACT_VIOLATION_FRAME",
+        ],
         "Config editor view",
     )
 
