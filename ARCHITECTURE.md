@@ -18,7 +18,7 @@ Snowflake integration points.
 - **`services/`** houses business logic and Snowflake orchestration helpers. The
   modules are UI-agnostic and return plain data objects.
   - `configs.py` persists configurations and related checks.
-  - `profiling.py` and `profile.py` request column stats and table insights.
+  - `profiling_v2.py` calls `DQ_PROFILE_FULL` and retrieves profiling metadata.
   - `runner.py` launches data-quality tasks and polls results.
   - `state.py` stores Streamlit session state snapshots in Snowflake.
   - `semantics.py` maps domain concepts (checks, schedules) to Snowflake assets.

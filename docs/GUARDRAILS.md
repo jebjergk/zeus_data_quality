@@ -10,19 +10,18 @@ They exist to prevent regressions and UI instability.
 | Area | Rule |
 |---|---|
 | Sidebar Layout | Do **not** add or remove sidebar pages without explicit request. |
-| Profile Result Grid | The **Include** checkbox must remain **inside the main profile grid**, not in a separate grid. |
-| Top Values Section | Must always display NULL, empty string "", and whitespace cases distinctly. |
-| Confidence Display | Must remain color-coded: Green ≥ 90%, Yellow ≥ 75%, Gray below. |
-| Column Order | Do not reorder profile result columns unless requested. |
+| Profiling view | Keep the header + caption + metadata note, stateless picker, run + refresh buttons, summary metrics, and the four tabs (column features, semantic tags, suggested checks, run history). |
+| Profiling data | All values displayed must come from `ZEUS_ANALYTICS_SIMU.DISCOVERY` metadata tables—no direct scans in the UI. |
+| Debug state | Debug expanders stay behind the `DEBUG_PROFILING` flag only. |
 
 ---
 
 ## Profiling Guardrails
 
-1. **Never trim values** during profiling → empty vs whitespace vs null must remain distinguishable.
-2. **Min/Max for TEXT must show actual values**, truncated at 50 chars, not lengths.
-3. **Avg Length must work for both TEXT & NUMBER fields** (convert number to string for length calculation).
-4. **Date detection must be evidence-based** (pattern & parse success), never name-based.
+1. **Always call** `CALL ZEUS_ANALYTICS_SIMU.DISCOVERY.DQ_PROFILE_FULL('<FQN>')` instead of bespoke SQL.
+2. **Read-only metadata** — load results from `DQ_TABLE_PROFILE_SUMMARY`, `DQ_COLUMN_FEATURES`, `DQ_COLUMN_CLASSIFICATION`, and `DQ_SUGGESTED_CHECKS`.
+3. **Do not mutate metadata** from Streamlit; profiling procedures own inserts/updates.
+4. **Respect value fidelity** when rendering ratios and min/max values (no trimming, no silent rounding beyond formatting for display).
 
 ---
 

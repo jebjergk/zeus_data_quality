@@ -35,7 +35,7 @@ Copy code
 ## Multi-Agent Workflow (Safe Parallel Work)
 
 Agent 1 → UI changes only (views/*.py)
-Agent 2 → Profiling engine only (services/profiling.py)
+Agent 2 → Profiling engine only (services/profiling_v2.py)
 Agent 3 → DQ editor only (views/config_editor.py + services/configs.py)
 
 yaml

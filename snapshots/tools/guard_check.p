@@ -1,6 +1,4 @@
-"""UI contract guard checks for critical views."""
-
-from __future__ import annotations
+"""Lightweight guard checks for UI contracts."""
 
 import sys
 from pathlib import Path
@@ -35,57 +33,13 @@ def _check_tokens(path: Path, tokens: Iterable[str], description: str) -> None:
 
 
 def run_guard_checks() -> None:
-    errors: List[str] = []
-
-    try:
-        from ui import keys as ui_keys
-        from ui import strings as ui_strings
-    except Exception as exc:  # pragma: no cover - import errors should fail CI
-        raise GuardError(f"Unable to import UI constants: {exc}") from exc
-
-    expected_grid_columns = [
-        "Select",
-        "Column",
-        "Physical Type",
-        "Nulls",
-        "Distinct",
-        "Avg Length",
-        "Min Value",
-        "Max Value",
-        "Whitespace %",
-        "Guessed Type",
-        "Confidence",
-        "Note",
-    ]
-    if list(ui_strings.PROFILE_GRID_COLUMNS) != expected_grid_columns:
-        errors.append(
-            "PROFILE_GRID_COLUMNS must remain: "
-            + " | ".join(expected_grid_columns)
-        )
-
-    if ui_strings.PROFILE_SUGGEST_BUTTON_LABEL != "✨ Suggest DQ Config":
-        errors.append(
-            "PROFILE_SUGGEST_BUTTON_LABEL must stay '✨ Suggest DQ Config'."
-        )
-
-    if ui_keys.PROFILE_SELECTION_EDITOR != "profile_results_selection":
-        errors.append(
-            "PROFILE_SELECTION_EDITOR key must remain 'profile_results_selection'."
-        )
-
-    if errors:
-        error_text = "\n".join(errors)
-        raise GuardError(
-            f"UI contract constants changed unexpectedly:\n{error_text}\nSee {CONTRACT_DOCS_URL}."
-        )
-
     _check_tokens(
         PROFILE_VIEW_PATH,
         [
-            "UI CONTRACT – DO NOT CHANGE WITHOUT EXPLICIT INSTRUCTION",
-            "st.data_editor",
-            "st.dataframe",
-            ui_keys.PROFILE_SELECTION_EDITOR,
+            "Profiling v2 view backed by",
+            "stateless_table_picker",
+            "st.tabs",
+            "PROFILE_V2_TAB_FEATURES",
         ],
         "Profile view",
     )

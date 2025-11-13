@@ -18,6 +18,4 @@ def flag(name: str, default: bool = False) -> bool:
 UI_CONTRACT_STRICT = flag("UI_CONTRACT_STRICT", False)
 DEMO_LOCK = flag("DEMO_LOCK", False)
 DEBUG_PROFILING: bool = False
-"""When True, Profile view shows a developer debug expander with diagnostics. Default False to avoid UI changes."""
-PROFILE_INLINE_SELECT = flag("PROFILE_INLINE_SELECT", True)
-PROFILE_TOP_VALUES_NULLS = flag("PROFILE_TOP_VALUES_NULLS", True)
+"""When True, Profiling v2 view shows a developer debug expander with diagnostics."""
