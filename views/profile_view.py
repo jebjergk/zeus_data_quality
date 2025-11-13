@@ -170,6 +170,53 @@ def _resolve_helpers(profiling_helpers: Optional[Any]):
     return profiling_helpers or profiling_service
 
 
+def _extract_last_run_id(run_history: pd.DataFrame) -> Optional[str]:
+    if not isinstance(run_history, pd.DataFrame) or run_history.empty:
+        return None
+    if "RUN_ID" not in run_history.columns:
+        return None
+    ordered = run_history
+    if "PROFILED_AT" in ordered.columns:
+        ordered = ordered.sort_values(by="PROFILED_AT", ascending=False)
+    latest = ordered.iloc[0]
+    run_id = latest.get("RUN_ID")
+    return str(run_id) if run_id is not None else None
+
+
+def _render_debug_section(data: _ProfilingData, target_fqn: str) -> None:
+    if not DEBUG_PROFILING:
+        return
+
+    last_table = st.session_state.get("profile_last_table") or target_fqn
+    if not last_table:
+        last_table = ui_strings.PROFILE_V2_VALUE_UNKNOWN
+    last_run_id = (
+        st.session_state.get("profile_last_run_id")
+        or _extract_last_run_id(data.recent_runs)
+        or ui_strings.PROFILE_V2_VALUE_UNKNOWN
+    )
+    feature_rows = int(len(data.column_features.index)) if isinstance(data.column_features, pd.DataFrame) else 0
+    class_rows = int(len(data.column_classification.index)) if isinstance(data.column_classification, pd.DataFrame) else 0
+    suggestion_rows = int(len(data.suggested_checks.index)) if isinstance(data.suggested_checks, pd.DataFrame) else 0
+    debug_payload = {
+        "summary": data.summary,
+        "column_features": data.column_features.to_dict("records"),
+        "column_classification": data.column_classification.to_dict("records"),
+        "suggested_checks": data.suggested_checks.to_dict("records"),
+        "recent_runs": data.recent_runs.to_dict("records"),
+    }
+    with st.expander(ui_strings.PROFILE_V2_DEBUG_EXPANDER, expanded=False):
+        st.markdown(f"**{ui_strings.PROFILE_V2_DEBUG_STATUS_HEADER}**")
+        status_cols = st.columns(2)
+        status_cols[0].metric(ui_strings.PROFILE_V2_DEBUG_LAST_TABLE, last_table)
+        status_cols[1].metric(ui_strings.PROFILE_V2_DEBUG_LAST_RUN_ID, last_run_id)
+        row_cols = st.columns(3)
+        row_cols[0].metric(ui_strings.PROFILE_V2_DEBUG_FEATURE_ROWS, feature_rows)
+        row_cols[1].metric(ui_strings.PROFILE_V2_DEBUG_CLASS_ROWS, class_rows)
+        row_cols[2].metric(ui_strings.PROFILE_V2_DEBUG_SUGGESTION_ROWS, suggestion_rows)
+        st.json(debug_payload)
+
+
 def _load_metadata(
     helpers: Any,
     session: Any,
@@ -345,6 +392,8 @@ def render_profile(
                 )
             else:
                 st.session_state["profile_data_nonce"] += 1
+                st.session_state["profile_last_table"] = target_fqn
+                st.session_state["profile_last_run_id"] = None
                 status_placeholder.success(
                     ui_strings.PROFILE_V2_RUN_SUCCESS.format(table=target_fqn)
                 )
@@ -367,6 +416,9 @@ def render_profile(
     with st.spinner(ui_strings.PROFILE_V2_LOAD_SPINNER):
         data = _load_metadata(helpers, session, target_fqn)
 
+    st.session_state["profile_last_table"] = target_fqn
+    st.session_state["profile_last_run_id"] = _extract_last_run_id(data.recent_runs)
+
     _render_summary(data.summary, data.column_features)
 
     tab_titles = [
@@ -386,13 +438,4 @@ def render_profile(
     with tabs[3]:
         _render_run_history_tab(data.recent_runs)
 
-    if DEBUG_PROFILING:
-        debug_payload = {
-            "summary": data.summary,
-            "column_features": data.column_features.to_dict("records"),
-            "column_classification": data.column_classification.to_dict("records"),
-            "suggested_checks": data.suggested_checks.to_dict("records"),
-            "recent_runs": data.recent_runs.to_dict("records"),
-        }
-        with st.expander(ui_strings.PROFILE_V2_DEBUG_EXPANDER, expanded=False):
-            st.json(debug_payload)
+    _render_debug_section(data, target_fqn)

@@ -46,6 +46,13 @@ def _execute_sql(session: Any, sql: str, params: Optional[Iterable[Any]] = None)
     return stmt
 
 
+def _friendly_error_message(exc: Exception) -> str:
+    message = str(exc).strip()
+    if not message:
+        return exc.__class__.__name__
+    return message
+
+
 def run_profiling_v2(session: Any, table_fqn: str) -> None:
     """Execute the Profiling v2 stored procedure for *table_fqn*."""
 
@@ -57,10 +64,9 @@ def run_profiling_v2(session: Any, table_fqn: str) -> None:
     try:
         _execute_sql(session, f"CALL {PROFILE_PROC}(?)", params=[normalized]).collect()
     except Exception as exc:  # pragma: no cover - Snowflake specific failures
+        message = _friendly_error_message(exc)
         LOGGER.exception("profiling_v2:proc_failed target=%s", normalized)
-        raise ProfilingError(
-            f"Profiling failed for {normalized}. Check Snowflake logs for details."
-        ) from exc
+        raise ProfilingError(f"Profiling run failed: {message}") from exc
 
 
 # Backwards compatibility for earlier callers/tests.
@@ -86,7 +92,11 @@ def get_table_profile_summary(session: Any, table_fqn: str) -> pd.DataFrame:
         return pd.DataFrame()
 
     sql = f"SELECT * FROM {TABLE_SUMMARY_VIEW} WHERE TABLE_FQN = ?"
-    return _fetch_dataframe(session, sql, params=[normalized])
+    try:
+        return _fetch_dataframe(session, sql, params=[normalized])
+    except Exception as exc:  # pragma: no cover - Snowflake specific failures
+        LOGGER.exception("profiling_v2:summary_fetch_failed target=%s", normalized)
+        return pd.DataFrame()
 
 
 def fetch_table_summary(session: Any, table_fqn: str) -> Dict[str, Any]:
@@ -116,7 +126,11 @@ def get_column_features(session: Any, table_fqn: str) -> pd.DataFrame:
         WHERE TABLE_FQN = ?
         ORDER BY COLUMN_NAME
     """
-    return _fetch_dataframe(session, sql, params=[normalized])
+    try:
+        return _fetch_dataframe(session, sql, params=[normalized])
+    except Exception as exc:  # pragma: no cover - Snowflake specific failures
+        LOGGER.exception("profiling_v2:column_features_failed target=%s", normalized)
+        return pd.DataFrame()
 
 
 def fetch_column_features(session: Any, table_fqn: str) -> pd.DataFrame:
@@ -138,7 +152,13 @@ def get_column_classification(session: Any, table_fqn: str) -> pd.DataFrame:
         WHERE TABLE_FQN = ?
         ORDER BY COLUMN_NAME, SOURCE DESC, CLASSIFIED_AT DESC
     """
-    return _fetch_dataframe(session, sql, params=[normalized])
+    try:
+        return _fetch_dataframe(session, sql, params=[normalized])
+    except Exception as exc:  # pragma: no cover - Snowflake specific failures
+        LOGGER.exception(
+            "profiling_v2:column_classification_failed target=%s", normalized
+        )
+        return pd.DataFrame()
 
 
 def fetch_column_classifications(session: Any, table_fqn: str) -> pd.DataFrame:
@@ -160,7 +180,11 @@ def get_suggested_checks(session: Any, table_fqn: str) -> pd.DataFrame:
         WHERE TABLE_FQN = ?
         ORDER BY COLUMN_NAME, RULE_ID
     """
-    return _fetch_dataframe(session, sql, params=[normalized])
+    try:
+        return _fetch_dataframe(session, sql, params=[normalized])
+    except Exception as exc:  # pragma: no cover - Snowflake specific failures
+        LOGGER.exception("profiling_v2:suggested_checks_failed target=%s", normalized)
+        return pd.DataFrame()
 
 
 def fetch_suggested_checks(session: Any, table_fqn: str) -> pd.DataFrame:
