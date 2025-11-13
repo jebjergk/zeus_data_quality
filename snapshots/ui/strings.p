@@ -11,6 +11,7 @@ PROFILE_V2_METADATA_NOTE = "Profiling metadata source: {namespace}."
 PROFILE_V2_SESSION_WARNING = (
     "Connect to Snowflake to select a table and run profiling."
 )
+PROFILE_V2_PLACEHOLDER_MESSAGE = "Profiling v2 is under construction. Check back soon."
 PROFILE_V2_PICKER_SUBHEADER = "Select a table"
 PROFILE_V2_TARGET_CAPTION = "Profiling target: {table}"
 PROFILE_V2_NO_TARGET = (

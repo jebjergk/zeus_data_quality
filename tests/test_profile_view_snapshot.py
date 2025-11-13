@@ -16,12 +16,11 @@ def _unique(values: List[str]) -> List[str]:
     return result
 
 
-class _ProfileContractCollector(ast.NodeVisitor):
+class _ProfilePlaceholderCollector(ast.NodeVisitor):
     def __init__(self) -> None:
         self.headers: List[str] = []
         self.captions: List[str] = []
-        self.buttons: List[str] = []
-        self.grid_columns: List[str] | None = None
+        self.infos: List[str] = []
 
     def _strings_from_node(self, node: ast.AST | None) -> List[str]:
         if node is None:
@@ -46,23 +45,12 @@ class _ProfileContractCollector(ast.NodeVisitor):
                     self.headers.append(label)
                 elif func.attr == "caption":
                     self.captions.append(label)
-                elif func.attr == "button":
-                    self.buttons.append(label)
-        self.generic_visit(node)
-
-    def visit_Assign(self, node: ast.Assign) -> Any:  # type: ignore[override]
-        for target in node.targets:
-            if isinstance(target, ast.Name) and target.id == "grid_columns":
-                try:
-                    value = ast.literal_eval(node.value)
-                except Exception:
-                    value = None
-                if isinstance(value, list) and all(isinstance(item, str) for item in value):
-                    self.grid_columns = value
+                elif func.attr == "info":
+                    self.infos.append(label)
         self.generic_visit(node)
 
 
-def _collect_profile_contract() -> Dict[str, Any]:
+def _collect_profile_placeholder() -> Dict[str, Any]:
     module_path = Path(__file__).resolve().parents[1] / "views" / "profile_view.py"
     source = module_path.read_text(encoding="utf-8")
     tree = ast.parse(source)
@@ -75,19 +63,16 @@ def _collect_profile_contract() -> Dict[str, Any]:
     if render_node is None:
         raise AssertionError("render_profile not found in views.profile_view")
 
-    collector = _ProfileContractCollector()
+    collector = _ProfilePlaceholderCollector()
     collector.visit(render_node)
 
-    buttons = _unique(collector.buttons)
     return {
         "headers": _unique(collector.headers),
         "captions": _unique(collector.captions),
-        "buttons": buttons,
-        "grid_columns": collector.grid_columns,
-        "include_column_alias": "Select" if collector.grid_columns and "Select" in collector.grid_columns else None,
+        "infos": _unique(collector.infos),
     }
 
 
-def test_profile_view_contract(snapshot) -> None:
-    contract = _collect_profile_contract()
-    snapshot.assert_match(contract, "profile_view_contract")
+def test_profile_view_placeholder(snapshot) -> None:
+    placeholder_contract = _collect_profile_placeholder()
+    snapshot.assert_match(placeholder_contract, "profile_view_placeholder")
