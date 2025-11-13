@@ -36,10 +36,9 @@ def run_guard_checks() -> None:
     _check_tokens(
         PROFILE_VIEW_PATH,
         [
-            "Profiling v2 view backed by",
-            "stateless_table_picker",
-            "st.tabs",
-            "PROFILE_V2_TAB_FEATURES",
+            "Temporary Profiling v2 placeholder view.",
+            "render_profile",
+            "PROFILE_V2_PLACEHOLDER_MESSAGE",
         ],
         "Profile view",
     )

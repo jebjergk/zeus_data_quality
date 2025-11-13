@@ -37,23 +37,15 @@ import streamlit as st
 # safe inits
 st.session_state["_rerun_count"] = st.session_state.get("_rerun_count", 0) + 1
 st.session_state.setdefault("active_view", "home")
-st.session_state.setdefault("freeze_view", False)
-
-# EARLY FREEZE: pin both active_view and page if freeze is set
-if st.session_state.get("freeze_view"):
-    st.session_state["active_view"] = "profile"
-    st.session_state["page"] = "profile"
-
 st.session_state.setdefault("page", st.session_state["active_view"])
 
 current_view = st.session_state.get("active_view", "home")
 
 logging.info(
-    "rerun #%s route=%s fqn=%s freeze=%s",
+    "rerun #%s route=%s fqn=%s",
     st.session_state["_rerun_count"],
     current_view,
     st.session_state.get("editor_target_fqn"),
-    st.session_state.get("freeze_view"),
 )
 
 import sys
@@ -151,29 +143,6 @@ st.caption(
 
 if DEBUG_PROFILING:
     st.caption(f"🧩 build={build_sha()} time={build_time()}")
-
-try:
-    _debug_param = st.query_params.get("debug")  # type: ignore[attr-defined]
-except Exception:
-    _debug_param = None
-
-if isinstance(_debug_param, list):
-    _debug_candidate = next(
-        (item for item in _debug_param if isinstance(item, str)), None
-    )
-elif isinstance(_debug_param, str):
-    _debug_candidate = _debug_param
-else:
-    _debug_candidate = None
-
-_debug_value = (_debug_candidate or "").strip().lower()
-_debug_override = _debug_value in {"1", "true", "yes"}
-DEBUG_PROFILING_ENABLED = bool(DEBUG_PROFILING or _debug_override)
-
-# Propagate the effective debug flag to the profile view so diagnostics honour
-# the query parameter override without requiring signature changes.
-profile_view.DEBUG_PROFILING_OVERRIDE = DEBUG_PROFILING_ENABLED  # type: ignore[attr-defined]
-profile_view.DEBUG_PROFILING = DEBUG_PROFILING_ENABLED
 
 # ---------- Styling (simple Snowflake-ish) ----------
 st.markdown("""
@@ -1789,7 +1758,6 @@ if DEBUG_PROFILING:
     st.caption(
         "🛠 route="
         f"{view} "
-        f"busy_prof={st.session_state.get('busy_profiling')} "
         f"busy_save={st.session_state.get('busy_saving')}"
     )
 if view == "cfg":
@@ -1798,10 +1766,6 @@ if view == "cfg":
     else:
         render_config_editor()
 elif view == "profile":
-    if DEBUG_PROFILING_ENABLED:
-        st.caption("🛠️ Debug: entering Profile view")
-        target_fqn = st.session_state.get("editor_target_fqn") or "—"
-        st.caption(f"🧭 Target FQN: {target_fqn}")
     profile_view.render_profile(session, METADATA_DB, METADATA_SCHEMA)
 elif view == "monitor":
     render_monitor()
