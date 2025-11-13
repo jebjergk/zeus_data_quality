@@ -46,8 +46,8 @@ def _execute_sql(session: Any, sql: str, params: Optional[Iterable[Any]] = None)
     return stmt
 
 
-def run_full_profile(session: Any, table_fqn: str) -> None:
-    """Invoke the DQ profiling stored procedure for the provided table."""
+def run_profiling_v2(session: Any, table_fqn: str) -> None:
+    """Execute the Profiling v2 stored procedure for *table_fqn*."""
 
     normalized = _normalize_table_fqn(table_fqn)
     if not normalized:
@@ -58,7 +58,17 @@ def run_full_profile(session: Any, table_fqn: str) -> None:
         _execute_sql(session, f"CALL {PROFILE_PROC}(?)", params=[normalized]).collect()
     except Exception as exc:  # pragma: no cover - Snowflake specific failures
         LOGGER.exception("profiling_v2:proc_failed target=%s", normalized)
-        raise ProfilingError(str(exc)) from exc
+        raise ProfilingError(
+            f"Profiling failed for {normalized}. Check Snowflake logs for details."
+        ) from exc
+
+
+# Backwards compatibility for earlier callers/tests.
+run_full_profile = run_profiling_v2
+
+
+def _fetch_dataframe(session: Any, sql: str, params: Optional[Iterable[Any]] = None) -> pd.DataFrame:
+    return _execute_sql(session, sql, params=params).to_pandas()
 
 
 def _sort_summary_frame(df: pd.DataFrame) -> pd.DataFrame:
@@ -68,6 +78,17 @@ def _sort_summary_frame(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def get_table_profile_summary(session: Any, table_fqn: str) -> pd.DataFrame:
+    """Return all profiling summary rows for the table."""
+
+    normalized = _normalize_table_fqn(table_fqn)
+    if not normalized:
+        return pd.DataFrame()
+
+    sql = f"SELECT * FROM {TABLE_SUMMARY_VIEW} WHERE TABLE_FQN = ?"
+    return _fetch_dataframe(session, sql, params=[normalized])
+
+
 def fetch_table_summary(session: Any, table_fqn: str) -> Dict[str, Any]:
     """Return the most recent table-level profiling summary."""
 
@@ -75,82 +96,77 @@ def fetch_table_summary(session: Any, table_fqn: str) -> Dict[str, Any]:
     if not normalized:
         return {}
 
-    sql = f"SELECT * FROM {TABLE_SUMMARY_VIEW} WHERE TABLE_FQN = ?"
-    df = _execute_sql(session, sql, params=[normalized]).to_pandas()
+    df = get_table_profile_summary(session, normalized)
     if df.empty:
         return {}
     latest = _sort_summary_frame(df).iloc[0]
     return latest.to_dict()
 
 
-def fetch_column_features(session: Any, table_fqn: str) -> pd.DataFrame:
-    """Return per-column statistics from DQ_COLUMN_FEATURES."""
+def get_column_features(session: Any, table_fqn: str) -> pd.DataFrame:
+    """Return profiling features for each column on *table_fqn*."""
 
     normalized = _normalize_table_fqn(table_fqn)
     if not normalized:
         return pd.DataFrame()
 
     sql = f"""
-        SELECT
-            COLUMN_NAME,
-            PHYSICAL_TYPE,
-            NULL_RATIO,
-            DISTINCT_RATIO,
-            MIN_VALUE,
-            MAX_VALUE,
-            AVG_LENGTH,
-            WHITESPACE_RATIO,
-            SAMPLE_PATTERNS,
-            PROFILED_AT
+        SELECT *
         FROM {COLUMN_FEATURES_TABLE}
         WHERE TABLE_FQN = ?
-        ORDER BY COALESCE(ORDINAL_POSITION, 0), COLUMN_NAME
+        ORDER BY COLUMN_NAME
     """
-    return _execute_sql(session, sql, params=[normalized]).to_pandas()
+    return _fetch_dataframe(session, sql, params=[normalized])
+
+
+def fetch_column_features(session: Any, table_fqn: str) -> pd.DataFrame:
+    """Backwards-compatible wrapper for :func:`get_column_features`."""
+
+    return get_column_features(session, table_fqn)
+
+
+def get_column_classification(session: Any, table_fqn: str) -> pd.DataFrame:
+    """Return semantic classification rows ordered for UI rendering."""
+
+    normalized = _normalize_table_fqn(table_fqn)
+    if not normalized:
+        return pd.DataFrame()
+
+    sql = f"""
+        SELECT *
+        FROM {COLUMN_CLASSIFICATION_TABLE}
+        WHERE TABLE_FQN = ?
+        ORDER BY COLUMN_NAME, SOURCE DESC, CLASSIFIED_AT DESC
+    """
+    return _fetch_dataframe(session, sql, params=[normalized])
 
 
 def fetch_column_classifications(session: Any, table_fqn: str) -> pd.DataFrame:
-    """Return semantic tags per column from DQ_COLUMN_CLASSIFICATION."""
+    """Backwards-compatible wrapper for :func:`get_column_classification`."""
+
+    return get_column_classification(session, table_fqn)
+
+
+def get_suggested_checks(session: Any, table_fqn: str) -> pd.DataFrame:
+    """Return suggested DQ checks for each column."""
 
     normalized = _normalize_table_fqn(table_fqn)
     if not normalized:
         return pd.DataFrame()
 
     sql = f"""
-        SELECT
-            COLUMN_NAME,
-            CONTENT_TYPE,
-            SEMANTIC_ROLE,
-            SOURCE,
-            CONFIDENCE,
-            UPDATED_AT
-        FROM {COLUMN_CLASSIFICATION_TABLE}
+        SELECT *
+        FROM {SUGGESTED_CHECKS_TABLE}
         WHERE TABLE_FQN = ?
-        ORDER BY CONFIDENCE DESC NULLS LAST, COLUMN_NAME
+        ORDER BY COLUMN_NAME, RULE_ID
     """
-    return _execute_sql(session, sql, params=[normalized]).to_pandas()
+    return _fetch_dataframe(session, sql, params=[normalized])
 
 
 def fetch_suggested_checks(session: Any, table_fqn: str) -> pd.DataFrame:
-    """Return suggested DQ checks surfaced by the profiling engine."""
+    """Backwards-compatible wrapper for :func:`get_suggested_checks`."""
 
-    normalized = _normalize_table_fqn(table_fqn)
-    if not normalized:
-        return pd.DataFrame()
-
-    sql = f"""
-        SELECT
-            COLUMN_NAME,
-            CHECK_TYPE,
-            PARAMETERS,
-            RATIONALE,
-            PRIORITY,
-            CREATED_AT
-        FROM {SUGGESTED_CHECKS_TABLE}
-        WHERE TABLE_FQN = ?
-        ORDER BY PRIORITY, COLUMN_NAME
-    """
-    return _execute_sql(session, sql, params=[normalized]).to_pandas()
+    return get_suggested_checks(session, table_fqn)
 
 
 def fetch_recent_runs(session: Any, table_fqn: str, limit: int = 10) -> pd.DataFrame:

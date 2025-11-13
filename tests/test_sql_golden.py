@@ -29,9 +29,9 @@ class RecordingSession:
         return DummyStatement(frame)
 
 
-def test_run_full_profile_invokes_procedure():
+def test_run_profiling_v2_invokes_procedure():
     session = RecordingSession([None])
-    profiling_v2.run_full_profile(session, 'db.schema.table')
+    profiling_v2.run_profiling_v2(session, 'db.schema.table')
 
     assert session.calls, "Stored procedure call was not recorded"
     sql, params = session.calls[0]
@@ -40,12 +40,12 @@ def test_run_full_profile_invokes_procedure():
     assert session.responses == []  # responses consumed
 
 
-def test_run_full_profile_requires_table():
+def test_run_profiling_v2_requires_table():
     with pytest.raises(profiling_v2.ProfilingError):
-        profiling_v2.run_full_profile(RecordingSession([]), '')
+        profiling_v2.run_profiling_v2(RecordingSession([]), '')
 
 
-def test_fetch_table_summary_returns_latest_row():
+def test_get_table_profile_summary_returns_frame():
     frame = pd.DataFrame(
         [
             {"TABLE_FQN": "DB.SCHEMA.TABLE", "PROFILED_AT": "2024-05-01", "ROW_COUNT": 100},
@@ -54,12 +54,12 @@ def test_fetch_table_summary_returns_latest_row():
     )
     session = RecordingSession([frame])
 
-    summary = profiling_v2.fetch_table_summary(session, 'db.schema.table')
+    summary_frame = profiling_v2.get_table_profile_summary(session, 'db.schema.table')
 
-    assert summary["ROW_COUNT"] == 250
-    assert summary["PROFILED_AT"] == "2024-05-03"
+    assert list(summary_frame["ROW_COUNT"]) == [100, 250]
+    assert summary_frame.shape == (2, 3)
 
 
-def test_fetch_column_features_formats_when_no_table():
-    df = profiling_v2.fetch_column_features(RecordingSession([]), '')
+def test_get_column_features_returns_empty_when_no_table():
+    df = profiling_v2.get_column_features(RecordingSession([]), '')
     assert df.empty

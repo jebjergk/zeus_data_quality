@@ -116,6 +116,7 @@ from utils.meta import (
 from utils import schedules
 from services.configs import save_config_and_checks, delete_config_full
 from services.state import get_state, set_state
+from services import profiling_v2
 from utils.checkdefs import build_rule_for_column_check, build_rule_for_table_check
 from utils.configs import get_metadata_namespace, get_proc_name
 from utils.flags import DEBUG_PROFILING
@@ -1766,7 +1767,7 @@ if view == "cfg":
     else:
         render_config_editor()
 elif view == "profile":
-    profile_view.render_profile(session, METADATA_DB, METADATA_SCHEMA)
+    profile_view.render_profile(session, METADATA_DB, METADATA_SCHEMA, profiling_v2)
 elif view == "monitor":
     render_monitor()
 elif view == "docs":
