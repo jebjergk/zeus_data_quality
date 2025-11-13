@@ -121,7 +121,7 @@ from utils.checkdefs import build_rule_for_column_check, build_rule_for_table_ch
 from utils.configs import get_metadata_namespace, get_proc_name
 from utils.flags import DEBUG_PROFILING
 from utils.version import build_sha, build_time
-from views import profile_view
+from views.profile_view import render_profile as render_profiling_view
 from views.table_picker import stateless_table_picker, session_cache_token
 from views.docs_view import render_docs as render_docs_view
 from views.config_editor import render_row_count_preview
@@ -1714,7 +1714,7 @@ with st.sidebar:
         args=("cfg",),
     )
     st.button(
-        "🧪 Profile Table",
+        "🧪 Profiling",
         use_container_width=True,
         type="primary" if view == "profile" else "secondary",
         key="nav_profile",
@@ -1767,7 +1767,7 @@ if view == "cfg":
     else:
         render_config_editor()
 elif view == "profile":
-    profile_view.render_profile(session, METADATA_DB, METADATA_SCHEMA, profiling_v2)
+    render_profiling_view(session, METADATA_DB, METADATA_SCHEMA, profiling_v2)
 elif view == "monitor":
     render_monitor()
 elif view == "docs":
