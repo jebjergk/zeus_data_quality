@@ -202,16 +202,15 @@ def fetch_recent_runs(session: Any, table_fqn: str, limit: int = 10) -> pd.DataF
 
     sql = f"""
         SELECT
-            RUN_ID,
+            PROFILE_RUN_ID AS RUN_ID,
             TABLE_FQN,
-            PROFILED_AT,
-            ROW_COUNT,
-            SAMPLE_PERCENT,
+            STARTED_AT,
+            FINISHED_AT,
             STATUS,
-            DURATION_SECONDS
+            DETAILS
         FROM {PROFILE_RUN_TABLE}
         WHERE TABLE_FQN = ?
-        ORDER BY PROFILED_AT DESC
+        ORDER BY STARTED_AT DESC
         LIMIT {max(1, limit)}
     """
     return _execute_sql(session, sql, params=[normalized]).to_pandas()
