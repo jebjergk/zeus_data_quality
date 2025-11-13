@@ -5,52 +5,32 @@ from pathlib import Path
 from typing import Any, Dict, List
 
 
-def _unique(values: List[str]) -> List[str]:
-    seen = set()
-    result: List[str] = []
-    for value in values:
-        if value in seen:
-            continue
-        seen.add(value)
-        result.append(value)
-    return result
-
-
-class _ProfilePlaceholderCollector(ast.NodeVisitor):
+class _ProfileViewContractCollector(ast.NodeVisitor):
     def __init__(self) -> None:
-        self.headers: List[str] = []
-        self.captions: List[str] = []
-        self.infos: List[str] = []
+        self.ui_string_refs: List[str] = []
+        self.uses_table_picker = False
+        self.streamlit_tabs_calls = 0
 
-    def _strings_from_node(self, node: ast.AST | None) -> List[str]:
-        if node is None:
-            return []
-        if isinstance(node, ast.Constant) and isinstance(node.value, str):
-            return [node.value]
-        if isinstance(node, ast.IfExp):
-            values: List[str] = []
-            values.extend(self._strings_from_node(node.body))
-            values.extend(self._strings_from_node(node.orelse))
-            return values
-        return []
+    def visit_Attribute(self, node: ast.Attribute) -> Any:  # type: ignore[override]
+        if isinstance(node.value, ast.Name) and node.value.id == "ui_strings":
+            self.ui_string_refs.append(node.attr)
+        self.generic_visit(node)
 
     def visit_Call(self, node: ast.Call) -> Any:  # type: ignore[override]
         func = node.func
-        if isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name) and func.value.id == "st":
-            labels: List[str] = []
-            if node.args:
-                labels = self._strings_from_node(node.args[0])
-            for label in labels:
-                if func.attr == "header":
-                    self.headers.append(label)
-                elif func.attr == "caption":
-                    self.captions.append(label)
-                elif func.attr == "info":
-                    self.infos.append(label)
+        if isinstance(func, ast.Name) and func.id == "stateless_table_picker":
+            self.uses_table_picker = True
+        elif (
+            isinstance(func, ast.Attribute)
+            and isinstance(func.value, ast.Name)
+            and func.value.id == "st"
+            and func.attr == "tabs"
+        ):
+            self.streamlit_tabs_calls += 1
         self.generic_visit(node)
 
 
-def _collect_profile_placeholder() -> Dict[str, Any]:
+def _collect_profile_contract() -> Dict[str, Any]:
     module_path = Path(__file__).resolve().parents[1] / "views" / "profile_view.py"
     source = module_path.read_text(encoding="utf-8")
     tree = ast.parse(source)
@@ -63,16 +43,16 @@ def _collect_profile_placeholder() -> Dict[str, Any]:
     if render_node is None:
         raise AssertionError("render_profile not found in views.profile_view")
 
-    collector = _ProfilePlaceholderCollector()
+    collector = _ProfileViewContractCollector()
     collector.visit(render_node)
 
     return {
-        "headers": _unique(collector.headers),
-        "captions": _unique(collector.captions),
-        "infos": _unique(collector.infos),
+        "ui_strings": sorted({*collector.ui_string_refs}),
+        "uses_table_picker": collector.uses_table_picker,
+        "tabs_calls": collector.streamlit_tabs_calls,
     }
 
 
-def test_profile_view_placeholder(snapshot) -> None:
-    placeholder_contract = _collect_profile_placeholder()
-    snapshot.assert_match(placeholder_contract, "profile_view_placeholder")
+def test_profile_view_contract(snapshot) -> None:
+    contract = _collect_profile_contract()
+    snapshot.assert_match(contract, "profile_view_contract")
