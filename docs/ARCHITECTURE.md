@@ -34,12 +34,10 @@ No data leaves Snowflake. No third-party AI inference is called.
 ## Data Flow (Profiling)
 
 User selects table →
-Profiler queries table sample →
-services.profiling.run_table_profile() →
-Produces per-column metrics & signals →
-normalize_profile_row() standardizes payload →
-views.profile_view renders DataFrame →
-User may save / generate DQ config
+`services.profiling_v2.run_full_profile()` calls `DQ_PROFILE_FULL('<DB>.<SCHEMA>.<TABLE>')` →
+Stored procedure saves metrics into `ZEUS_ANALYTICS_SIMU.DISCOVERY` tables →
+`views.profile_view` queries `DQ_TABLE_PROFILE_SUMMARY`, `DQ_COLUMN_FEATURES`, `DQ_COLUMN_CLASSIFICATION`, and `DQ_SUGGESTED_CHECKS` →
+Streamlit renders summaries, semantic tags, and suggested checks
 
 yaml
 Copy code
@@ -88,8 +86,10 @@ Both run as **EXECUTE AS CALLER**, meaning:
 |------|---------|
 | `DQ_CHECK` | Definition of each DQ rule in a config |
 | `DQ_RUN_RESULTS` | Execution output for each check run |
-| `PROFILE_RUN` (optional) | (Coming) Saved profiling summaries |
-| `PROFILE_COLUMN` (optional) | (Coming) Saved per-column profile details |
+| `ZEUS_ANALYTICS_SIMU.DISCOVERY.DQ_TABLE_PROFILE_SUMMARY` | Table-level profiling snapshots |
+| `ZEUS_ANALYTICS_SIMU.DISCOVERY.DQ_COLUMN_FEATURES` | Column statistics and signals |
+| `ZEUS_ANALYTICS_SIMU.DISCOVERY.DQ_COLUMN_CLASSIFICATION` | Semantic tags per column |
+| `ZEUS_ANALYTICS_SIMU.DISCOVERY.DQ_SUGGESTED_CHECKS` | Recommended DQ checks inferred from profiling |
 
 ---
 

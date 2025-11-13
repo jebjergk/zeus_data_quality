@@ -1,2453 +1,297 @@
-"""UI CONTRACT – DO NOT CHANGE WITHOUT EXPLICIT INSTRUCTION
-
-Controls (top to bottom):
-1. Page header labelled "🧪 Profile Table" immediately followed by the caption "Profile a table to explore null rates, distinct counts, ranges, and common values before defining data quality checks."  The header and caption must remain paired with no intervening widgets.
-2. Stateless table picker with three selectors (database, schema, table) sourced from `stateless_table_picker`.  It must appear directly under the caption and persist the selected fully qualified name in `st.session_state["profile_target_fqn"]`.
-3. A horizontal divider separating the picker from the run controls.
-4. Control row rendered as three equally spaced columns:
-   • Column 1 contains the number input labelled "Sample %" (range 0–100, step 1).  Help text must include the metadata rationale and the instruction "Enter 0 for a full table scan."  The widget key stays `profile_sample_pct`.
-   • Column 2 contains the number input labelled "Top N values" (range 1–10, default 10, step 1) with helper text "Collect up to 10 of the most common values per column."  No additional controls share this column.
-   • Column 3 contains a selectbox labelled "Load saved profile" followed by a "Load" button.  The selectbox must always render, using "— Select a saved run —" when runs exist or the disabled option "— No saved profiles —" otherwise.  The Load button lives directly under the selectbox and is disabled unless a run is chosen and metadata targets are configured.  Caption messaging under the button must cover the Snowflake connection requirement or the "No saved profiles" notice as in code.
-5. Caption `Suggested: X of Y columns selected` sourced from `selection_counts` showing immediately below the control row.
-6. Action row with three columns sized `[1, 1, 2]`:
-   • Column 1 hosts the primary button "▶️ Run Profile" (disabled when a saved run is loaded).
-   • Column 2 hosts the secondary button "✨ Suggest DQ Config" (disabled until profile results exist).
-   • Column 3 shows an info box `Viewing a saved profile.` plus a "Clear loaded profile" button only when `profile_loaded_run_id` is set; otherwise it must remain empty.
-7. Metrics row of three `st.metric` widgets labelled "Rows profiled", "Sampling", and "Duration".  These appear once results exist and must remain in this order.
-8. Optional warning banner firing for full scans over the threshold with the message "Full table scan processed {rows} rows. Consider sampling to improve performance."  The icon stays `⚠️`.
-9. Filters container that starts with subheader "Filters" then four toggles: "High null % (>20%)", "Unique candidates", "Low cardinality", "Whitespace risk".  Immediately afterwards render the bold label "Semantic tags" and a single row of checkboxes: "Identifiers", "Financial", "Instrument", "Geo", "Contact", "Date (Text)", "Reference Codes"—all defaulting to `False`.
-10. Toggle "💾 Save Profile" (key `profile_save_toggle`) with dynamic help text explaining persistence.  This control is always rendered; it is disabled rather than hidden when metadata prerequisites fail.
-11. Selection editor grid created with `st.data_editor` that exposes only two columns: `Select` (checkbox) and `Column` (read-only).  The editor must precede the main dataframe and use key `profile_results_selection`.
-12. Main profile dataframe displayed with `st.dataframe` using the styled `grid_df`.  Required columns in order: `Select`, `Column`, `Physical Type`, `Nulls`, `Distinct`, `Avg Length`, `Min Value`, `Max Value`, `Whitespace %`, `Guessed Type`, `Confidence`, `Note`.  Confidence styling and legend text (green ≥90%, amber 75–89, grey otherwise) must remain untouched.
-13. Subheader "Top values by column" followed by one expander per column in the filtered results.  Each expander title follows the pattern `<column> (<N values>)`.  Inside, render exactly one `st.table` using the processed `tv_df` (columns "Value", "Count", and any metadata-supplied percentage columns).  When the table is empty, show the existing informational messages instead of alternative layouts.
-
-Forbidden patterns:
-• Do not add, remove, or reorder the control groups above.
-• Do not introduce extra tabs, accordions, or secondary grids beyond the selection editor, main dataframe, and per-column tables described.
-• Do not alter widget labels, keys, or default states except through existing logic.
-• Do not surface additional persistence toggles or sampling controls; `💾 Save Profile` and `Sample %` are the sole persistence and sampling mechanisms.
-"""
+"""Profiling v2 view backed by ZEUS_ANALYTICS_SIMU.DISCOVERY metadata."""
 
 from __future__ import annotations
-import html
-import json
+
 import logging
-import traceback
-import math
-import textwrap
-import time
-from dataclasses import dataclass, field
-from datetime import datetime
-from numbers import Integral, Real
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
+from typing import Any, Dict
 
 import pandas as pd
 import streamlit as st
 
-from services.profile import build_profile_suggestion
-from services.profiling import (
-    list_saved_profiles as fetch_saved_profiles,
-    load_profile_run,
-    normalize_profile_row,
-    run_table_profile,
-    save_profile_results,
-)
-from services.profiles_repo import load_saved_profile_run
+from services import profiling_v2
 from ui import keys as ui_keys
 from ui import strings as ui_strings
-from utils.config import PROFILES_TABLE_FQN
-from utils.flags import (
-    DEBUG_PROFILING,
-    DEMO_LOCK,
-    PROFILE_INLINE_SELECT,
-    PROFILE_TOP_VALUES_NULLS,
-    UI_CONTRACT_STRICT,
-)
-from utils.meta import get_table_row_count
-from utils.version import build_sha, build_time
-from utils.state import (
-    SAVED_PROFILES_STATE,
-    list_saved_profiles,
-    verify_profiles_store,
-    _canon_fqn,
-)
-from views.table_picker import session_cache_token, stateless_table_picker
+from utils.flags import DEBUG_PROFILING
+from views.table_picker import stateless_table_picker
+
+LOGGER = logging.getLogger(__name__)
 
 
-FULL_SCAN_WARNING_THRESHOLD = 1_000_000
-MAX_TOP_N = 10
+def render_profile(session, *_metadata) -> None:
+    """Render the Profiling v2 page."""
 
-CONFIDENCE_HIGH_THRESHOLD = 90.0
-CONFIDENCE_MEDIUM_THRESHOLD = 75.0
+    st.header(ui_strings.PROFILE_V2_HEADER_TITLE)
+    st.caption(ui_strings.PROFILE_V2_HEADER_CAPTION)
+    st.caption(
+        ui_strings.PROFILE_V2_METADATA_NOTE.format(
+            namespace=profiling_v2.DISCOVERY_NAMESPACE
+        )
+    )
+    st.divider()
 
-
-PROFILE_INCLUDE_COLS_STATE = "profile_include_cols"
-PROFILE_INCLUDE_TOKEN_STATE = "profile_include_token"
-
-
-LAST_PROFILE_SUMMARY_STATE = "last_profile_summary"
-LAST_PROFILE_ROWS_STATE = "last_profile_rows"
-LAST_PROFILE_ERROR_STATE = "last_profile_err"
-LAST_PROFILE_TARGET_STATE = "last_profile_target"
-LAST_PROFILE_TOP_N_STATE = "last_profile_top_n"
-
-
-def _ensure_last_profile_state_defaults() -> None:
-    st.session_state.setdefault(LAST_PROFILE_SUMMARY_STATE, None)
-    st.session_state.setdefault(LAST_PROFILE_ROWS_STATE, [])
-    st.session_state.setdefault(LAST_PROFILE_ERROR_STATE, None)
-
-
-def _sync_last_profile_session(
-    profile_payload: Optional[Dict[str, Any]],
-    target_table: str,
-    top_n: Optional[int] = None,
-) -> None:
-    if profile_payload is None:
-        st.session_state[LAST_PROFILE_SUMMARY_STATE] = None
-        st.session_state[LAST_PROFILE_ROWS_STATE] = []
-        st.session_state.pop(LAST_PROFILE_TARGET_STATE, None)
-        st.session_state.pop(LAST_PROFILE_TOP_N_STATE, None)
-        if DEBUG_PROFILING:
-            logging.getLogger(__name__).info(
-                "store_result ok=%s rows=%s err=%s fqn=%s",
-                False,
-                0,
-                None,
-                target_table,
-            )
+    if not session:
+        st.warning(ui_strings.PROFILE_V2_SESSION_WARNING)
         return
 
-    summary_payload = dict(profile_payload.get("summary") or {})
-    derived_top_n = top_n if top_n is not None else profile_payload.get("top_n")
-    if derived_top_n is not None:
-        try:
-            top_n_value = int(derived_top_n)
-        except Exception:
-            top_n_value = derived_top_n
-        summary_payload.setdefault("top_n", top_n_value)
-        st.session_state[LAST_PROFILE_TOP_N_STATE] = top_n_value
-    else:
-        st.session_state.pop(LAST_PROFILE_TOP_N_STATE, None)
+    st.subheader(ui_strings.PROFILE_V2_PICKER_SUBHEADER)
+    selected_fqn = st.session_state.get(ui_keys.PROFILE_TARGET_FQN)
+    _, _, _, picker_fqn = stateless_table_picker(session, selected_fqn)
+    if picker_fqn:
+        st.session_state[ui_keys.PROFILE_TARGET_FQN] = picker_fqn
 
-    rows_payload = profile_payload.get("columns")
-    if isinstance(rows_payload, list):
-        st.session_state[LAST_PROFILE_ROWS_STATE] = rows_payload
-    else:
-        st.session_state[LAST_PROFILE_ROWS_STATE] = []
+    target_fqn = (
+        st.session_state.get(ui_keys.PROFILE_TARGET_FQN)
+        or picker_fqn
+        or ""
+    )
 
-    st.session_state[LAST_PROFILE_SUMMARY_STATE] = summary_payload
-    st.session_state[LAST_PROFILE_TARGET_STATE] = target_table
-    st.session_state[LAST_PROFILE_ERROR_STATE] = None
+    if target_fqn:
+        st.success(ui_strings.PROFILE_V2_TARGET_CAPTION.format(table=target_fqn))
+    else:
+        st.info(ui_strings.PROFILE_V2_NO_TARGET)
+
+    run_col, refresh_col = st.columns(2)
+    run_clicked = run_col.button(
+        ui_strings.PROFILE_V2_RUN_BUTTON,
+        use_container_width=True,
+        disabled=not target_fqn,
+    )
+    refresh_clicked = refresh_col.button(
+        ui_strings.PROFILE_V2_REFRESH_BUTTON,
+        use_container_width=True,
+        disabled=not target_fqn,
+    )
+
+    status_placeholder = st.empty()
+    if run_clicked and target_fqn:
+        _handle_profile_run(session, target_fqn, status_placeholder)
+    elif not run_clicked and refresh_clicked:
+        status_placeholder.info(ui_strings.PROFILE_V2_REFRESH_MESSAGE)
+
+    if not target_fqn:
+        return
+
+    with st.spinner(ui_strings.PROFILE_V2_LOAD_SPINNER):
+        metadata_payload = _load_metadata(session, target_fqn)
+
+    _render_summary(metadata_payload.get("summary") or {})
+    _render_results_tabs(metadata_payload)
+
     if DEBUG_PROFILING:
-        rows_payload = profile_payload.get("columns")
-        row_count = len(rows_payload) if isinstance(rows_payload, list) else 0
-        logging.getLogger(__name__).info(
-            "store_result ok=%s rows=%s err=%s fqn=%s",
-            True,
-            row_count,
-            None,
-            target_table,
-        )
+        with st.expander(ui_strings.PROFILE_V2_DEBUG_EXPANDER, expanded=False):
+            st.json(metadata_payload, expanded=False)
 
 
-def _record_last_profile_error(message: Optional[str]) -> None:
-    target_before_clear = st.session_state.get(LAST_PROFILE_TARGET_STATE)
-    st.session_state[LAST_PROFILE_SUMMARY_STATE] = None
-    st.session_state[LAST_PROFILE_ROWS_STATE] = []
-    st.session_state[LAST_PROFILE_ERROR_STATE] = message if message else None
-    st.session_state.pop(LAST_PROFILE_TOP_N_STATE, None)
-    st.session_state.pop(LAST_PROFILE_TARGET_STATE, None)
-    st.session_state.pop(PROFILE_INCLUDE_COLS_STATE, None)
-    st.session_state.pop(PROFILE_INCLUDE_TOKEN_STATE, None)
-    st.session_state.pop(ui_keys.PROFILE_RESULTS_STATE, None)
-    st.session_state.pop(ui_keys.PROFILE_SELECTION_COUNTS, None)
-    if DEBUG_PROFILING:
-        logging.getLogger(__name__).info(
-            "store_result ok=%s rows=%s err=%s fqn=%s",
-            False,
-            0,
-            message if message else None,
-            target_before_clear,
-        )
+def _handle_profile_run(session: Any, table_fqn: str, placeholder) -> None:
+    """Run profiling for the given table and surface feedback inline."""
 
-
-def _safe_int(value: Any) -> Optional[int]:
-    """Convert a numeric-like value to an int when possible."""
-
-    if value is None:
-        return None
-    if isinstance(value, bool):
-        return int(value)
-    if isinstance(value, Integral):
-        return int(value)
-    try:
-        if isinstance(value, str):
-            cleaned = value.replace(",", "").strip()
-            if cleaned == "":
-                return None
-            value = cleaned
-        value_float = float(value)
-        if math.isnan(value_float):
-            return None
-        return int(round(value_float))
-    except Exception:
-        return None
-
-
-def _safe_float(value: Any) -> Optional[float]:
-    """Convert a numeric-like value to a float when possible."""
-
-    if value is None:
-        return None
-    if isinstance(value, Real):
-        value_float = float(value)
-        if math.isnan(value_float):
-            return None
-        return value_float
-    try:
-        if isinstance(value, str):
-            cleaned = value.replace(",", "").replace("%", "").strip()
-            if cleaned == "":
-                return None
-            value = cleaned
-        value_float = float(value)
-        if math.isnan(value_float):
-            return None
-        return value_float
-    except Exception:
-        return None
-
-
-def _safe_bool(value: Any) -> Optional[bool]:
-    if value is None:
-        return None
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, (int, float)):
-        if math.isnan(value):
-            return None
-        return bool(value)
-    if isinstance(value, str):
-        normalized = value.strip().lower()
-        if not normalized:
-            return None
-        if normalized in {"true", "t", "yes", "y", "1"}:
-            return True
-        if normalized in {"false", "f", "no", "n", "0"}:
-            return False
-    return None
-def _contract_message(message: str) -> None:
-    """Emit a contract warning or error depending on env configuration."""
-
-    if UI_CONTRACT_STRICT or DEMO_LOCK:
-        st.error(message)
-    else:
-        st.warning(message)
-
-
-def _validate_grid_columns(
-    actual: Sequence[str], expected: Sequence[str], grid_name: str
-) -> bool:
-    """Ensure a rendered grid exposes the expected columns and ordering."""
-
-    actual_list = list(actual)
-    expected_list = list(expected)
-    if actual_list != expected_list:
-        _contract_message(
-            "UI contract violation in "
-            f"{grid_name}: expected columns {expected_list} but found {actual_list}."
-        )
-        return False
-    return True
-
-
-def _warn_invalid_include_column(df: pd.DataFrame, context: str) -> None:
-    include_columns = [
-        column for column in df.columns if str(column).strip() == "Include"
-    ]
-    if len(include_columns) != 1:
-        logging.warning(
-            "Profile include column guard failed in %s: columns=%s",
-            context,
-            list(df.columns),
-        )
-        return
-    include_column = include_columns[0]
-    if not pd.api.types.is_bool_dtype(df[include_column]):
-        logging.warning(
-            "Profile include column guard failed in %s: dtype=%s",
-            context,
-            df[include_column].dtype,
-        )
-@dataclass
-class ColumnProfile:
-    name: str
-    data_type: str
-    nulls: Optional[int]
-    null_pct: Optional[float]
-    distincts: Optional[int]
-    distinct_pct: Optional[float]
-    min_val: Optional[Any]
-    max_val: Optional[Any]
-    avg_len: Optional[float]
-    whitespace_pct: Optional[float]
-    whitespace_only_pct: Optional[float] = None
-    row_cnt: Optional[int] = None
-    distinct_ratio: Optional[float] = None
-    top1_ratio: Optional[float] = None
-    top3_ratio: Optional[float] = None
-    len_min: Optional[float] = None
-    len_max: Optional[float] = None
-    numeric_like_ratio: Optional[float] = None
-    yyyymmdd_ratio: Optional[float] = None
-    ddmmyyyy_ratio: Optional[float] = None
-    iso_ymd_ratio: Optional[float] = None
-    date_parse_ratio_yyyymmdd: Optional[float] = None
-    date_parse_ratio_ddmmyyyy: Optional[float] = None
-    date_parse_ratio_iso: Optional[float] = None
-    date_parse_ratio_best: Optional[float] = None
-    date_parse_best_format: Optional[str] = None
-    parsed_date_min: Optional[str] = None
-    parsed_date_max: Optional[str] = None
-    numeric_min: Optional[Any] = None
-    numeric_max: Optional[Any] = None
-    profile_min: Optional[Any] = None
-    profile_max: Optional[Any] = None
-    date_parse_success_ratio: Optional[float] = None
-    date_sentinel_count: Optional[int] = None
-    top_values: List[Dict[str, Any]] = field(default_factory=list)
-    error: Optional[str] = None
-    semantic_type: Optional[str] = None
-    confidence: Optional[float] = None
-    rationale: Optional[str] = None
-    suggested: Optional[bool] = None
-    dq_selected: Optional[bool] = None
-    dq_reason: Optional[str] = None
-
-
-def _column_profile_from_payload(column: Dict[str, Any]) -> ColumnProfile:
-    normalized = normalize_profile_row(column)
-    top_values = normalized.get("top_values") or []
-    if isinstance(top_values, list):
-        top_values_list = [dict(entry) for entry in top_values if isinstance(entry, dict)]
-    else:
-        top_values_list = []
-    best_format_value = normalized.get("date_parse_best_format")
-    best_format_display: Optional[str]
-    if best_format_value:
-        fmt_key = str(best_format_value).lower()
-        format_map = {
-            "yyyymmdd": "YYYYMMDD",
-            "ddmmyyyy": "DDMMYYYY",
-            "iso": "YYYY-MM-DD",
-            "iso_slash": "YYYY/MM/DD",
-            "iso_dot": "YYYY.MM.DD",
-            "dd_mm_yyyy": "DD-MM-YYYY",
-            "dd_slash_mm": "DD/MM/YYYY",
-            "mm_dd_yyyy": "MM-DD-YYYY",
-            "mm_slash_dd": "MM/DD/YYYY",
-            "dd_mon_yyyy": "DD-MON-YYYY",
-            "mon_dd_yyyy": "MON-DD-YYYY",
-        }
-        best_format_display = format_map.get(fmt_key, str(best_format_value))
-    else:
-        best_format_display = None
-
-    numeric_min_raw = normalized.get("numeric_min")
-    numeric_max_raw = normalized.get("numeric_max")
-
-    def _normalize_numeric_bound(raw_value: Any) -> Optional[Any]:
-        numeric_value = _safe_float(raw_value)
-        if numeric_value is not None:
-            return numeric_value
-        if raw_value is None:
-            return None
-        text_value = str(raw_value).strip()
-        return text_value or None
-
-    numeric_min_value = _normalize_numeric_bound(numeric_min_raw)
-    numeric_max_value = _normalize_numeric_bound(numeric_max_raw)
-    return ColumnProfile(
-        name=str(normalized.get("column_name") or normalized.get("name") or ""),
-        data_type=str(normalized.get("data_type") or ""),
-        nulls=_safe_int(normalized.get("nulls")),
-        null_pct=_safe_float(normalized.get("null_pct")),
-        distincts=_safe_int(normalized.get("distincts")),
-        distinct_pct=_safe_float(normalized.get("distinct_pct")),
-        min_val=normalized.get("min_val"),
-        max_val=normalized.get("max_val"),
-        avg_len=_safe_float(normalized.get("avg_len")),
-        whitespace_pct=_safe_float(normalized.get("whitespace_pct")),
-        row_cnt=_safe_int(normalized.get("row_cnt")),
-        distinct_ratio=_safe_float(normalized.get("distinct_ratio")),
-        top1_ratio=_safe_float(normalized.get("top1_ratio")),
-        top3_ratio=_safe_float(normalized.get("top3_ratio")),
-        len_min=_safe_float(normalized.get("len_min")),
-        len_max=_safe_float(normalized.get("len_max")),
-        numeric_like_ratio=_safe_float(normalized.get("numeric_like_ratio")),
-        yyyymmdd_ratio=_safe_float(normalized.get("date_pattern_yyyymmdd_ratio")),
-        ddmmyyyy_ratio=_safe_float(normalized.get("date_pattern_ddmmyyyy_ratio")),
-        iso_ymd_ratio=_safe_float(normalized.get("date_pattern_iso_ymd_ratio")),
-        date_parse_ratio_yyyymmdd=_safe_float(normalized.get("date_parse_ratio_yyyymmdd")),
-        date_parse_ratio_ddmmyyyy=_safe_float(normalized.get("date_parse_ratio_ddmmyyyy")),
-        date_parse_ratio_iso=_safe_float(normalized.get("date_parse_ratio_iso")),
-        date_parse_ratio_best=_safe_float(normalized.get("date_parse_ratio_best")),
-        date_parse_success_ratio=_safe_float(normalized.get("date_parse_success_ratio")),
-        date_parse_best_format=best_format_display,
-        parsed_date_min=str(normalized.get("parsed_date_min")) if normalized.get("parsed_date_min") else None,
-        parsed_date_max=str(normalized.get("parsed_date_max")) if normalized.get("parsed_date_max") else None,
-        numeric_min=numeric_min_value,
-        numeric_max=numeric_max_value,
-        profile_min=normalized.get("profile_min"),
-        profile_max=normalized.get("profile_max"),
-        date_sentinel_count=_safe_int(normalized.get("date_sentinel_count")),
-        top_values=top_values_list,
-        error=normalized.get("error"),
-        semantic_type=normalized.get("semantic_type"),
-        confidence=_safe_float(normalized.get("confidence")),
-        rationale=normalized.get("rationale"),
-        whitespace_only_pct=_safe_float(normalized.get("whitespace_only_pct")),
-        suggested=_safe_bool(normalized.get("suggested")),
-        dq_selected=_safe_bool(normalized.get("dq_selected")),
-        dq_reason=_stringify_for_display(normalized.get("dq_reason")),
-    )
-
-
-def _split_fqn(fqn: str) -> Tuple[Optional[str], Optional[str], Optional[str]]:
-    if not fqn:
-        return None, None, None
-    parts = [p.strip('"') for p in fqn.split(".") if p]
-    if len(parts) != 3:
-        return None, None, None
-    return parts[0], parts[1], parts[2]
-
-
-def _recommend_sample_pct(row_count: Optional[int]) -> Tuple[float, str]:
-    if row_count is None:
-        return 10.0, (
-            "Defaulting to a 10% sample because row count metadata was unavailable. "
-            "Sampling avoids scanning the full table by default."
-        )
-
-    if row_count <= 100_000:
-        return 0.0, (
-            "Full scan recommended because the table has 100k rows or fewer. "
-            "Scanning all rows keeps runtime low while ensuring precise metrics."
-        )
-
-    if row_count <= 1_000_000:
-        return 10.0, (
-            "Sampling 10% keeps the scan under roughly 100k rows while providing representative metrics."
-        )
-
-    if row_count <= 10_000_000:
-        return 5.0, (
-            "Sampling 5% targets at most about 500k rows to balance coverage and cost."
-        )
-
-    if row_count <= 100_000_000:
-        return 1.0, (
-            "Sampling 1% limits the profile to around one million rows on large tables."
-        )
-
-    return 0.5, (
-        "Sampling 0.5% keeps the profile under roughly 500k rows even on very large tables."
-    )
-
-
-def _load_table_row_count(session_obj, fqn: str) -> Optional[int]:
-    if not session_obj or not fqn:
-        return None
-
-    @st.cache_data(ttl=600, show_spinner=False)
-    def _load_row_count(cache_key: Tuple[str, str]) -> Optional[int]:
-        _, fqn_key = cache_key
-        db, schema, table = _split_fqn(fqn_key)
-        if not (db and schema and table):
-            return None
+    with st.spinner(ui_strings.PROFILE_V2_RUN_SPINNER.format(table=table_fqn)):
         try:
-            return get_table_row_count(session_obj, db, schema, table)
-        except Exception:
-            return None
-
-    return _load_row_count((session_cache_token(session_obj), fqn))
-
-
-def _table_picker(session_obj, preselect_fqn: Optional[str]):
-    return stateless_table_picker(session_obj, preselect_fqn)
-
-
-def _stringify_for_display(value: Any) -> Any:
-    """Return a compact, human readable representation for complex values."""
-
-    def _stringify_compound(compound: Any) -> str:
-        if isinstance(compound, dict):
-            if not compound:
-                return ""
-            if len(compound) == 1:
-                (key, single_value), = compound.items()
-                if str(key).lower() in {"value", "val", "text"}:
-                    return _to_string(single_value)
-            parts = []
-            for key, sub_value in compound.items():
-                parts.append(f"{key}: {_to_string(sub_value)}")
-            return ", ".join(parts)
-        if isinstance(compound, (list, tuple, set)):
-            if isinstance(compound, set):
-                try:
-                    compound = sorted(compound)
-                except Exception:
-                    compound = list(compound)
-            items = [_to_string(item) for item in compound]
-            return ", ".join(item for item in items if item)
-        return str(compound)
-
-    def _to_string(obj: Any) -> str:
-        if obj is None:
-            return ""
-        if isinstance(obj, (dict, list, tuple, set)):
-            return _stringify_compound(obj)
-        if isinstance(obj, str):
-            stripped = obj.strip()
-            if stripped.startswith("{") or stripped.startswith("["):
-                try:
-                    parsed = json.loads(stripped)
-                except Exception:
-                    return obj
-                return _stringify_compound(parsed)
-            return obj
-        return str(obj)
-
-    if value is None:
-        return None
-    if isinstance(value, (dict, list, tuple, set)):
-        return _stringify_compound(value)
-    if isinstance(value, str):
-        stripped_value = value.strip()
-        if stripped_value.startswith("{") or stripped_value.startswith("["):
-            try:
-                parsed_value = json.loads(stripped_value)
-            except Exception:
-                return value
-            return _stringify_compound(parsed_value)
-    return value
-
-
-def _format_top_value_cell(value: Any) -> str:
-    raw_value = value
-    try:
-        if pd.isna(raw_value):
-            raw_value = None
-    except Exception:
-        pass
-
-    if raw_value is None:
-        return "NULL"
-    if isinstance(raw_value, str):
-        if raw_value == "":
-            return '""'
-        ws_prefix = "__WS_LEN__:"
-        if raw_value.startswith(ws_prefix):
-            length_part = raw_value[len(ws_prefix) :].strip()
-            try:
-                length_value = int(length_part)
-            except Exception:
-                length_value = None
-            if length_value is not None:
-                return f"␣×{length_value}"
-
-    formatted = _stringify_for_display(raw_value)
-    if formatted is None:
-        return ""
-    return str(formatted)
-
-
-def _profiles_to_frame(profiles: Iterable[ColumnProfile]) -> pd.DataFrame:
-    records = []
-    for profile in profiles:
-        def _pct(value: Optional[float]) -> Optional[float]:
-            if value is None:
-                return None
-            try:
-                return round(float(value) * 100.0, 2)
-            except Exception:
-                return None
-
-        records.append(
-            {
-                "column_name": profile.name,
-                "data_type": profile.data_type,
-                "nulls": profile.nulls,
-                "null_pct": round(profile.null_pct, 4) if profile.null_pct is not None else None,
-                "distincts": profile.distincts,
-                "distinct_pct": round(profile.distinct_pct, 4) if profile.distinct_pct is not None else None,
-                "min_val": _stringify_for_display(profile.min_val),
-                "max_val": _stringify_for_display(profile.max_val),
-                "avg_len": profile.avg_len if profile.avg_len is not None else None,
-                "whitespace_pct": round(profile.whitespace_pct, 2) if profile.whitespace_pct is not None else None,
-                "whitespace_only_pct": round(profile.whitespace_only_pct, 2)
-                if profile.whitespace_only_pct is not None
-                else None,
-                "row_cnt": profile.row_cnt,
-                "len_min": round(profile.len_min, 2) if profile.len_min is not None else None,
-                "len_max": round(profile.len_max, 2) if profile.len_max is not None else None,
-                "distinct_ratio_pct": _pct(profile.distinct_ratio),
-                "top1_ratio_pct": _pct(profile.top1_ratio),
-                "top3_ratio_pct": _pct(profile.top3_ratio),
-                "numeric_like_pct": _pct(profile.numeric_like_ratio),
-                "date_pattern_yyyymmdd_pct": _pct(profile.yyyymmdd_ratio),
-                "date_pattern_ddmmyyyy_pct": _pct(profile.ddmmyyyy_ratio),
-                "date_pattern_iso_ymd_pct": _pct(profile.iso_ymd_ratio),
-                "date_parse_yyyymmdd_pct": _pct(profile.date_parse_ratio_yyyymmdd),
-                "date_parse_ddmmyyyy_pct": _pct(profile.date_parse_ratio_ddmmyyyy),
-                "date_parse_iso_pct": _pct(profile.date_parse_ratio_iso),
-                "date_parse_best_pct": _pct(profile.date_parse_ratio_best),
-                "date_parse_success_pct": _pct(profile.date_parse_success_ratio),
-                "date_parse_best_format": profile.date_parse_best_format,
-                "parsed_date_min": _stringify_for_display(profile.parsed_date_min),
-                "parsed_date_max": _stringify_for_display(profile.parsed_date_max),
-                "numeric_min": _stringify_for_display(profile.numeric_min),
-                "numeric_max": _stringify_for_display(profile.numeric_max),
-                "profile_min": _stringify_for_display(profile.profile_min),
-                "profile_max": _stringify_for_display(profile.profile_max),
-                "numeric_like_ratio": profile.numeric_like_ratio,
-                "date_parse_success_ratio": profile.date_parse_success_ratio,
-                "date_sentinel_count": profile.date_sentinel_count,
-                "top_values": profile.top_values,
-                "error": profile.error,
-                "semantic_type": profile.semantic_type,
-                "confidence": profile.confidence,
-                "rationale": profile.rationale,
-                "suggested": bool(profile.suggested)
-                if profile.suggested is not None
-                else False,
-                "dq_selected": bool(profile.dq_selected)
-                if profile.dq_selected is not None
-                else False,
-                "dq_reason": str(profile.dq_reason)
-                if profile.dq_reason is not None
-                else "",
-            }
-        )
-    df = pd.DataFrame.from_records(records)
-    if not df.empty:
-        display_cols = [
-            "column_name",
-            "data_type",
-            "nulls",
-            "null_pct",
-            "distincts",
-            "distinct_pct",
-            "min_val",
-            "max_val",
-            "avg_len",
-            "whitespace_pct",
-            "error",
-            "semantic_type",
-            "confidence",
-            "rationale",
-        ]
-        missing = [c for c in display_cols if c not in df.columns]
-        df = df.reindex(columns=[c for c in display_cols if c not in missing] + [c for c in df.columns if c not in display_cols])
-    return df
-
-
-def _format_count(value: Any) -> str:
-    if value is None:
-        return ""
-    try:
-        value_float = float(value)
-        if math.isnan(value_float):
-            return ""
-        return f"{int(round(value_float)):,}"
-    except Exception:
-        return ""
-
-
-def _format_percentage(value: Any) -> str:
-    if value is None:
-        return ""
-    try:
-        value_float = float(value)
-        if math.isnan(value_float):
-            return ""
-        return f"{value_float:.2f}"
-    except Exception:
-        return ""
-
-
-def _format_card_value(value: Any, *, decimals: int = 2, allow_commas: bool = False) -> str:
-    if value is None:
-        return "—"
-    if isinstance(value, (int, float)):
-        try:
-            number = float(value)
-        except Exception:
-            number = math.nan
-        if math.isnan(number):
-            return "—"
-        if math.isclose(number, round(number), abs_tol=1e-9):
-            integer_value = int(round(number))
-            return f"{integer_value:,}" if allow_commas else f"{integer_value}"
-        fmt = f"{{:,.{decimals}f}}" if allow_commas else f"{{:.{decimals}f}}"
-        return fmt.format(number)
-    text_value = str(value).strip()
-    return text_value or "—"
-
-
-def _render_metric_card(
-    title: str,
-    metrics: List[Tuple[str, str, Optional[str]]],
-    subtitle: Optional[str] = None,
-) -> None:
-    if not metrics:
-        return
-    metric_html: List[str] = []
-    for label, raw_value, tooltip in metrics:
-        label_html = html.escape(label)
-        display_value = raw_value if raw_value else "—"
-        value_html = html.escape(display_value)
-        if tooltip:
-            tooltip_html = html.escape(tooltip)
-            value_block = f"<div class=\"metric-value\" title=\"{tooltip_html}\">{value_html}</div>"
-        else:
-            value_block = f"<div class=\"metric-value\">{value_html}</div>"
-        metric_html.append(
-            textwrap.dedent(
-                """
-                <div class="metric">
-                    <div class="metric-label">{label}</div>
-                    {value_block}
-                </div>
-                """
-            ).format(label=label_html, value_block=value_block).strip()
-        )
-
-    subtitle_html = (
-        f"<div class=\"small\">{html.escape(subtitle)}</div>"
-        if subtitle
-        else ""
-    )
-    card_html = textwrap.dedent(
-        """
-        <div class="card">
-            <div class="kv">{title}</div>
-            {subtitle}
-            <div class="metrics-grid">
-                {metrics}
-            </div>
-        </div>
-        """
-    ).format(
-        title=html.escape(title), subtitle=subtitle_html, metrics="".join(metric_html)
-    ).strip()
-    st.markdown(card_html, unsafe_allow_html=True)
-
-def render_profile(session, meta_db: str, meta_schema: str) -> None:  # noqa: ARG001 - interface matches requirement
-    try:
-        logger = logging.getLogger(__name__)
-        st.session_state.setdefault("editor_target_fqn", None)
-        editor_target_fqn = st.session_state.get("editor_target_fqn")
-        logger.info(
-            '{"where":"profile_view_enter","fqn": %s}',
-            json.dumps(editor_target_fqn or ""),
-        )
-
-        st.session_state.setdefault("busy_profiling", False)
-        st.session_state.setdefault("freeze_view", False)
-        st.session_state.setdefault("busy_saving", False)
-
-        _ensure_last_profile_state_defaults()
-
-        logging.info(
-            "profile:store ok=%s rows=%s err=%s fqn=%s",
-            bool(
-                st.session_state.get("last_profile_summary")
-                and st.session_state.get("last_profile_rows")
-            ),
-            len(st.session_state.get("last_profile_rows") or []),
-            st.session_state.get("last_profile_err"),
-            st.session_state.get("editor_target_fqn"),
-        )
-
-        st.header(ui_strings.PROFILE_HEADER_TITLE)
-        st.caption(ui_strings.PROFILE_HEADER_CAPTION)
-
-        if DEMO_LOCK:
-            st.info(ui_strings.PROFILE_DEMO_LOCK_MESSAGE)
-
-        render_inputs: Optional[Dict[str, Any]] = None
-        if DEBUG_PROFILING:
-            has_summary = st.session_state.get("last_profile_summary") is not None
-            rows_len = len(st.session_state.get("last_profile_rows") or [])
-            last_err = st.session_state.get("last_profile_err")
-            render_inputs = {
-                "has_summary": has_summary,
-                "rows_len": rows_len,
-                "last_err": last_err,
-                "fqn": editor_target_fqn,
-            }
-            logger.info(
-                "render_inputs has_summary=%s rows_len=%s last_err=%s fqn=%s",
-                has_summary,
-                rows_len,
-                last_err,
-                editor_target_fqn,
+            profiling_v2.run_full_profile(session, table_fqn)
+        except profiling_v2.ProfilingError as exc:
+            placeholder.error(
+                ui_strings.PROFILE_V2_RUN_ERROR.format(error=str(exc))
             )
-
-        base_selection = st.session_state.get(ui_keys.PROFILE_TARGET_FQN)
-        _db_sel, _sch_sel, _tbl_sel, selected_fqn = _table_picker(session, base_selection)
-        if selected_fqn:
-            st.session_state[ui_keys.PROFILE_TARGET_FQN] = selected_fqn
-
-        st.divider()
-
-        if not PROFILE_INLINE_SELECT:
-            _contract_message(ui_strings.PROFILE_INLINE_SELECT_DISABLED)
-            if not DEBUG_PROFILING:
-                return
-
-        saved_profiles_enabled = bool(session and meta_db and meta_schema)
-        saved_profile_runs: List[Dict[str, Any]] = []
-        saved_profile_entries: List[Dict[str, Any]] = []
-        current_table_fqn = selected_fqn or st.session_state.get(
-            ui_keys.PROFILE_TARGET_FQN
-        )
-        profile_list_response: Dict[str, Any] = {}
-        profile_result: Optional[Dict[str, Any]] = None
-        if saved_profiles_enabled:
-            saved_profile_runs = fetch_saved_profiles(session, meta_db, meta_schema, limit=200)
-            st.session_state[SAVED_PROFILES_STATE] = saved_profile_runs
-            list_fqn = st.session_state.get("editor_target_fqn") or ""
-            profile_list_response = list_saved_profiles(list_fqn)
-            canonical_fqn = (
-                profile_list_response.get("canonical_table_fqn")
-                or list_fqn
-                or ""
+            return
+        except Exception as exc:  # pragma: no cover - Snowflake specific failure
+            LOGGER.exception("profiling_v2:run_failed target=%s", table_fqn)
+            placeholder.error(
+                ui_strings.PROFILE_V2_RUN_ERROR.format(error=str(exc))
             )
-            if profile_list_response.get("ok"):
-                saved_profile_entries = profile_list_response.get("items", []) or []
-                logger.info(
-                    "list_saved_profiles ok items=%d fqn=%s",
-                    len(saved_profile_entries),
-                    canonical_fqn,
-                )
-                if not saved_profile_entries:
-                    st.info(
-                        "No saved profiles found (or metadata tables haven’t been created yet). "
-                        "Run and save a profile first."
-                    )
-            else:
-                saved_profile_entries = []
-                logger.error(
-                    "list_saved_profiles failed err=%s fqn=%s",
-                    profile_list_response.get("err"),
-                    list_fqn,
-                )
-                logging.warning(
-                    "Saved profile listing failed",
-                    extra={
-                        "table_fqn": selected_fqn or "",
-                        "err": profile_list_response.get("err"),
-                    },
-                )
-        else:
-            st.session_state.pop(SAVED_PROFILES_STATE, None)
-
-        dropdown_options: List[str] = []
-        dropdown_labels: Dict[str, str] = {}
-        for entry in saved_profile_entries:
-            run_id = str(entry.get("id", "")).strip()
-            if not run_id:
-                continue
-            label_name = str(entry.get("name") or "Unnamed")
-            created_at_iso = str(entry.get("created_at_iso") or "")
-            dropdown_options.append(run_id)
-            dropdown_labels[run_id] = f"{label_name} — {created_at_iso}"
-
-        controls = st.columns(3)
-        suggested_pct = 10.0
-        row_count: Optional[int] = None
-        selected_reason = (
-            "Defaulting to a 10% sample. Enter 0 for a full table scan."
-        )
-        if selected_fqn:
-            row_count = _load_table_row_count(session, selected_fqn)
-            suggested_pct, selected_reason = _recommend_sample_pct(row_count)
-
-        sample_pct_state_key = ui_keys.PROFILE_SAMPLE_PCT_INPUT
-        sample_target_key = ui_keys.PROFILE_SAMPLE_TARGET
-        if st.session_state.get(sample_target_key) != selected_fqn:
-            st.session_state[sample_target_key] = selected_fqn
-            st.session_state[sample_pct_state_key] = float(suggested_pct)
-        else:
-            st.session_state.setdefault(sample_pct_state_key, float(suggested_pct))
-
-        approx_rows = None
-        if row_count is not None and suggested_pct > 0:
-            approx_rows = int(round(row_count * suggested_pct / 100.0))
-
-        reason_parts = [selected_reason]
-        if row_count is not None:
-            reason_parts.append(f"Table metadata reports approximately {row_count:,} rows.")
-        if approx_rows:
-            reason_parts.append(f"This sample size profiles about {approx_rows:,} rows.")
-        reason_parts.append(ui_strings.PROFILE_SAMPLE_HELP_BASE)
-        reason_parts.append(ui_strings.PROFILE_SAMPLE_HELP_FULL_SCAN)
-        sample_help_text = "\n".join(reason_parts)
-
-        with controls[0]:
-            sample_pct_input = st.number_input(
-                ui_strings.PROFILE_SAMPLE_LABEL,
-                min_value=0.0,
-                max_value=100.0,
-                step=1.0,
-                help=sample_help_text,
-                key=sample_pct_state_key,
-            )
-            sample_pct = None if math.isclose(sample_pct_input, 0.0, abs_tol=1e-6) else sample_pct_input
-        with controls[1]:
-            top_n = st.number_input(
-                ui_strings.PROFILE_TOP_N_LABEL,
-                min_value=1,
-                max_value=MAX_TOP_N,
-                value=min(10, MAX_TOP_N),
-                step=1,
-                help=ui_strings.PROFILE_TOP_N_HELP.format(max_top_n=MAX_TOP_N),
-            )
-        def _trigger_profile_load(run_id: Optional[str]) -> None:
-            if not saved_profiles_enabled:
-                st.warning(ui_strings.PROFILE_LOAD_WARNING_NO_SESSION)
-                return
-
-            selected_run_id = str(run_id or "").strip()
-            if not selected_run_id:
-                st.warning(ui_strings.PROFILE_LOAD_WARNING_NO_SELECTION)
-                return
-
-            try:
-                summary_payload, column_payloads = load_saved_profile_run(
-                    session,
-                    meta_db,
-                    meta_schema,
-                    selected_run_id,
-                )
-            except Exception as exc:  # pragma: no cover - Snowflake specific
-                st.error(ui_strings.PROFILE_LOAD_ERROR_GENERIC.format(error=exc))
-            else:
-                if summary_payload is None and not column_payloads:
-                    st.info(
-                        "No saved profiles found (or metadata tables haven’t been created yet). "
-                        "Run and save a profile first."
-                    )
-                else:
-                    try:
-                        loaded_profile = load_profile_run(
-                            session=session,
-                            meta_db=meta_db,
-                            meta_schema=meta_schema,
-                            run_id=selected_run_id,
-                            summary_record=summary_payload,
-                            column_records=column_payloads,
-                        )
-                    except Exception as exc:  # pragma: no cover - Snowflake specific
-                        st.error(ui_strings.PROFILE_LOAD_ERROR_GENERIC.format(error=exc))
-                    else:
-                        if not loaded_profile:
-                            st.warning(ui_strings.PROFILE_WARNING_SAVED_EMPTY)
-                        else:
-                            st.session_state[ui_keys.PROFILE_RESULTS_STATE] = loaded_profile
-                            _sync_last_profile_session(
-                                loaded_profile,
-                                str(
-                                    loaded_profile.get("target_table")
-                                    or selected_fqn
-                                    or ""
-                                ),
-                                loaded_profile.get("top_n"),
-                            )
-                            st.session_state[ui_keys.PROFILE_LOADED_RUN_ID] = selected_run_id
-                            target_table = loaded_profile.get("target_table")
-                            if target_table:
-                                st.session_state[ui_keys.PROFILE_TARGET_FQN] = target_table
-                            st.success(
-                                ui_strings.PROFILE_SUCCESS_LOAD_SAVED.format(
-                                    run_id=selected_run_id
-                                )
-                            )
-
-        load_selected_run_id: Optional[str] = None
-        load_button_clicked = False
-        with controls[2]:
-            selectbox_disabled = len(saved_profile_entries) == 0
-            if dropdown_options:
-
-                def _format_dropdown_option(option: Optional[str]) -> str:
-                    if not option:
-                        return ""
-                    return dropdown_labels.get(option, "")
-
-                def _on_select_saved_profile() -> None:
-                    selected_option_value = st.session_state.get(ui_keys.PROFILE_LOAD_SELECT)
-                    _trigger_profile_load(selected_option_value)
-
-                selected_option = st.selectbox(
-                    ui_strings.PROFILE_LOAD_SELECT_LABEL,
-                    options=dropdown_options,
-                    format_func=_format_dropdown_option,
-                    key=ui_keys.PROFILE_LOAD_SELECT,
-                    disabled=selectbox_disabled,
-                    index=None,
-                    placeholder=ui_strings.PROFILE_LOAD_SELECT_PLACEHOLDER,
-                    on_change=_on_select_saved_profile,
-                )
-                if isinstance(selected_option, str) and selected_option:
-                    load_selected_run_id = selected_option
-            else:
-                st.selectbox(
-                    ui_strings.PROFILE_LOAD_SELECT_LABEL,
-                    options=[ui_strings.PROFILE_LOAD_SELECT_EMPTY],
-                    key=ui_keys.PROFILE_LOAD_SELECT,
-                    disabled=selectbox_disabled,
-                )
-            load_button_clicked = st.button(
-                ui_strings.PROFILE_LOAD_BUTTON_LABEL,
-                key=ui_keys.PROFILE_LOAD_BUTTON,
-                disabled=not (saved_profiles_enabled and load_selected_run_id),
-            )
-            if not saved_profiles_enabled:
-                st.caption(ui_strings.PROFILE_LOAD_CAPTION_DISABLED)
-            elif not dropdown_options:
-                st.caption(ui_strings.PROFILE_LOAD_CAPTION_EMPTY)
-
-        if load_button_clicked:
-            _trigger_profile_load(load_selected_run_id)
-
-        stored_profile_result = st.session_state.get(ui_keys.PROFILE_RESULTS_STATE)
-        last_summary_state = st.session_state.get(LAST_PROFILE_SUMMARY_STATE)
-        last_rows_state = st.session_state.get(LAST_PROFILE_ROWS_STATE)
-        last_target_state = st.session_state.get(LAST_PROFILE_TARGET_STATE)
-        if stored_profile_result:
-            _sync_last_profile_session(
-                stored_profile_result,
-                str(
-                    stored_profile_result.get("target_table")
-                    or last_target_state
-                    or selected_fqn
-                    or ""
-                ),
-                stored_profile_result.get("top_n"),
-            )
-        elif last_summary_state is not None or (
-            isinstance(last_rows_state, list) and last_rows_state
-        ):
-            stored_profile_result = {
-                "target_table": str(
-                    last_target_state or selected_fqn or ""
-                ),
-                "summary": last_summary_state or {},
-                "columns": last_rows_state or [],
-            }
-            saved_top_n = st.session_state.get(LAST_PROFILE_TOP_N_STATE)
-            if saved_top_n is not None:
-                stored_profile_result["top_n"] = saved_top_n
-
-        loaded_run_id = st.session_state.get(ui_keys.PROFILE_LOADED_RUN_ID)
-        if loaded_run_id and not stored_profile_result:
-            st.session_state.pop(ui_keys.PROFILE_LOADED_RUN_ID, None)
-            loaded_run_id = None
-        current_target_fqn = ""
-        if stored_profile_result:
-            current_target_fqn = str(
-                stored_profile_result.get("target_table") or selected_fqn or ""
-            )
-        else:
-            current_target_fqn = str(last_target_state or selected_fqn or "")
-
-        def _profile_signature(
-            profile_payload: Optional[Dict[str, Any]],
-            fallback_target: str,
-        ) -> Tuple[str, Tuple[str, ...]]:
-            if not profile_payload:
-                run_id = str(fallback_target or "active")
-                return (run_id, tuple())
-            summary = profile_payload.get("summary") or {}
-            raw_run_id = (
-                summary.get("run_id")
-                or profile_payload.get("target_table")
-                or fallback_target
-                or "active"
-            )
-            run_id = str(raw_run_id)
-            column_names: List[str] = []
-            for column_payload in profile_payload.get("columns", []) or []:
-                column_name = str(
-                    column_payload.get("column_name")
-                    or column_payload.get("name")
-                    or ""
-                ).strip()
-                if column_name:
-                    column_names.append(column_name)
-            return (run_id, tuple(column_names))
-
-        def _ensure_include_state(
-            profile_payload: Optional[Dict[str, Any]],
-            fallback_target: str,
-        ) -> Tuple[str, Tuple[str, ...], Dict[str, bool]]:
-            run_id, column_names = _profile_signature(profile_payload, fallback_target)
-            state_map = st.session_state.get(PROFILE_INCLUDE_COLS_STATE)
-            if not isinstance(state_map, dict):
-                state_map = {}
-            token = st.session_state.get(PROFILE_INCLUDE_TOKEN_STATE)
-            if profile_payload:
-                if token != (run_id, column_names):
-                    refreshed: Dict[str, bool] = {}
-                    for column_payload in profile_payload.get("columns", []) or []:
-                        column_name = str(
-                            column_payload.get("column_name")
-                            or column_payload.get("name")
-                            or ""
-                        ).strip()
-                        if not column_name:
-                            continue
-                        suggested_default = _safe_bool(column_payload.get("suggested"))
-                        refreshed[column_name] = (
-                            bool(suggested_default)
-                            if suggested_default is not None
-                            else False
-                        )
-                    state_map = refreshed
-                    st.session_state[PROFILE_INCLUDE_TOKEN_STATE] = (run_id, column_names)
-                else:
-                    filtered = {
-                        column_name: bool(state_map.get(column_name, False))
-                        for column_name in column_names
-                    }
-                    state_map = filtered
-                st.session_state[PROFILE_INCLUDE_COLS_STATE] = state_map
-            else:
-                st.session_state[PROFILE_INCLUDE_COLS_STATE] = state_map
-            return (run_id, column_names, state_map)
-
-        def _sync_profile_selection(
-            profile_payload: Optional[Dict[str, Any]],
-            selection_map: Dict[str, bool],
-        ) -> Tuple[int, int]:
-            if not profile_payload:
-                return (0, 0)
-            selected = 0
-            total = 0
-            for column_payload in profile_payload.get("columns", []) or []:
-                column_name = str(
-                    column_payload.get("column_name")
-                    or column_payload.get("name")
-                    or ""
-                ).strip()
-                if not column_name:
-                    continue
-                include_value = bool(selection_map.get(column_name, False))
-                column_payload["dq_selected"] = include_value
-                if include_value:
-                    selected += 1
-                total += 1
-            return (selected, total)
-
-        _, _, include_selection = _ensure_include_state(
-            stored_profile_result, current_target_fqn
-        )
-        selection_counts = _sync_profile_selection(
-            stored_profile_result, include_selection
-        )
-        st.session_state[ui_keys.PROFILE_SELECTION_COUNTS] = selection_counts
-
-        st.caption(
-            ui_strings.PROFILE_SELECTION_STATUS.format(
-                selected=int(selection_counts[0]),
-                total=int(selection_counts[1]),
-            )
-        )
-
-        button_cols = st.columns([1, 1, 2])
-        busy_profiling = bool(st.session_state.get("busy_profiling", False))
-        busy_saving = bool(st.session_state.get("busy_saving", False))
-        run_disabled = bool(loaded_run_id) or busy_profiling or busy_saving
-        with button_cols[0]:
-            run_requested = st.button(
-                ui_strings.PROFILE_RUN_BUTTON_LABEL,
-                type="primary",
-                disabled=run_disabled,
-            )
-        with button_cols[1]:
-            suggest_cfg_pressed = st.button(
-                ui_strings.PROFILE_SUGGEST_BUTTON_LABEL,
-                type="secondary",
-                disabled=(busy_profiling or busy_saving or not stored_profile_result),
-            )
-
-        clear_loaded = False
-        if loaded_run_id:
-            with button_cols[2]:
-                st.info(ui_strings.PROFILE_CLEAR_LOADED_INFO)
-                clear_loaded = st.button(
-                    ui_strings.PROFILE_CLEAR_LOADED_BUTTON,
-                    key=ui_keys.PROFILE_CLEAR_LOADED,
-                )
-        else:
-            button_cols[2].empty()
-
-        if clear_loaded:
-            st.session_state.pop(ui_keys.PROFILE_LOADED_RUN_ID, None)
-            loaded_run_id = None
-
-        inline_error_placeholder = st.empty()
-
-        profile_result = stored_profile_result
-
-        current_editor_fqn = st.session_state.get("editor_target_fqn") or ""
-
-        run_clicked = bool(run_requested)
-        if run_clicked:
-
-            def _handle_profile_run() -> None:
-                nonlocal profile_result, stored_profile_result, loaded_run_id
-                nonlocal busy_profiling
-
-                fqn = (st.session_state.get("editor_target_fqn") or "").strip()
-                if not fqn:
-                    st.warning("Select a table first.")
-                    return
-
-                if st.session_state.get("busy_profiling"):
-                    return
-
-                st.session_state["busy_profiling"] = True
-                st.session_state["freeze_view"] = True
-                busy_profiling = True
-
-                try:
-                    st.session_state.pop(ui_keys.PROFILE_LOADED_RUN_ID, None)
-                    loaded_run_id = None
-
-                    if not session:
-                        _record_last_profile_error(
-                            ui_strings.PROFILE_RUN_ERROR_NO_SESSION
-                        )
-                        profile_result = None
-                        stored_profile_result = None
-                        return
-
-                    target_fqn = (selected_fqn or fqn).strip()
-                    if not target_fqn:
-                        st.warning(ui_strings.PROFILE_RUN_WARNING_NO_TABLE)
-                        st.session_state[LAST_PROFILE_ERROR_STATE] = None
-                        return
-
-                    if DEBUG_PROFILING:
-                        logger.info("profile:run fqn=%s", target_fqn)
-
-                    with st.spinner(ui_strings.PROFILE_RUN_SPINNER):
-                        start = time.time()
-                        st.session_state.pop("profiling_last_error", None)
-                        st.session_state.pop("profiling_last_error_trace", None)
-
-                        try:
-                            res = run_table_profile(
-                                session=session,
-                                fqn=target_fqn,
-                                sample_pct=sample_pct,
-                                top_n=int(min(top_n, MAX_TOP_N)),
-                            )
-                        except Exception as exc:  # pragma: no cover - Snowflake specific
-                            logging.exception("profiling:unhandled")
-                            error_text = f"{type(exc).__name__}: {exc}"
-                            st.session_state[LAST_PROFILE_SUMMARY_STATE] = None
-                            st.session_state[LAST_PROFILE_ROWS_STATE] = []
-                            st.session_state[LAST_PROFILE_ERROR_STATE] = error_text
-                            st.session_state["profiling_last_error"] = error_text
-                            st.session_state["profiling_last_error_trace"] = (
-                                traceback.format_exc()
-                            )
-                            st.session_state.pop(
-                                LAST_PROFILE_TARGET_STATE, None
-                            )
-                            st.session_state.pop(LAST_PROFILE_TOP_N_STATE, None)
-                            st.session_state.pop(PROFILE_INCLUDE_COLS_STATE, None)
-                            st.session_state.pop(PROFILE_INCLUDE_TOKEN_STATE, None)
-                            st.session_state.pop(
-                                ui_keys.PROFILE_RESULTS_STATE, None
-                            )
-                            st.session_state.pop(
-                                ui_keys.PROFILE_SELECTION_COUNTS, None
-                            )
-                            profile_result = None
-                            stored_profile_result = None
-                            return
-
-                        if not isinstance(res, dict):
-                            res = {
-                                "ok": False,
-                                "summary": None,
-                                "column_rows": [],
-                                "err": "Unexpected profiling response.",
-                            }
-
-                        if res.get("ok"):
-                            summary_raw = (res.get("summary") or {})
-                            column_rows = list(res.get("column_rows") or [])
-                            st.session_state[LAST_PROFILE_SUMMARY_STATE] = summary_raw
-                            st.session_state[LAST_PROFILE_ROWS_STATE] = column_rows
-                            st.session_state[LAST_PROFILE_ERROR_STATE] = None
-                        else:
-                            error_message = res.get("err") or (
-                                "Profiling failed — see debug panel for details."
-                            )
-                            st.session_state[LAST_PROFILE_SUMMARY_STATE] = None
-                            st.session_state[LAST_PROFILE_ROWS_STATE] = []
-                            st.session_state[LAST_PROFILE_ERROR_STATE] = (
-                                error_message
-                            )
-                            st.session_state["profiling_last_error"] = error_message
-                            st.session_state["profiling_last_error_trace"] = None
-                            st.session_state.pop(
-                                LAST_PROFILE_TARGET_STATE, None
-                            )
-                            st.session_state.pop(LAST_PROFILE_TOP_N_STATE, None)
-                            st.session_state.pop(PROFILE_INCLUDE_COLS_STATE, None)
-                            st.session_state.pop(PROFILE_INCLUDE_TOKEN_STATE, None)
-                            st.session_state.pop(
-                                ui_keys.PROFILE_RESULTS_STATE, None
-                            )
-                            st.session_state.pop(
-                                ui_keys.PROFILE_SELECTION_COUNTS, None
-                            )
-                            profile_result = None
-                            stored_profile_result = None
-                            return
-
-                        summary_raw = (
-                            st.session_state.get(LAST_PROFILE_SUMMARY_STATE) or {}
-                        )
-                        column_rows = (
-                            st.session_state.get(LAST_PROFILE_ROWS_STATE) or []
-                        )
-
-                        duration = time.time() - start
-                        rows_profiled = int(
-                            (summary_raw or {}).get("rows_profiled") or 0
-                        )
-
-                        columns_payload: List[Dict[str, Any]] = []
-                        profiles: List[ColumnProfile] = []
-                        for column in column_rows:
-                            normalized_column = normalize_profile_row(column)
-                            columns_payload.append(normalized_column)
-                            profiles.append(
-                                _column_profile_from_payload(normalized_column)
-                            )
-
-                        summary_payload = dict(summary_raw)
-                        summary_payload.setdefault("rows_profiled", rows_profiled)
-                        summary_payload.setdefault(
-                            "sample_pct", summary_raw.get("sample_pct")
-                        )
-                        summary_payload["duration_sec"] = float(
-                            summary_payload.get("duration_sec") or duration
-                        )
-                        summary_payload["columns"] = len(profiles)
-
-                        st.session_state[LAST_PROFILE_SUMMARY_STATE] = summary_payload
-                        st.session_state[LAST_PROFILE_TARGET_STATE] = str(
-                            target_fqn
-                        )
-                        st.session_state[LAST_PROFILE_TOP_N_STATE] = int(top_n)
-
-                        profile_result = {
-                            "target_table": str(target_fqn),
-                            "summary": summary_payload,
-                            "columns": columns_payload,
-                            "top_n": int(top_n),
-                        }
-
-                        st.session_state[ui_keys.PROFILE_RESULTS_STATE] = (
-                            profile_result
-                        )
-                        stored_profile_result = profile_result
-                finally:
-                    st.session_state["busy_profiling"] = False
-                    st.session_state["freeze_view"] = False
-                    busy_profiling = False
-
-            _handle_profile_run()
-
-        busy_profiling = bool(st.session_state.get("busy_profiling", False))
-        busy_saving = bool(st.session_state.get("busy_saving", False))
-        if not profile_result:
-            profile_result = st.session_state.get(ui_keys.PROFILE_RESULTS_STATE)
-            stored_profile_result = profile_result
-
-        def _load_suggestion(
-            profile_payload: Dict[str, Any],
-            success_message: str,
-            only_columns: Optional[Set[str]] = None,
-        ) -> None:
-            suggestion = build_profile_suggestion(
-                profile_payload, only_columns=only_columns
-            )
-            if not suggestion:
-                st.info(ui_strings.PROFILE_SUGGEST_EMPTY)
-                return
-            st.session_state["cfg_mode"] = "edit"
-            st.session_state["selected_config_id"] = None
-            st.session_state["editor_target_fqn"] = profile_payload.get("target_table")
-            st.session_state["profile_suggestion"] = suggestion
-            try:
-                current_params = dict(st.query_params)  # type: ignore[attr-defined]
-            except Exception:
-                current_params = {}
-            current_params["page"] = "cfg"
-            try:
-                st.query_params = current_params  # type: ignore[attr-defined]
-            except Exception:
-                pass
-            st.session_state["page"] = "cfg"
-            st.success(success_message)
-            st.rerun()
-
-        def _render_profile_results_from_session(
-            include_selection: Dict[str, bool],
-            inline_error_placeholder: Any,
-            *,
-            busy_profiling: bool,
-            suggest_cfg_pressed: bool,
-        ) -> Optional[Dict[str, Any]]:
-            summary_raw = st.session_state.get(LAST_PROFILE_SUMMARY_STATE)
-            rows_raw = st.session_state.get(LAST_PROFILE_ROWS_STATE) or []
-
-            if isinstance(summary_raw, dict):
-                summary_payload: Optional[Dict[str, Any]] = dict(summary_raw)
-            elif summary_raw is None:
-                summary_payload = None
-            else:
-                try:
-                    summary_payload = dict(summary_raw)
-                except Exception:
-                    summary_payload = None
-
-            if isinstance(rows_raw, Sequence) and not isinstance(
-                rows_raw, (str, bytes, bytearray)
-            ):
-                rows_payload: List[Dict[str, Any]] = list(rows_raw)
-            else:
-                rows_payload = []
-
-            if summary_payload is None or not rows_payload:
-                last_profile_error = st.session_state.get(LAST_PROFILE_ERROR_STATE)
-                if last_profile_error:
-                    inline_error_placeholder.markdown(
-                        f"<div style='color:#b00020;margin-top:0.25rem;'>⚠️ {html.escape(str(last_profile_error))}</div>",
-                        unsafe_allow_html=True,
-                    )
-                else:
-                    inline_error_placeholder.empty()
-                return None
-
-            inline_error_placeholder.empty()
-
-            profile_result: Dict[str, Any] = {
-                "summary": summary_payload or {},
-                "columns": rows_payload,
-            }
-
-            target_table_state = st.session_state.get(LAST_PROFILE_TARGET_STATE)
-            if target_table_state:
-                profile_result["target_table"] = str(target_table_state)
-            elif current_target_fqn:
-                profile_result["target_table"] = str(current_target_fqn)
-
-            saved_top_n = st.session_state.get(LAST_PROFILE_TOP_N_STATE)
-            if saved_top_n is not None:
-                profile_result["top_n"] = saved_top_n
-
-            # Existing rendering logic follows, operating on `profile_result`.
-            # The block below is adapted from the previous in-line rendering.
-            summary = profile_result.get("summary", {})
-            metrics_cols = st.columns(3)
-            metrics_cols[0].metric(
-                ui_strings.PROFILE_METRIC_ROWS,
-                f"{summary.get('rows_profiled', 0):,}",
-            )
-            sample_pct_display = summary.get("sample_pct")
-            sample_label = (
-                ui_strings.PROFILE_SAMPLE_FULL_SCAN_LABEL
-                if sample_pct_display is None
-                else f"{float(sample_pct_display):.1f}%"
-            )
-            metrics_cols[1].metric(ui_strings.PROFILE_METRIC_SAMPLING, sample_label)
-            metrics_cols[2].metric(
-                ui_strings.PROFILE_METRIC_DURATION,
-                ui_strings.PROFILE_METRIC_DURATION_FORMAT.format(
-                    duration=float(summary.get("duration_sec", 0.0))
-                ),
-            )
-
-            if (
-                summary.get("sample_pct") is None
-                and summary.get("rows_profiled", 0) > FULL_SCAN_WARNING_THRESHOLD
-            ):
-                profiled = int(summary.get("rows_profiled", 0))
-                st.warning(
-                    ui_strings.PROFILE_FULL_SCAN_WARNING.format(rows=profiled),
-                    icon="⚠️",
-                )
-
-            profiles_raw = profile_result.get("columns", [])
-            profiles = [_column_profile_from_payload(col) for col in profiles_raw]
-            df = _profiles_to_frame(profiles)
-            required_defaults: Dict[str, Any] = {
-                "dq_selected": False,
-                "dq_reason": "",
-                "whitespace_pct": None,
-                "whitespace_only_pct": None,
-            }
-            for column_name, default_value in required_defaults.items():
-                if column_name not in df.columns:
-                    df[column_name] = default_value
-            if "dq_selected" in df.columns:
-                df["dq_selected"] = df["dq_selected"].apply(
-                    lambda value: (_safe_bool(value) or False)
-                )
-            if "dq_reason" in df.columns:
-                df["dq_reason"] = df["dq_reason"].apply(
-                    lambda value: _stringify_for_display(value) or ""
-                )
-            for whitespace_column in ("whitespace_pct", "whitespace_only_pct"):
-                if whitespace_column in df.columns:
-                    df[whitespace_column] = pd.to_numeric(
-                        df[whitespace_column], errors="coerce"
-                    )
-
-            filter_box = st.container()
-            with filter_box:
-                st.subheader(ui_strings.PROFILE_FILTERS_SUBHEADER, anchor=False)
-                filter_cols = st.columns(4)
-                high_null = filter_cols[0].toggle(
-                    ui_strings.PROFILE_FILTER_HIGH_NULL, value=False
-                )
-                unique_candidates = filter_cols[1].toggle(
-                    ui_strings.PROFILE_FILTER_UNIQUE, value=False
-                )
-                low_cardinality = filter_cols[2].toggle(
-                    ui_strings.PROFILE_FILTER_LOW_CARD, value=False
-                )
-                whitespace_risk = filter_cols[3].toggle(
-                    ui_strings.PROFILE_FILTER_WHITESPACE, value=False
-                )
-                st.markdown(f"**{ui_strings.PROFILE_FILTER_SEMANTIC_LABEL}**")
-                semantic_cols = st.columns(7)
-                filter_identifiers = semantic_cols[0].checkbox(
-                    ui_strings.PROFILE_FILTER_SEMANTIC_IDENTIFIERS, value=False
-                )
-                filter_financial = semantic_cols[1].checkbox(
-                    ui_strings.PROFILE_FILTER_SEMANTIC_FINANCIAL, value=False
-                )
-                filter_instrument = semantic_cols[2].checkbox(
-                    ui_strings.PROFILE_FILTER_SEMANTIC_INSTRUMENT, value=False
-                )
-                filter_geo = semantic_cols[3].checkbox(
-                    ui_strings.PROFILE_FILTER_SEMANTIC_GEO, value=False
-                )
-                filter_contact = semantic_cols[4].checkbox(
-                    ui_strings.PROFILE_FILTER_SEMANTIC_CONTACT, value=False
-                )
-                filter_date_text = semantic_cols[5].checkbox(
-                    ui_strings.PROFILE_FILTER_SEMANTIC_DATE_TEXT, value=False
-                )
-                filter_ref_codes = semantic_cols[6].checkbox(
-                    ui_strings.PROFILE_FILTER_SEMANTIC_REFERENCE, value=False
-                )
-
-            save_enabled = bool(session and meta_db and meta_schema)
-            last_profile_summary_raw = st.session_state.get(
-                LAST_PROFILE_SUMMARY_STATE
-            )
-            if isinstance(last_profile_summary_raw, dict):
-                last_profile_summary = dict(last_profile_summary_raw)
-            elif last_profile_summary_raw is None:
-                last_profile_summary = None
-            else:
-                try:
-                    last_profile_summary = dict(last_profile_summary_raw)
-                except Exception:
-                    last_profile_summary = None
-
-            last_profile_rows_raw = st.session_state.get(
-                LAST_PROFILE_ROWS_STATE, []
-            )
-            if isinstance(last_profile_rows_raw, Sequence) and not isinstance(
-                last_profile_rows_raw, (str, bytes, bytearray)
-            ):
-                last_profile_rows = list(last_profile_rows_raw)
-            else:
-                last_profile_rows = []
-
-            has_last_profile_payload = (
-                last_profile_summary is not None and len(last_profile_rows) > 0
-            )
-
-            if not save_enabled:
-                st.session_state.pop(ui_keys.PROFILE_SAVE_TOGGLE, None)
-                st.session_state.pop(ui_keys.PROFILE_SAVE_TOGGLE_PREV, None)
-                st.session_state.pop(ui_keys.PROFILE_SAVE_RUN_ID, None)
-
-            save_help = (
-                ui_strings.PROFILE_SAVE_HELP_ENABLED
-                if save_enabled
-                else ui_strings.PROFILE_SAVE_HELP_DISABLED
-            )
-            save_disabled = (
-                (not save_enabled)
-                or busy_profiling
-                or busy_saving
-                or not has_last_profile_payload
-            )
-            save_toggle = st.toggle(
-                ui_strings.PROFILE_SAVE_LABEL,
-                key=ui_keys.PROFILE_SAVE_TOGGLE,
-                value=False,
-                disabled=save_disabled,
-                help=save_help,
-            )
-
-            prev_toggle = st.session_state.get(
-                ui_keys.PROFILE_SAVE_TOGGLE_PREV, False
-            )
-            st.session_state[ui_keys.PROFILE_SAVE_TOGGLE_PREV] = save_toggle
-
-            should_save_profile = (
-                save_toggle
-                and save_enabled
-                and not prev_toggle
-                and not busy_profiling
-                and not busy_saving
-                and has_last_profile_payload
-            )
-            if should_save_profile:
-                st.session_state["busy_saving"] = True
-                busy_saving = True
-                summary_payload = dict(last_profile_summary or {})
-                run_info = {**summary_payload}
-                target_table_value = st.session_state.get(
-                    LAST_PROFILE_TARGET_STATE
-                ) or run_info.get("target_table") or profile_result.get(
-                    "target_table"
-                )
-                if target_table_value:
-                    run_info["target_table"] = str(target_table_value)
-                top_n_value = st.session_state.get(LAST_PROFILE_TOP_N_STATE)
-                normalized_top_n = _safe_int(top_n_value)
-                if normalized_top_n is None:
-                    normalized_top_n = _safe_int(run_info.get("top_n"))
-                if normalized_top_n is not None:
-                    run_info["top_n"] = normalized_top_n
-                run_info.update(
-                    {
-                        "saved_at": datetime.utcnow().isoformat() + "Z",
-                    }
-                )
-                rows_payload: List[Dict[str, Any]] = []
-                for column_profile in last_profile_rows:
-                    if not isinstance(column_profile, dict):
-                        continue
-                    normalized_column = normalize_profile_row(
-                        dict(column_profile)
-                    )
-                    column_name = normalized_column.get("column_name")
-                    if not column_name:
-                        continue
-                    rows_payload.append(normalized_column)
-
-                if rows_payload and "columns" not in run_info:
-                    run_info["columns"] = len(rows_payload)
-
-                try:
-                    save_result = save_profile_results(
-                        session=session,
-                        meta_db=meta_db,
-                        meta_schema=meta_schema,
-                        run_info=run_info,
-                        rows=rows_payload,
-                    )
-                except Exception as exc:  # pragma: no cover - Snowflake specific
-                    st.error(ui_strings.PROFILE_SAVE_ERROR.format(error=exc))
-                else:
-                    if isinstance(save_result, dict):
-                        if not save_result.get("ok", False):
-                            error_text = save_result.get("error") or "Unknown error"
-                            st.error(
-                                ui_strings.PROFILE_SAVE_ERROR.format(
-                                    error=error_text
-                                )
-                            )
-                            run_id = ""
-                        else:
-                            run_id = str(save_result.get("run_id") or "")
-                    else:
-                        run_id = str(save_result)
-
-                    if run_id:
-                        st.session_state[ui_keys.PROFILE_SAVE_RUN_ID] = run_id
-                        st.success(
-                            ui_strings.PROFILE_SAVE_SUCCESS.format(run_id=run_id)
-                        )
-                finally:
-                    st.session_state["busy_saving"] = False
-                    busy_saving = False
-
-            if not save_toggle:
-                st.session_state.pop(ui_keys.PROFILE_SAVE_RUN_ID, None)
-
-            filtered_df = df.copy()
-            if high_null:
-                filtered_df = filtered_df[(filtered_df["null_pct"].fillna(0) > 0.20)]
-            if unique_candidates and summary.get("rows_profiled"):
-                rows = float(summary["rows_profiled"])
-                filtered_df = filtered_df[
-                    (filtered_df["distincts"].fillna(0) >= rows)
-                    & (filtered_df["nulls"].fillna(0) == 0)
-                ]
-            if low_cardinality and summary.get("rows_profiled"):
-                rows = float(summary["rows_profiled"])
-                filtered_df = filtered_df[
-                    (filtered_df["distincts"].fillna(rows) <= max(20, rows * 0.1))
-                ]
-            if whitespace_risk:
-                filtered_df = filtered_df[(filtered_df["whitespace_pct"].fillna(0) > 5)]
-
-            semantic_filter_map = {
-                "Identifiers": {
-                    "ACCOUNT_ID",
-                    "ORDER_ID",
-                    "TRADE_ID",
-                    "UUID",
-                    "IBAN",
-                    "REF_CODE",
-                },
-                "Financial": {"PRICE/AMOUNT/QUANTITY", "IBAN", "BIC"},
-                "Instrument": {"ISIN", "TICKER/SYMBOL"},
-                "Geo": {"COUNTRY_CODE/NAME", "CURRENCY_CODE", "BIC"},
-                "Contact": {"EMAIL", "PHONE"},
-                "Date (Text)": {"DATE_IN_TEXT"},
-                "Reference Codes": {"REF_CODE"},
-            }
-            active_semantic_filters: List[str] = []
-            if filter_identifiers:
-                active_semantic_filters.append("Identifiers")
-            if filter_financial:
-                active_semantic_filters.append("Financial")
-            if filter_instrument:
-                active_semantic_filters.append("Instrument")
-            if filter_geo:
-                active_semantic_filters.append("Geo")
-            if filter_contact:
-                active_semantic_filters.append("Contact")
-            if filter_date_text:
-                active_semantic_filters.append("Date (Text)")
-            if filter_ref_codes:
-                active_semantic_filters.append("Reference Codes")
-
-            if active_semantic_filters:
-                filtered_df = filtered_df[
-                    filtered_df["semantic_type"].isin(
-                        set().union(
-                            *[
-                                semantic_filter_map.get(name, set())
-                                for name in active_semantic_filters
-                            ]
-                        )
-                    )
-                ]
-
-            grid_columns = ["Include"] + [
-                column
-                for column in ui_strings.PROFILE_GRID_COLUMNS
-                if column != "Select"
-            ]
-            confidence_legend_html = ui_strings.PROFILE_CONFIDENCE_LEGEND_HTML
-
-            def _confidence_badge_emoji(value: Optional[float]) -> str:
-                if value is None:
-                    return ""
-                if value >= CONFIDENCE_HIGH_THRESHOLD:
-                    return "🟢"
-                if value >= CONFIDENCE_MEDIUM_THRESHOLD:
-                    return "🟡"
-                return "🔴"
-
-            def _format_confidence_display(value):
-                if value is None or (
-                    isinstance(value, float) and math.isnan(value)
-                ):
-                    return ""
-                v = float(value)
-                if v < 10.0:
-                    s = f"{v:.1f}".rstrip("0").rstrip(".")
-                else:
-                    s = f"{v:.0f}"
-                badge = _confidence_badge_emoji(v)
-                return f"{badge} {s}%".strip()
-
-            def _confidence_style(value):
-                if value is None or (
-                    isinstance(value, float) and math.isnan(value)
-                ):
-                    return ""
-                v = float(value)
-                if v >= CONFIDENCE_HIGH_THRESHOLD:
-                    return "background-color: #2e7d32; color: #ffffff;"
-                if v >= CONFIDENCE_MEDIUM_THRESHOLD:
-                    return "background-color: #f9a825; color: #000000;"
-                return "background-color: #9e9e9e; color: #ffffff;"
-
-            selected_columns_from_grid: List[str] = []
-
-            if not filtered_df.empty:
-                def _is_string_type_name(type_name: Any) -> bool:
-                    upper = str(type_name or "").upper()
-                    return any(
-                        token in upper
-                        for token in ("CHAR", "STRING", "TEXT", "VARCHAR")
-                    )
-
-                def _is_numeric_type_name(type_name: Any) -> bool:
-                    upper = str(type_name or "").upper()
-                    return any(
-                        token in upper
-                        for token in (
-                            "NUMBER",
-                            "NUMERIC",
-                            "DECIMAL",
-                            "INT",
-                            "INTEGER",
-                            "BIGINT",
-                            "SMALLINT",
-                            "TINYINT",
-                            "BYTEINT",
-                            "FLOAT",
-                            "DOUBLE",
-                            "REAL",
-                        )
-                    )
-
-                def _format_count_with_pct(
-                    count_value: Any, pct_value: Any
-                ) -> str:
-                    count_int = _safe_int(count_value)
-                    pct_ratio = _safe_float(pct_value)
-                    if count_int is None and pct_ratio is None:
-                        return "—"
-                    parts: List[str] = []
-                    if count_int is not None:
-                        parts.append(f"{count_int:,}")
-                    if pct_ratio is not None:
-                        pct_value = max(0.0, pct_ratio * 100.0)
-                        parts.append(f"({pct_value:.1f}%)")
-                    return " ".join(parts) if parts else "—"
-
-                def _format_length_stats_cell(row: pd.Series) -> str:
-                    data_type = row.get("data_type")
-                    if not (
-                        _is_string_type_name(data_type)
-                        or _is_numeric_type_name(data_type)
-                    ):
-                        return "—"
-
-                    len_min_value = _safe_float(row.get("len_min"))
-                    avg_value = _safe_float(row.get("avg_len"))
-                    len_max_value = _safe_float(row.get("len_max"))
-
-                    def _fmt_bound(value: Optional[float]) -> str:
-                        if value is None:
-                            return "—"
-                        try:
-                            return f"{int(round(value))}"
-                        except Exception:
-                            return "—"
-
-                    min_display = _fmt_bound(len_min_value)
-                    avg_display = f"{avg_value:.1f}" if avg_value is not None else "—"
-                    max_display = _fmt_bound(len_max_value)
-
-                    return "/".join([min_display, avg_display, max_display])
-
-                def _format_value_cell(raw_value: Any) -> str:
-                    text_value = _stringify_for_display(raw_value)
-                    if text_value is None:
-                        return "—"
-                    text = str(text_value).strip()
-                    if not text or text.lower() == "nan":
-                        return "—"
-                    if len(text) > 50:
-                        return text[:47] + "..."
-                    return text
-
-                def _format_semantic_label(value: Any) -> str:
-                    if value is None:
-                        return "Unknown"
-                    text_value = str(value).strip()
-                    if not text_value:
-                        return "Unknown"
-                    normalized = text_value.replace("_", " ")
-                    return normalized.title()
-
-                def _format_whitespace_display(value: Any) -> str:
-                    numeric = _safe_float(value)
-                    if numeric is None or math.isclose(
-                        numeric, 0.0, abs_tol=1e-9
-                    ):
-                        return "—"
-                    return f"{numeric:.1f}%"
-
-                def _compose_note(row: pd.Series) -> str:
-                    text_value = _stringify_for_display(row.get("dq_reason"))
-                    if not text_value:
-                        text_value = _stringify_for_display(row.get("rationale"))
-                    if not text_value:
-                        text_value = _stringify_for_display(row.get("error"))
-                    note = str(text_value or "").strip()
-                    if len(note) > 120:
-                        return note[:117] + "..."
-                    return note
-
-                display_df_local = filtered_df.copy()
-                for dup in [
-                    c
-                    for c in display_df_local.columns
-                    if c and c.strip().lower() in {"include", "include "}
-                ]:
-                    display_df_local.drop(columns=[dup], inplace=True, errors="ignore")
-                display_df_local["Column"] = (
-                    display_df_local.get("column_name", "").fillna("").astype(str)
-                )
-                display_df_local["Physical Type"] = (
-                    display_df_local.get("data_type", "").fillna("").astype(str)
-                )
-                display_df_local["Nulls"] = display_df_local.apply(
-                    lambda row: _format_count_with_pct(
-                        row.get("nulls"), row.get("null_pct")
-                    ),
-                    axis=1,
-                )
-                display_df_local["Distinct"] = display_df_local.apply(
-                    lambda row: _format_count_with_pct(
-                        row.get("distincts"), row.get("distinct_pct")
-                    ),
-                    axis=1,
-                )
-                display_df_local["Avg Length"] = display_df_local.apply(
-                    _format_length_stats_cell, axis=1
-                )
-                display_df_local["Min Value"] = display_df_local["min_val"].apply(
-                    _format_value_cell
-                )
-                display_df_local["Max Value"] = display_df_local["max_val"].apply(
-                    _format_value_cell
-                )
-                display_df_local["Guessed Type"] = display_df_local[
-                    "semantic_type"
-                ].apply(_format_semantic_label)
-                display_df_local["Whitespace %"] = display_df_local[
-                    "whitespace_pct"
-                ].apply(_format_whitespace_display)
-
-                def _normalize_confidence(
-                    raw_value: Any
-                ) -> Optional[float]:
-                    confidence_raw = _safe_float(raw_value)
-                    if confidence_raw is None:
-                        return None
-                    if confidence_raw <= 1.0:
-                        confidence_raw *= 100.0
-                    confidence_raw = max(0.0, min(confidence_raw, 100.0))
-                    return confidence_raw
-
-                display_df_local["_confidence_pct"] = display_df_local[
-                    "confidence"
-                ].apply(_normalize_confidence)
-                display_df_local["Note"] = display_df_local.apply(
-                    _compose_note, axis=1
-                )
-                confidence_numeric = pd.to_numeric(
-                    display_df_local["_confidence_pct"], errors="coerce"
-                ).clip(lower=0.0, upper=100.0)
-                display_df_local["Confidence"] = confidence_numeric
-                records = display_df_local.to_dict("records")
-                grid_container = st.container()
-                with grid_container:
-                    st.markdown(confidence_legend_html, unsafe_allow_html=True)
-                    grid_df: Optional[pd.DataFrame] = None
-                    if records:
-                        include_values: List[bool] = []
-                        record_column_names: List[str] = []
-                        for record in records:
-                            column_label = str(record.get("Column") or "")
-                            column_name_raw = record.get("column_name")
-                            resolved_name = str(
-                                column_name_raw
-                                if column_name_raw not in (None, "")
-                                else column_label
-                            )
-                            column_name = resolved_name.strip() or resolved_name
-                            include_default = bool(
-                                include_selection.get(column_name, False)
-                            )
-                            include_values.append(include_default)
-                            record_column_names.append(column_name)
-
-                        if include_values:
-                            display_df_local.insert(0, "Include", include_values)
-                        display_df_local["Include"] = (
-                            display_df_local["Include"].fillna(False).astype(bool)
-                        )
-                        grid_df = display_df_local[grid_columns].copy()
-                        grid_render_allowed = _validate_grid_columns(
-                            grid_df.columns,
-                            grid_columns,
-                            ui_strings.PROFILE_GRID_NAME,
-                        )
-                        if grid_render_allowed:
-                            grid_df["Include"] = (
-                                grid_df["Include"].fillna(False).astype(bool)
-                            )
-                            grid_df["Confidence"] = grid_df["Confidence"].apply(
-                                _safe_float
-                            )
-                            grid_df_formatted = grid_df.copy()
-                            grid_df_formatted["Confidence"] = grid_df_formatted[
-                                "Confidence"
-                            ].apply(_format_confidence_display)
-                            disabled_columns = [
-                                column_name
-                                for column_name in grid_columns
-                                if column_name != "Include"
-                            ]
-                            edited_df = st.data_editor(
-                                grid_df_formatted,
-                                hide_index=True,
-                                use_container_width=True,
-                                column_config={"Include": {"editable": True}},
-                                disabled=disabled_columns,
-                            )
-                            _warn_invalid_include_column(
-                                grid_df, "profile_results_grid"
-                            )
-                            if edited_df is not None:
-                                include_series = edited_df.get("Include")
-                                if include_series is not None:
-                                    updated_selection = dict(include_selection)
-                                    selected_columns_from_grid = []
-                                    for column_name, include_flag in zip(
-                                        record_column_names,
-                                        include_series.tolist(),
-                                    ):
-                                        updated_selection[column_name] = bool(
-                                            include_flag
-                                        )
-                                        if bool(include_flag):
-                                            selected_columns_from_grid.append(
-                                                column_name
-                                            )
-                                    st.session_state[
-                                        PROFILE_INCLUDE_COLS_STATE
-                                    ] = updated_selection
-                                    include_selection = updated_selection
-                        else:
-                            grid_df = None
-
-                selection_counts = _sync_profile_selection(
-                    profile_result, include_selection
-                )
-                st.session_state[ui_keys.PROFILE_SELECTION_COUNTS] = (
-                    selection_counts
-                )
-
-                st.caption(
-                    ui_strings.PROFILE_SELECTION_STATUS.format(
-                        selected=int(selection_counts[0]),
-                        total=int(selection_counts[1]),
-                    )
-                )
-
-                display_df_local = display_df_local.rename(
-                    columns={"Include": "Select"}
-                )
-                display_df_local = display_df_local[
-                    [
-                        "Select",
-                        "Column",
-                        "Physical Type",
-                        "Nulls",
-                        "Distinct",
-                        "Avg Length",
-                        "Min Value",
-                        "Max Value",
-                        "Whitespace %",
-                        "Guessed Type",
-                        "Confidence",
-                        "Note",
-                    ]
-                ]
-                st.dataframe(
-                    display_df_local,
-                    use_container_width=True,
-                    height=min(600, 100 + 35 * len(display_df_local)),
-                )
-
-            else:
-                empty_df = pd.DataFrame(
-                    columns=[
-                        "Include",
-                        "Column",
-                        "Physical Type",
-                        "Nulls",
-                        "Distinct",
-                        "Avg Length",
-                        "Min Value",
-                        "Max Value",
-                        "Whitespace %",
-                        "Guessed Type",
-                        "Confidence",
-                        "Note",
-                    ]
-                )
-                disabled_columns = [
-                    column_name
-                    for column_name in grid_columns
-                    if column_name != "Include"
-                ]
-                st.data_editor(
-                    empty_df,
-                    hide_index=True,
-                    use_container_width=True,
-                    column_config={"Include": {"editable": True}},
-                    disabled=disabled_columns,
-                )
-                _warn_invalid_include_column(
-                    empty_df, "profile_results_grid_empty"
-                )
-
-            if suggest_cfg_pressed and profile_result:
-                if not selected_columns_from_grid:
-                    st.warning(ui_strings.PROFILE_SUGGEST_WARNING_EMPTY)
-                else:
-                    _load_suggestion(
-                        profile_result,
-                        ui_strings.PROFILE_SUGGEST_SUCCESS,
-                        only_columns=set(selected_columns_from_grid),
-                    )
-
-            if filtered_df.empty:
-                st.info(ui_strings.PROFILE_INFO_NO_FILTER_RESULTS)
-
-            st.subheader(ui_strings.PROFILE_TOP_VALUES_SUBHEADER, anchor=False)
-            for _, row in filtered_df.iterrows():
-                values = row.get("top_values", [])
-                non_nulls_value = _safe_int(row.get("non_nulls"))
-                label_suffix = f"{len(values)} values"
-                with st.expander(f"{row['column_name']} ({label_suffix})"):
-                    if not values:
-                        if non_nulls_value is not None and non_nulls_value <= 0:
-                            st.info(ui_strings.PROFILE_INFO_NO_NON_NULL_VALUES)
-                        else:
-                            st.info(ui_strings.PROFILE_INFO_NO_VALUES)
-                        continue
-
-                    tv_df = pd.DataFrame(values)
-                    if tv_df.empty:
-                        if non_nulls_value is not None and non_nulls_value <= 0:
-                            st.info(ui_strings.PROFILE_INFO_NO_NON_NULL_VALUES)
-                        else:
-                            st.info(ui_strings.PROFILE_INFO_NO_VALUES)
-                        continue
-
-                    rename_map: Dict[Any, str] = {}
-                    value_column_name: Optional[str] = None
-                    count_column_name: Optional[str] = None
-                    for candidate in tv_df.columns:
-                        lowered = str(candidate).lower()
-                        if lowered in {"value", "val", "values"} and value_column_name is None:
-                            value_column_name = candidate
-                        if lowered in {"count", "cnt"} and count_column_name is None:
-                            count_column_name = candidate
-                    if value_column_name is not None:
-                        rename_map[value_column_name] = "Value"
-                    if count_column_name is not None:
-                        rename_map[count_column_name] = "Count"
-                    if rename_map:
-                        tv_df = tv_df.rename(columns=rename_map)
-                        if value_column_name is not None:
-                            value_column_name = "Value"
-                        if count_column_name is not None:
-                            count_column_name = "Count"
-
-                    pct_columns = [
-                        col
-                        for col in tv_df.columns
-                        if "pct" in str(col).lower()
-                    ]
-                    value_column_name = value_column_name or (
-                        "Value" if "Value" in tv_df.columns else None
-                    )
-                    count_column_name = count_column_name or (
-                        "Count" if "Count" in tv_df.columns else None
-                    )
-
-                    if value_column_name and value_column_name not in tv_df.columns:
-                        tv_df[value_column_name] = tv_df.index.astype(str)
-                    if count_column_name and count_column_name not in tv_df.columns:
-                        tv_df[count_column_name] = 0
-
-                    total_empty = 0
-                    if value_column_name and value_column_name in tv_df.columns:
-                        empty_mask = tv_df[value_column_name].isna() | (
-                            tv_df[value_column_name].astype(str).str.strip() == ""
-                        )
-                        total_empty = int(empty_mask.sum())
-
-                    if PROFILE_TOP_VALUES_NULLS and value_column_name:
-                        tv_df[value_column_name] = tv_df[value_column_name].replace(
-                            {None: "__NULL__"}
-                        )
-
-                    if total_empty > 0 and value_column_name:
-                        if count_column_name and count_column_name in tv_df.columns:
-                            count_series = tv_df[count_column_name]
-                            if count_series.dtype.kind in {"i", "u", "f"}:
-                                tv_df.loc[empty_mask, count_column_name] = count_series.loc[
-                                    empty_mask
-                                ].fillna(0).astype(float)
-                        new_row = {col: None for col in tv_df.columns}
-                        new_row[value_column_name] = "__EMPTY__"
-                        new_row[count_column_name] = total_empty
-                        if pct_columns:
-                            denom_raw = non_nulls_value
-                            if denom_raw is None or denom_raw <= 0:
-                                pct_value = 0.0
-                            else:
-                                pct_value = (float(total_empty) / float(denom_raw)) * 100.0
-                            for pct_col in pct_columns:
-                                new_row[pct_col] = pct_value
-                        tv_df = pd.concat(
-                            [tv_df, pd.DataFrame([new_row])], ignore_index=True
-                        )
-
-                    if value_column_name and value_column_name in tv_df.columns:
-                        null_bucket_mask = tv_df[value_column_name] == "__NULL__"
-                        if null_bucket_mask.any():
-                            tv_df = tv_df.loc[~null_bucket_mask].copy()
-                        tv_df = tv_df.loc[~tv_df[value_column_name].isna()].copy()
-                        if PROFILE_TOP_VALUES_NULLS:
-                            tv_df[value_column_name] = tv_df[value_column_name].replace(
-                                {"__EMPTY__": '"" (empty/whitespace)'}
-                            )
-
-                    if tv_df.empty:
-                        if non_nulls_value is not None and non_nulls_value <= 0:
-                            st.info(ui_strings.PROFILE_INFO_NO_NON_NULL_VALUES)
-                        else:
-                            st.info(ui_strings.PROFILE_INFO_NO_VALUES)
-                        continue
-
-                    for pct_col in pct_columns:
-                        tv_df[pct_col] = tv_df[pct_col].apply(_safe_float)
-                        tv_df[pct_col] = tv_df[pct_col].apply(
-                            lambda x: None if x is None else min(100.0, max(0.0, x))
-                        )
-
-                    nulls = _safe_int(row.get("nulls"))
-                    row_cnt = _safe_int(row.get("row_cnt"))
-                    null_pct = _safe_float(row.get("null_pct"))
-                    is_all_null = False
-                    if nulls is not None and row_cnt is not None and row_cnt > 0:
-                        is_all_null = nulls >= row_cnt
-                    if not is_all_null and null_pct is not None:
-                        if math.isclose(null_pct, 1.0, rel_tol=1e-9) or math.isclose(
-                            null_pct, 100.0, rel_tol=1e-9
-                        ):
-                            is_all_null = True
-
-                    if is_all_null and value_column_name in tv_df.columns:
-                        value_series = tv_df[value_column_name]
-                        null_mask = value_series.isna()
-                        if null_mask.any():
-                            tv_df = tv_df[null_mask].head(1).copy()
-                        else:
-                            tv_df = tv_df.head(1).copy()
-
-                    if count_column_name and count_column_name in tv_df.columns:
-                        tv_df[count_column_name] = tv_df[count_column_name].apply(
-                            _format_count
-                        )
-                    for col in tv_df.columns:
-                        if count_column_name and col == count_column_name:
-                            continue
-                        if value_column_name and col == value_column_name:
-                            tv_df[col] = tv_df[col].apply(_format_top_value_cell)
-                        else:
-                            tv_df[col] = tv_df[col].apply(_stringify_for_display)
-                        if "pct" in col.lower():
-                            tv_df[col] = tv_df[col].apply(_format_percentage)
-
-                    st.table(tv_df)
-
-            st.session_state[ui_keys.PROFILE_RESULTS_STATE] = profile_result
-
-            return profile_result
-
-        profile_result = _render_profile_results_from_session(
-            include_selection,
-            inline_error_placeholder,
-            busy_profiling=busy_profiling,
-            suggest_cfg_pressed=suggest_cfg_pressed,
-        )
-
-        if not profile_result and not DEBUG_PROFILING:
             return
 
+    placeholder.success(
+        ui_strings.PROFILE_V2_RUN_SUCCESS.format(table=table_fqn)
+    )
 
-        if DEBUG_PROFILING:
-            if profile_result:
-                with st.expander(ui_strings.PROFILE_DEBUG_PAYLOAD_TITLE, expanded=False):
-                    st.json(profile_result)
-                include_snapshot = st.session_state.get(PROFILE_INCLUDE_COLS_STATE)
-                if include_snapshot:
-                    with st.expander(
-                        ui_strings.PROFILE_DEBUG_INCLUDE_MAP_TITLE, expanded=False
-                    ):
-                        st.write(include_snapshot)
 
-            diagnostics_response = profile_list_response or list_saved_profiles(
-                current_table_fqn
-            )
-            if not isinstance(diagnostics_response, dict):
-                diagnostics_response = {}
-            store_verification = verify_profiles_store()
-            store_ok = bool(store_verification.get("ok"))
-            store_err = store_verification.get("err")
-            store_fqn = store_verification.get("fqn") or PROFILES_TABLE_FQN
+def _load_metadata(session: Any, table_fqn: str) -> Dict[str, Any]:
+    """Fetch summary, features, classifications, suggestions, and runs."""
 
-            debug_info = diagnostics_response.get("debug")
-            canonical_fqn = ""
-            if isinstance(debug_info, dict):
-                canon_value = debug_info.get("canon")
-                if canon_value:
-                    canonical_fqn = str(canon_value)
+    payload = {
+        "summary": profiling_v2.fetch_table_summary(session, table_fqn),
+        "features": profiling_v2.fetch_column_features(session, table_fqn),
+        "classifications": profiling_v2.fetch_column_classifications(
+            session, table_fqn
+        ),
+        "suggestions": profiling_v2.fetch_suggested_checks(session, table_fqn),
+        "runs": profiling_v2.fetch_recent_runs(session, table_fqn),
+    }
+    return payload
 
-            if not canonical_fqn:
-                canon_source = editor_target_fqn or current_table_fqn
-                if canon_source:
-                    try:
-                        canon_candidate = _canon_fqn(str(canon_source))
-                    except Exception:  # pragma: no cover - defensive fallback
-                        canon_candidate = ""
-                    if canon_candidate:
-                        canonical_fqn = str(canon_candidate)
 
-            with st.expander("Debug · Profiling Diagnostics", expanded=False):
-                st.caption(f"🧩 build={build_sha()} time={build_time()}")
-                debug_fqn_override = st.text_input(
-                    "DB.SCHEMA.TABLE",
-                    key="profile_debug_fqn_override",
-                    placeholder="DB.SCHEMA.TABLE",
-                )
-                if st.button("Set FQN", key="profile_debug_set_fqn"):
-                    val = (debug_fqn_override or "").replace("\"", "").strip().upper()
-                    if val.count(".") == 2:
-                        st.session_state["editor_target_fqn"] = val
-                        logging.info("debug:set_fqn %s", val)
-                if render_inputs is not None:
-                    st.text(json.dumps(render_inputs, sort_keys=True, separators=(",", ": ")))
-                if DEBUG_PROFILING:
-                    st.caption(
-                        f"last_error={st.session_state.get('profiling_last_error')}"
-                    )
-                last_error = st.session_state.get("profiling_last_error")
-                if last_error:
-                    st.text(f"last_error: {last_error}")
-                    last_error_trace = st.session_state.get("profiling_last_error_trace")
-                    if last_error_trace:
-                        st.code(last_error_trace, language="text")
-
-                st.text(f"editor_target_fqn: {str(editor_target_fqn or '')}")
-                st.text(f"canonical_fqn: {canonical_fqn}")
-                st.text(f"store_fqn: {store_fqn}")
-                st.write({"store_ok": store_ok, "store_err": store_err})
-
-                items = list(diagnostics_response.get("items") or [])
-                summary: Dict[str, Any] = {
-                    "ok": bool(diagnostics_response.get("ok")),
-                    "items_len": len(items),
-                    "err": diagnostics_response.get("err"),
-                }
-                st.write(summary)
-
-                if isinstance(debug_info, dict):
-                    debug_summary: Dict[str, Any] = {}
-                    if "total_rows" in debug_info:
-                        debug_summary["total_rows"] = debug_info.get("total_rows")
-                    if "canon" in debug_info:
-                        debug_summary["canon"] = debug_info.get("canon")
-                    if debug_summary:
-                        st.write(debug_summary)
-
-                    raw_samples = debug_info.get("samples")
-                    if not raw_samples:
-                        raw_samples = debug_info.get("table_fqn_samples")
-
-                    sample_rows: List[Dict[str, Any]] = []
-                    if isinstance(raw_samples, dict):
-                        raw_samples = list(raw_samples.values())
-                    if isinstance(raw_samples, Sequence) and not isinstance(
-                        raw_samples, (str, bytes, bytearray)
-                    ):
-                        for sample in raw_samples:
-                            if isinstance(sample, dict):
-                                sample_value = sample.get("table_fqn") or sample.get("value")
-                            else:
-                                sample_value = sample
-                            if sample_value is None:
-                                continue
-                            sample_rows.append({"table_fqn": str(sample_value)})
-
-                    if sample_rows:
-                        st.caption("Sample saved profile table FQNs")
-                        st.table(pd.DataFrame(sample_rows))
-
-                if not store_ok:
-                    missing_message = "Profiles store missing or inaccessible"
-                    if store_err:
-                        missing_message = f"{missing_message}: {store_err}"
-                    st.warning(missing_message)
-
-                if summary["ok"]:
-                    if items:
-                        preview_rows = [
-                            {
-                                "id": item.get("id"),
-                                "name": item.get("name"),
-                                "created_at_iso": item.get("created_at_iso"),
-                                "table_fqn": item.get("table_fqn"),
-                            }
-                            for item in items[:5]
-                        ]
-                        if preview_rows:
-                            st.table(pd.DataFrame(preview_rows))
-                    elif store_ok:
-                        st.info("Store exists; likely FQN mismatch or no profiles saved yet.")
-                    else:
-                        st.info("No items returned for this FQN")
-    except Exception as e:
-        logging.exception("profile_view:unhandled")
-        st.session_state["profiling_last_error"] = f"{type(e).__name__}: {e}"
-        st.write("")
+def _render_summary(summary: Dict[str, Any]) -> None:
+    st.subheader(ui_strings.PROFILE_V2_SUMMARY_SUBHEADER)
+    if not summary:
+        st.info(ui_strings.PROFILE_V2_SUMMARY_EMPTY)
         return
+
+    rows = _first_value(summary, ("ROW_COUNT", "ROWS_PROFILED", "ROW_CNT"))
+    sample_pct = _first_value(
+        summary,
+        ("SAMPLE_PERCENT", "SAMPLE_PCT", "SAMPLE_RATIO"),
+    )
+    duration = _first_value(summary, ("DURATION_SECONDS", "DURATION_SEC"))
+    profiled_at = _first_value(
+        summary,
+        ("PROFILED_AT", "UPDATED_AT", "RUN_TS", "LAST_PROFILED_AT"),
+    )
+
+    cols = st.columns(3)
+    cols[0].metric(
+        ui_strings.PROFILE_V2_SUMMARY_ROWS,
+        _format_number(rows) if rows is not None else ui_strings.PROFILE_V2_VALUE_UNKNOWN,
+    )
+    cols[1].metric(
+        ui_strings.PROFILE_V2_SUMMARY_SAMPLE,
+        _format_percent(sample_pct),
+    )
+    cols[2].metric(
+        ui_strings.PROFILE_V2_SUMMARY_DURATION,
+        _format_duration(duration),
+        help=ui_strings.PROFILE_V2_SUMMARY_TIMESTAMP.format(
+            timestamp=profiled_at or ui_strings.PROFILE_V2_VALUE_UNKNOWN
+        ),
+    )
+
+
+def _render_results_tabs(payload: Dict[str, Any]) -> None:
+    tabs = st.tabs(
+        [
+            ui_strings.PROFILE_V2_TAB_FEATURES,
+            ui_strings.PROFILE_V2_TAB_CLASSIFICATION,
+            ui_strings.PROFILE_V2_TAB_SUGGESTIONS,
+            ui_strings.PROFILE_V2_TAB_RUNS,
+        ]
+    )
+
+    with tabs[0]:
+        _render_features(payload.get("features"))
+    with tabs[1]:
+        _render_classification(payload.get("classifications"))
+    with tabs[2]:
+        _render_suggestions(payload.get("suggestions"))
+    with tabs[3]:
+        _render_runs(payload.get("runs"))
+
+
+def _render_features(df: pd.DataFrame | None) -> None:
+    st.subheader(ui_strings.PROFILE_V2_FEATURES_SUBHEADER)
+    if df is None or df.empty:
+        st.info(ui_strings.PROFILE_V2_FEATURES_EMPTY)
+        return
+
+    formatted = df.copy()
+    for col in ("NULL_RATIO", "DISTINCT_RATIO", "WHITESPACE_RATIO"):
+        if col in formatted.columns:
+            formatted[col] = formatted[col].apply(_format_percent)
+    formatted = formatted.rename(
+        columns={
+            "COLUMN_NAME": "Column",
+            "PHYSICAL_TYPE": "Physical Type",
+            "NULL_RATIO": "Null %",
+            "DISTINCT_RATIO": "Distinct %",
+            "WHITESPACE_RATIO": "Whitespace %",
+            "AVG_LENGTH": "Avg Length",
+            "MIN_VALUE": "Min Value",
+            "MAX_VALUE": "Max Value",
+            "SAMPLE_PATTERNS": "Sample Patterns",
+        }
+    )
+    st.dataframe(formatted, use_container_width=True, hide_index=True)
+
+
+def _render_classification(df: pd.DataFrame | None) -> None:
+    st.subheader(ui_strings.PROFILE_V2_CLASSIFICATION_SUBHEADER)
+    if df is None or df.empty:
+        st.info(ui_strings.PROFILE_V2_CLASSIFICATION_EMPTY)
+        return
+
+    formatted = df.copy()
+    if "CONFIDENCE" in formatted.columns:
+        formatted["CONFIDENCE"] = formatted["CONFIDENCE"].apply(_format_percent)
+    formatted = formatted.rename(
+        columns={
+            "COLUMN_NAME": "Column",
+            "CONTENT_TYPE": "Content Type",
+            "SEMANTIC_ROLE": "Semantic Role",
+            "SOURCE": "Source",
+            "CONFIDENCE": "Confidence",
+        }
+    )
+    st.dataframe(formatted, use_container_width=True, hide_index=True)
+
+
+def _render_suggestions(df: pd.DataFrame | None) -> None:
+    st.subheader(ui_strings.PROFILE_V2_SUGGESTIONS_SUBHEADER)
+    if df is None or df.empty:
+        st.info(ui_strings.PROFILE_V2_SUGGESTIONS_EMPTY)
+        return
+
+    formatted = df.copy()
+    formatted = formatted.rename(
+        columns={
+            "COLUMN_NAME": "Column",
+            "CHECK_TYPE": "Check Type",
+            "PARAMETERS": "Parameters",
+            "RATIONALE": "Rationale",
+            "PRIORITY": "Priority",
+        }
+    )
+    st.dataframe(formatted, use_container_width=True, hide_index=True)
+
+
+def _render_runs(df: pd.DataFrame | None) -> None:
+    st.subheader(ui_strings.PROFILE_V2_RUNS_SUBHEADER)
+    if df is None or df.empty:
+        st.info(ui_strings.PROFILE_V2_RUNS_EMPTY)
+        return
+
+    formatted = df.copy()
+    for col in ("SAMPLE_PERCENT",):
+        if col in formatted.columns:
+            formatted[col] = formatted[col].apply(_format_percent)
+    formatted = formatted.rename(
+        columns={
+            "RUN_ID": "Run ID",
+            "PROFILED_AT": "Profiled At",
+            "ROW_COUNT": "Rows",
+            "SAMPLE_PERCENT": "Sample %",
+            "STATUS": "Status",
+            "DURATION_SECONDS": "Duration (s)",
+        }
+    )
+    st.dataframe(formatted, use_container_width=True, hide_index=True)
+
+
+def _first_value(summary: Dict[str, Any], keys) -> Any:
+    for key in keys:
+        if key in summary and summary[key] is not None:
+            return summary[key]
+    return None
+
+
+def _format_number(value: Any) -> str:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return ui_strings.PROFILE_V2_VALUE_UNKNOWN
+    return f"{number:,.0f}"
+
+
+def _format_percent(value: Any) -> str:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return ui_strings.PROFILE_V2_VALUE_UNKNOWN
+    if number <= 1:
+        number *= 100
+    return f"{number:.1f}%"
+
+
+def _format_duration(value: Any) -> str:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return ui_strings.PROFILE_V2_VALUE_UNKNOWN
+    return f"{number:.2f}s"

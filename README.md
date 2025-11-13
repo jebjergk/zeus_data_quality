@@ -32,7 +32,7 @@ Zeus Data Quality brings monitoring, profiling, and remediation workflows direct
 - **Scheduled tasks** (`DQ_TASK_<CONFIG_ID>`) call `DQ_RUN_CONFIG(VARCHAR)` each morning at 08:00 Europe/Berlin.
 
 ### Modules and services
-- **Profiling** (`services/profiling`, `utils/profile_rules.py`): Computes statistics, semantic tags, and recommendations.
+- **Profiling** (`services/profiling_v2`, `views/profile_view`): Calls `DQ_PROFILE_FULL`, surfaces profiling metadata, and highlights suggested checks.
 - **Semantics** (`services/semantics`, `views/semantics`): Manages business rules and DMF-backed failure surfacing.
 - **Scheduling** (`services/scheduler`, `sql/CREATE_RESULTS_AND_SP.SQL`): Creates tasks and deploys stored procedures.
 - **Shared utilities** (`utils`, `tools`): Cover Snowflake connectivity, logging, migrations, and snapshot mirroring.

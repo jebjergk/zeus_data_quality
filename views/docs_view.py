@@ -26,6 +26,7 @@ from typing import Tuple
 
 import streamlit as st
 
+from services import profiling_v2
 from utils.meta import _q
 
 from ui import strings as ui_strings
@@ -96,10 +97,22 @@ def render_docs(
     ) = _sanitize_graph_label(proc_name)
 
     profile_run_node, profile_run_label = _sanitize_graph_label(
-        f"{metadata_db}.{metadata_schema}.DQ_PROFILE_RUN"
+        f"{profiling_v2.DISCOVERY_NAMESPACE}.DQ_PROFILE_RUN"
     )
-    profile_col_node, profile_col_label = _sanitize_graph_label(
-        f"{metadata_db}.{metadata_schema}.DQ_PROFILE_COLUMN"
+    profile_summary_node, profile_summary_label = _sanitize_graph_label(
+        f"{profiling_v2.DISCOVERY_NAMESPACE}.DQ_TABLE_PROFILE_SUMMARY"
+    )
+    profile_features_node, profile_features_label = _sanitize_graph_label(
+        f"{profiling_v2.DISCOVERY_NAMESPACE}.DQ_COLUMN_FEATURES"
+    )
+    profile_class_node, profile_class_label = _sanitize_graph_label(
+        f"{profiling_v2.DISCOVERY_NAMESPACE}.DQ_COLUMN_CLASSIFICATION"
+    )
+    profile_suggest_node, profile_suggest_label = _sanitize_graph_label(
+        f"{profiling_v2.DISCOVERY_NAMESPACE}.DQ_SUGGESTED_CHECKS"
+    )
+    profile_proc_node, profile_proc_label = _sanitize_graph_label(
+        profiling_v2.PROFILE_PROC
     )
 
     with tabs[0]:
@@ -233,29 +246,47 @@ digraph G {{
         {cfg_tbl_node} [label="{cfg_tbl_label}", fillcolor="#eef2ff", color="#c7d2fe"];
         {chk_tbl_node} [label="{chk_tbl_label}", fillcolor="#eef2ff", color="#c7d2fe"];
         {run_tbl_node} [label="{run_tbl_label}", fillcolor="#eef2ff", color="#c7d2fe"];
-        {profile_run_node} [label="{profile_run_label}\n(optional)", style="rounded,dashed,filled", fillcolor="#f8fafc", color="#d5dbed"];
-        {profile_col_node} [label="{profile_col_label}\n(optional)", style="rounded,dashed,filled", fillcolor="#f8fafc", color="#d5dbed"];
         dmfv [label="DMF_FAIL views\n(per active check)", shape=folder, fillcolor="#fdf2f8", color="#fbcfe8", fontcolor="#831843"];
+    }}
+
+    subgraph cluster_discovery {{
+        label="Discovery Schema (Profiling)";
+        fontname="Helvetica";
+        fontsize=11;
+        color="#bae6fd";
+        style="rounded";
+        {profile_summary_node} [label="{profile_summary_label}", fillcolor="#e0f2fe", color="#7dd3fc"];
+        {profile_features_node} [label="{profile_features_label}", fillcolor="#e0f2fe", color="#7dd3fc"];
+        {profile_class_node} [label="{profile_class_label}", fillcolor="#e0f2fe", color="#7dd3fc"];
+        {profile_suggest_node} [label="{profile_suggest_label}", fillcolor="#e0f2fe", color="#7dd3fc"];
+        {profile_run_node} [label="{profile_run_label}", style="rounded,dashed,filled", fillcolor="#f8fafc", color="#94a3b8"];
     }}
 
     app [label="Streamlit App", shape=rect, fillcolor="#ecfdf5", color="#bbf7d0", fontcolor="#047857"];
     {proc_node} [label="{proc_label}", shape=rect, fillcolor="#ede9fe", color="#c4b5fd", fontcolor="#5b21b6"];
     task [label="Snowflake Task\nper config", shape=rect, fillcolor="#fef3c7", color="#fcd34d", fontcolor="#92400e"];
+    {profile_proc_node} [label="{profile_proc_label}", shape=rect, fillcolor="#dbeafe", color="#7dd3fc", fontcolor="#0f172a"];
 
     app -> {cfg_tbl_node} [label="creates / edits"];
     app -> {chk_tbl_node} [label="creates / edits"];
     app -> dmfv [label="renders"];
-    app -> {profile_run_node} [label="captures profiles"];
-    app -> {profile_col_node} [label="renders"];
+    app -> {profile_summary_node} [label="reads profiles"];
+    app -> {profile_features_node} [label="renders"];
+    app -> {profile_class_node} [label="renders"];
+    app -> {profile_suggest_node} [label="renders"];
     {cfg_tbl_node} -> {chk_tbl_node} [label="defines"];
     {cfg_tbl_node} -> task [label="schedules"];
     task -> {proc_node} [label="calls"];
     {proc_node} -> {run_tbl_node} [label="logs to"];
     {proc_node} -> dmfv [label="populates"];
-    {proc_node} -> {profile_run_node} [label="logs to", style=dashed, color="#6b7280", fontcolor="#6b7280"];
-    {profile_run_node} -> {profile_col_node} [label="summarises"];
+    {profile_proc_node} -> {profile_run_node} [label="logs runs", style=dashed, color="#6b7280", fontcolor="#6b7280"];
+    {profile_proc_node} -> {profile_summary_node} [label="updates"];
+    {profile_proc_node} -> {profile_features_node} [label="updates"];
+    {profile_proc_node} -> {profile_class_node} [label="updates"];
+    {profile_proc_node} -> {profile_suggest_node} [label="updates"];
     {run_tbl_node} -> app [label="renders"];
     dmfv -> app [label="renders", style=dashed, color="#6b7280", fontcolor="#6b7280"];
+    {profile_summary_node} -> app [label="summaries", style=dashed, color="#6b7280", fontcolor="#6b7280"];
 }}
         """
 

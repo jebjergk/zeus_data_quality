@@ -4,46 +4,14 @@ This file defines stable structures that code must adhere to.
 
 ---
 
-## Profiling Output Contract
+## Profiling Metadata Contract
 
-`run_table_profile()` must return:
+Profiling v2 no longer streams arbitrary payloads from Streamlit. The contract is:
 
-(
-summary: {
-rows_profiled: int,
-sample_pct: float | None,
-},
-columns: List[ColumnProfilePayload]
-)
-
-shell
-Copy code
-
-### ColumnProfilePayload Shape
-
-{
-column_name: str,
-data_type: str,
-nulls: int,
-null_pct: float,
-distincts: int,
-distinct_pct: float,
-min_val: any,
-max_val: any,
-avg_len: float,
-whitespace_pct: float,
-top_values: List[{ value: any, count: int, pct: float }],
-semantic_type: str | None,
-confidence: float | None, # 0-100 scale
-rationale: str | None
-}
-
-markdown
-Copy code
-
-**Important:**  
-- `""`, `" "` and `NULL` must be **distinct values** in `top_values`.
-- `avg_len` must be computed via `LENGTH(CAST(col AS STRING))`.
+1. **Execution** — `services.profiling_v2.run_full_profile(session, table_fqn)` must call `CALL ZEUS_ANALYTICS_SIMU.DISCOVERY.DQ_PROFILE_FULL('<DB>.<SCHEMA>.<TABLE>')`.
+2. **Storage targets** — the stored procedure writes to `ZEUS_ANALYTICS_SIMU.DISCOVERY` tables: `DQ_TABLE_PROFILE_SUMMARY`, `DQ_COLUMN_FEATURES`, `DQ_COLUMN_CLASSIFICATION`, `DQ_SUGGESTED_CHECKS`, and `DQ_PROFILE_RUN`.
+3. **Read-only UI** — Streamlit pages only `SELECT` from the metadata tables above. No direct scans of user tables are permitted inside the UI.
+4. **Value fidelity** — ratio columns stay as decimals (0–1), min/max fields retain the actual text or numeric values, and timestamps are rendered without truncation.
 
 ---
 
@@ -62,9 +30,6 @@ The suggestion engine must produce:
 }
 ]
 }
-
-yaml
-Copy code
 
 ---
 
