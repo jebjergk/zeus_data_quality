@@ -63,3 +63,14 @@ def test_get_table_profile_summary_returns_frame():
 def test_get_column_features_returns_empty_when_no_table():
     df = profiling_v2.get_column_features(RecordingSession([]), '')
     assert df.empty
+
+
+def test_run_suggestions_only_calls_apply_rules():
+    session = RecordingSession([None])
+
+    profiling_v2.run_suggestions_only(session, 'DB.SCHEMA.TABLE')
+
+    assert session.calls, "Stored procedure call was not recorded"
+    sql, params = session.calls[0]
+    assert "DQ_APPLY_RULES" in sql
+    assert params == ["DB.SCHEMA.TABLE"]

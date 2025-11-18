@@ -86,6 +86,11 @@ PROFILE_V2_COLUMN_DETAIL_SUGGESTIONS_EMPTY = "No suggested checks for this colum
 PROFILE_V2_COLUMN_DETAIL_ERROR = "Failed to load column details: {error}"
 PROFILE_V2_SUGGESTIONS_SUBHEADER = "Suggested data quality checks"
 PROFILE_V2_SUGGESTIONS_EMPTY = "Run profiling to see suggested checks for this table."
+PROFILE_V2_COLUMNS_RULE_METADATA_NOTE = (
+    "Suggested data quality checks expose rule_id, check_type, severity, and "
+    "rationale by aggregating matches from DQ_SUGGESTED_CHECKS after running "
+    "Classify ➜ Suggest."
+)
 PROFILE_V2_VALUE_UNKNOWN = "—"
 
 # Config preview strings

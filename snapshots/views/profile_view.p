@@ -188,6 +188,15 @@ def _prepare_overview_frame(overview: pd.DataFrame) -> pd.DataFrame:
     return working
 
 
+def _overview_grid_widget_key(table_fqn: str, nonce: Optional[int] = None) -> str:
+    """Return a deterministic key for the overview grid widget."""
+
+    if nonce is None:
+        nonce = st.session_state.get("profile_data_nonce", 0)
+    sanitized = table_fqn.replace(".", "_") if table_fqn else "overview"
+    return f"profile_overview_grid_{sanitized}_{nonce or 0}"
+
+
 def _render_overview_grid(overview: pd.DataFrame, table_fqn: str) -> None:
     st.subheader(ui_strings.PROFILE_V2_COLUMNS_SUBHEADER)
     if not isinstance(overview, pd.DataFrame) or overview.empty:
@@ -225,10 +234,10 @@ def _render_overview_grid(overview: pd.DataFrame, table_fqn: str) -> None:
     for column in read_only_columns:
         column_config[column] = st.column_config.TextColumn(column, disabled=True)
 
-    table_key = table_fqn.replace(".", "_") if table_fqn else "overview"
+    grid_key = _overview_grid_widget_key(table_fqn)
     edited_df = st.data_editor(
         working[OVERVIEW_GRID_DISPLAY_COLUMNS],
-        key=f"profile_overview_grid_{table_key}",
+        key=grid_key,
         use_container_width=True,
         hide_index=True,
         num_rows="fixed",
@@ -240,6 +249,11 @@ def _render_overview_grid(overview: pd.DataFrame, table_fqn: str) -> None:
             str(index): bool(value)
             for index, value in edited_df["include_in_dq_config"].items()
         }
+
+    st.caption(
+        f"{ui_strings.PROFILE_V2_SUGGESTIONS_SUBHEADER}: "
+        f"{ui_strings.PROFILE_V2_COLUMNS_RULE_METADATA_NOTE}"
+    )
 
 
 def _classification_source_detail(source: Any) -> str:

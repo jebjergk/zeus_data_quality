@@ -121,14 +121,20 @@ def run_classification_only(session: Any, table_fqn: str) -> None:
 
 
 def run_suggestions_only(session: Any, table_fqn: str) -> None:
-    """Re-run only the suggestion generation stage for *table_fqn*."""
+    """Execute only the DQ_APPLY_RULES stage for *table_fqn*."""
 
-    _run_single_stage(
-        session,
-        table_fqn,
-        SUGGESTIONS_PROC,
-        "Suggestions run failed",
-    )
+    normalized = _normalize_table_fqn(table_fqn)
+    if not normalized:
+        raise ProfilingError("Fully-qualified table name is required")
+
+    LOGGER.info("profiling_v2:call apply_rules target=%s", normalized)
+    try:
+        sql = f"CALL {SUGGESTIONS_PROC}(?)"
+        _execute_sql(session, sql, params=[normalized]).collect()
+    except Exception as exc:  # pragma: no cover - Snowflake specific failures
+        message = _friendly_error_message(exc)
+        LOGGER.exception("profiling_v2:apply_rules_failed target=%s", normalized)
+        raise ProfilingError(f"Suggestions run failed: {message}") from exc
 
 
 def _fetch_dataframe(session: Any, sql: str, params: Optional[Iterable[Any]] = None) -> pd.DataFrame:
