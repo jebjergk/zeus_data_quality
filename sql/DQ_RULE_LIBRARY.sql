@@ -1,0 +1,57 @@
+-- DQ_RULE_LIBRARY DDL and seed data
+-- Ensures ZEUS_ANALYTICS_SIMU.DISCOVERY.DQ_RULE_LIBRARY supports dynamic rule templates
+
+CREATE OR REPLACE TABLE ZEUS_ANALYTICS_SIMU.DISCOVERY.DQ_RULE_LIBRARY (
+    RULE_ID VARCHAR PRIMARY KEY,
+    CHECK_TYPE VARCHAR,
+    EXPRESSION_TEMPLATE VARCHAR,
+    PARAM_SCHEMA VARIANT,
+    DEFAULT_SEVERITY VARCHAR,
+    DESCRIPTION VARCHAR,
+    ACTIVE BOOLEAN DEFAULT TRUE,
+    CREATED_AT TIMESTAMP DEFAULT CURRENT_TIMESTAMP(),
+    UPDATED_AT TIMESTAMP DEFAULT CURRENT_TIMESTAMP()
+);
+
+MERGE INTO ZEUS_ANALYTICS_SIMU.DISCOVERY.DQ_RULE_LIBRARY AS target
+USING (
+    SELECT COLUMN1 AS RULE_ID,
+           COLUMN2 AS CHECK_TYPE,
+           COLUMN3 AS EXPRESSION_TEMPLATE,
+           COLUMN4 AS PARAM_SCHEMA,
+           COLUMN5 AS DEFAULT_SEVERITY,
+           COLUMN6 AS DESCRIPTION,
+           COLUMN7 AS ACTIVE
+    FROM VALUES
+        ('NOT_NULL_BASIC', 'NOT_NULL', '({column_expr} IS NOT NULL)', PARSE_JSON('[]'), 'HIGH', 'Basic non-null check', TRUE),
+        ('RANGE_NUMERIC', 'RANGE', '({column_expr} BETWEEN {min_value} AND {max_value})', PARSE_JSON('["min_value","max_value"]'), 'MEDIUM', 'Numeric allowed range', TRUE),
+        ('ENUM_SMALL_CARDINALITY', 'ENUM', '({column_expr} IN ({allowed_values}))', PARSE_JSON('["allowed_values"]'), 'MEDIUM', 'Enumeration check for low-cardinality columns', TRUE),
+        ('NOT_FUTURE_DATE', 'DATE_CHECK', '({column_expr} <= CURRENT_DATE())', PARSE_JSON('[]'), 'HIGH', 'Values cannot be in the future', TRUE),
+        ('PATTERN_BASIC', 'PATTERN', '({column_expr} REGEXP {pattern})', PARSE_JSON('["pattern"]'), 'LOW', 'Regex pattern match', TRUE)
+) AS source
+ON target.RULE_ID = source.RULE_ID
+WHEN MATCHED THEN UPDATE SET
+    CHECK_TYPE = source.CHECK_TYPE,
+    EXPRESSION_TEMPLATE = source.EXPRESSION_TEMPLATE,
+    PARAM_SCHEMA = source.PARAM_SCHEMA,
+    DEFAULT_SEVERITY = source.DEFAULT_SEVERITY,
+    DESCRIPTION = source.DESCRIPTION,
+    ACTIVE = source.ACTIVE,
+    UPDATED_AT = CURRENT_TIMESTAMP()
+WHEN NOT MATCHED THEN INSERT (
+    RULE_ID,
+    CHECK_TYPE,
+    EXPRESSION_TEMPLATE,
+    PARAM_SCHEMA,
+    DEFAULT_SEVERITY,
+    DESCRIPTION,
+    ACTIVE
+) VALUES (
+    source.RULE_ID,
+    source.CHECK_TYPE,
+    source.EXPRESSION_TEMPLATE,
+    source.PARAM_SCHEMA,
+    source.DEFAULT_SEVERITY,
+    source.DESCRIPTION,
+    source.ACTIVE
+);
