@@ -264,7 +264,8 @@ def _render_column_editors(
         return
     latest_records = _latest_classifications(classification)
     if latest_records:
-        working = pd.DataFrame.from_records(latest_records.values())
+        # dict_values -> list so pandas is happy
+        working = pd.DataFrame.from_records(list(latest_records.values()))
     else:
         working = classification.copy()
     save_fn = getattr(helpers, "save_manual_classification", None)
