@@ -31,3 +31,17 @@ def test_prepare_overview_frame_preserves_rule_columns():
     assert prepared.loc["orders_total", "has_suggestion"] is True
 
 
+def test_overview_grid_widget_key_changes_with_nonce():
+    key_first = profile_view._overview_grid_widget_key(
+        "DB.SCHEMA.TABLE",
+        nonce=0,
+    )
+    key_second = profile_view._overview_grid_widget_key(
+        "DB.SCHEMA.TABLE",
+        nonce=1,
+    )
+
+    assert key_first != key_second
+    assert "DB_SCHEMA_TABLE" in key_first
+
+
