@@ -22,6 +22,28 @@ class _ProfilingData:
     recent_runs: pd.DataFrame
 
 
+OVERVIEW_GRID_DISPLAY_COLUMNS: List[str] = [
+    "include_in_dq_config",
+    "column_name",
+    "data_type",
+    "null_info",
+    "distinct_info",
+    "min_value",
+    "max_value",
+    "length_info",
+    "rule_id",
+    "check_type",
+    "severity",
+    "rationale",
+    "confidence",
+]
+_OVERVIEW_INTERNAL_COLUMNS: List[str] = [
+    *OVERVIEW_GRID_DISPLAY_COLUMNS,
+    "has_suggestion",
+]
+_OVERVIEW_BOOL_COLUMNS = {"has_suggestion", "include_in_dq_config"}
+
+
 def _format_timestamp(value: Any) -> str:
     if value is None:
         return ui_strings.PROFILE_V2_VALUE_UNKNOWN
@@ -153,33 +175,26 @@ def _classification_source_badge(source: Any) -> str:
     return ui_strings.PROFILE_V2_COLUMNS_SOURCE_UNKNOWN
 
 
+def _prepare_overview_frame(overview: pd.DataFrame) -> pd.DataFrame:
+    if not isinstance(overview, pd.DataFrame):
+        return pd.DataFrame(columns=_OVERVIEW_INTERNAL_COLUMNS)
+    working = overview.copy()
+    for column in _OVERVIEW_INTERNAL_COLUMNS:
+        if column not in working.columns:
+            working[column] = False if column in _OVERVIEW_BOOL_COLUMNS else ""
+    working = working[_OVERVIEW_INTERNAL_COLUMNS]
+    working["column_name"] = working["column_name"].astype(str)
+    working.index = working["column_name"].astype(str)
+    return working
+
+
 def _render_overview_grid(overview: pd.DataFrame, table_fqn: str) -> None:
     st.subheader(ui_strings.PROFILE_V2_COLUMNS_SUBHEADER)
     if not isinstance(overview, pd.DataFrame) or overview.empty:
         st.info(ui_strings.PROFILE_V2_COLUMNS_EMPTY)
         return
 
-    working = overview.copy()
-    working.index = working["column_name"].astype(str)
-    columns_to_display = [
-        "include_in_dq_config",
-        "column_name",
-        "data_type",
-        "null_info",
-        "distinct_info",
-        "min_value",
-        "max_value",
-        "length_info",
-        "rule_id",
-        "check_type",
-        "severity",
-        "rationale",
-        "confidence",
-    ]
-    bool_columns = {"has_suggestion", "include_in_dq_config"}
-    for column in columns_to_display + ["has_suggestion"]:
-        if column not in working.columns:
-            working[column] = False if column in bool_columns else ""
+    working = _prepare_overview_frame(overview)
 
     dq_selection = st.session_state.setdefault("dq_config_selection", {})
     table_selection: Dict[str, bool] = dq_selection.setdefault(table_fqn, {})
@@ -203,14 +218,16 @@ def _render_overview_grid(overview: pd.DataFrame, table_fqn: str) -> None:
         )
     }
     read_only_columns = [
-        column for column in columns_to_display if column != "include_in_dq_config"
+        column
+        for column in OVERVIEW_GRID_DISPLAY_COLUMNS
+        if column != "include_in_dq_config"
     ]
     for column in read_only_columns:
         column_config[column] = st.column_config.TextColumn(column, disabled=True)
 
     table_key = table_fqn.replace(".", "_") if table_fqn else "overview"
     edited_df = st.data_editor(
-        working[columns_to_display],
+        working[OVERVIEW_GRID_DISPLAY_COLUMNS],
         key=f"profile_overview_grid_{table_key}",
         use_container_width=True,
         hide_index=True,

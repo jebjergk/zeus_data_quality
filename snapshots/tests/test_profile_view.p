@@ -1,0 +1,33 @@
+import pytest
+
+pd = pytest.importorskip("pandas")
+
+from views import profile_view
+
+
+def test_prepare_overview_frame_preserves_rule_columns():
+    overview = pd.DataFrame(
+        [
+            {
+                "column_name": "orders_total",
+                "data_type": "NUMBER",
+                "rule_id": "RULE_123",
+                "check_type": "NULL_COUNT",
+                "severity": "WARN",
+                "rationale": "Null ratio too high",
+                "confidence": 0.85,
+                "has_suggestion": True,
+                "include_in_dq_config": False,
+            }
+        ]
+    )
+
+    prepared = profile_view._prepare_overview_frame(overview)
+
+    assert list(prepared.columns) == profile_view._OVERVIEW_INTERNAL_COLUMNS
+    assert prepared.loc["orders_total", "rule_id"] == "RULE_123"
+    assert prepared.loc["orders_total", "confidence"] == 0.85
+    assert prepared.loc["orders_total", "include_in_dq_config"] is False
+    assert prepared.loc["orders_total", "has_suggestion"] is True
+
+
