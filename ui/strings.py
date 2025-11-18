@@ -22,6 +22,7 @@ PROFILE_V2_LOAD_SPINNER = "Loading profiling metadata..."
 PROFILE_V2_RUN_SPINNER = "Running DQ_PROFILE_FULL for {table}..."
 PROFILE_V2_RUN_ERROR = "Failed to profile table: {error}"
 PROFILE_V2_RUN_SUCCESS = "Profiling completed for {table}."
+PROFILE_V2_METADATA_ERROR = "Failed to load profiling metadata: {error}"
 PROFILE_V2_STATUS_SUBHEADER = "Last profiling run"
 PROFILE_V2_STATUS_EMPTY = "No profiling runs recorded for {table}. Run profiling to populate results."
 PROFILE_V2_STATUS_MESSAGE = (

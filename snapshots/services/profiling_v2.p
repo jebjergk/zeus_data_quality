@@ -231,4 +231,8 @@ def fetch_recent_runs(session: Any, table_fqn: str, limit: int = 10) -> pd.DataF
         ORDER BY STARTED_AT DESC
         LIMIT {max(1, limit)}
     """
-    return _execute_sql(session, sql, params=[normalized]).to_pandas()
+    try:
+        return _fetch_dataframe(session, sql, params=[normalized])
+    except Exception as exc:  # pragma: no cover - Snowflake specific failures
+        LOGGER.exception("profiling_v2:recent_runs_failed target=%s", normalized)
+        return pd.DataFrame()

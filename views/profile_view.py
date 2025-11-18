@@ -79,6 +79,15 @@ def _merge_column_details(features: pd.DataFrame, classification: pd.DataFrame) 
     return pd.DataFrame.from_records(records) if records else pd.DataFrame()
 
 
+def _truncate_details(value: Any, max_length: int = 500) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    if len(text) <= max_length:
+        return text
+    return text[: max_length - 1].rstrip() + "\u2026"
+
+
 def _prepare_suggested_checks(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
         return df
@@ -174,6 +183,11 @@ def _status_banner(status: str):
     return st.info
 
 
+def _is_failure_status(status: str) -> bool:
+    normalized = (status or "").upper()
+    return normalized in {"FAILED", "ERROR"}
+
+
 def _render_last_run_banner(run_history: pd.DataFrame, target_fqn: str) -> None:
     st.subheader(ui_strings.PROFILE_V2_STATUS_SUBHEADER)
     latest = _latest_run_record(run_history)
@@ -199,9 +213,11 @@ def _render_last_run_banner(run_history: pd.DataFrame, target_fqn: str) -> None:
         )
     )
     details = latest.get("DETAILS")
-    if details:
+    if details and _is_failure_status(str(status_value)):
         st.caption(
-            ui_strings.PROFILE_V2_STATUS_DETAILS.format(details=str(details))
+            ui_strings.PROFILE_V2_STATUS_DETAILS.format(
+                details=_truncate_details(details)
+            )
         )
 
 
@@ -351,7 +367,13 @@ def render_profile(
     )
 
     with st.spinner(ui_strings.PROFILE_V2_LOAD_SPINNER):
-        data = _load_metadata(helpers, session, target_fqn)
+        try:
+            data = _load_metadata(helpers, session, target_fqn)
+        except Exception as exc:
+            st.error(
+                ui_strings.PROFILE_V2_METADATA_ERROR.format(error=str(exc))
+            )
+            return
 
     st.session_state["profile_last_table"] = target_fqn
     st.session_state["profile_last_run_id"] = _extract_last_run_id(data.recent_runs)
