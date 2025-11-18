@@ -134,6 +134,46 @@ def _fetch_dataframe(session: Any, sql: str, params: Optional[Iterable[Any]] = N
     return _execute_sql(session, sql, params=params).to_pandas()
 
 
+def _ensure_columns(df: pd.DataFrame, columns: Iterable[str]) -> pd.DataFrame:
+    if not isinstance(df, pd.DataFrame):
+        return pd.DataFrame(columns=list(columns))
+    for column in columns:
+        if column not in df.columns:
+            df[column] = pd.NA
+    return df
+
+
+def _format_count_ratio(count: Any, ratio: Any) -> str:
+    def _format_value(value: Any) -> str:
+        if pd.isna(value):
+            return "-"
+        if isinstance(value, float) and value.is_integer():
+            return str(int(value))
+        return str(value)
+
+    count_text = _format_value(count)
+    if pd.isna(ratio):
+        return count_text
+    return f"{count_text} ({float(ratio) * 100:.2f}%)"
+
+
+def _format_length_triplet(min_length: Any, max_length: Any, avg_length: Any) -> str:
+    def _format_value(value: Any) -> str:
+        if pd.isna(value):
+            return "-"
+        if isinstance(value, float) and value.is_integer():
+            return str(int(value))
+        return str(value)
+
+    return " / ".join(
+        [
+            _format_value(min_length),
+            _format_value(max_length),
+            _format_value(avg_length),
+        ]
+    )
+
+
 def _normalize_column_name(column_name: Optional[str]) -> str:
     value = str(column_name or "").strip()
     return value
@@ -347,6 +387,126 @@ def get_suggested_checks(session: Any, table_fqn: str) -> pd.DataFrame:
     except Exception as exc:  # pragma: no cover - Snowflake specific failures
         LOGGER.exception("profiling_v2:suggested_checks_failed target=%s", normalized)
         return pd.DataFrame()
+
+
+def get_overview_grid(session: Any, table_fqn: str) -> pd.DataFrame:
+    """Return a unified grid with profiling features and one suggestion per column."""
+
+    normalized = _normalize_table_fqn(table_fqn)
+    overview_columns = [
+        "column_name",
+        "data_type",
+        "null_info",
+        "distinct_info",
+        "min_value",
+        "max_value",
+        "length_info",
+        "rule_id",
+        "check_type",
+        "severity",
+        "rationale",
+        "has_suggestion",
+        "include_in_dq_config",
+    ]
+    if not normalized:
+        return pd.DataFrame(columns=overview_columns)
+
+    features = get_column_features(session, normalized)
+    if features.empty:
+        return pd.DataFrame(columns=overview_columns)
+
+    features = _ensure_columns(
+        features,
+        [
+            "TABLE_FQN",
+            "COLUMN_NAME",
+            "DATA_TYPE",
+            "NULL_COUNT",
+            "NULL_RATIO",
+            "DISTINCT_COUNT",
+            "DISTINCT_RATIO",
+            "MIN_VALUE",
+            "MAX_VALUE",
+            "MIN_LENGTH",
+            "MAX_LENGTH",
+            "AVG_LENGTH",
+        ],
+    )
+
+    suggestion_sql = f"""
+        SELECT *
+        FROM {SUGGESTED_CHECKS_TABLE}
+        WHERE TABLE_FQN = :table_fqn
+        QUALIFY ROW_NUMBER() OVER (
+            PARTITION BY TABLE_FQN, COLUMN_NAME
+            ORDER BY SUGGESTED_AT DESC, SEVERITY DESC
+        ) = 1
+    """
+    try:
+        suggestions = _fetch_dataframe(
+            session, suggestion_sql, params={"table_fqn": normalized}
+        )
+    except Exception as exc:  # pragma: no cover - Snowflake specific failures
+        LOGGER.exception(
+            "profiling_v2:suggested_checks_overview_failed target=%s", normalized
+        )
+        suggestions = pd.DataFrame()
+
+    suggestions = _ensure_columns(
+        suggestions,
+        [
+            "TABLE_FQN",
+            "COLUMN_NAME",
+            "RULE_ID",
+            "CHECK_TYPE",
+            "SEVERITY",
+            "RATIONALE",
+        ],
+    )
+
+    merged = features.merge(
+        suggestions,
+        how="left",
+        on=["TABLE_FQN", "COLUMN_NAME"],
+        suffixes=("", "_SUGG"),
+    )
+
+    result = pd.DataFrame(
+        {
+            "column_name": merged["COLUMN_NAME"],
+            "data_type": merged["DATA_TYPE"],
+            "null_info": [
+                _format_count_ratio(count, ratio)
+                for count, ratio in zip(merged["NULL_COUNT"], merged["NULL_RATIO"])
+            ],
+            "distinct_info": [
+                _format_count_ratio(count, ratio)
+                for count, ratio in zip(
+                    merged["DISTINCT_COUNT"], merged["DISTINCT_RATIO"]
+                )
+            ],
+            "min_value": merged["MIN_VALUE"],
+            "max_value": merged["MAX_VALUE"],
+            "length_info": [
+                _format_length_triplet(min_len, max_len, avg_len)
+                for min_len, max_len, avg_len in zip(
+                    merged["MIN_LENGTH"],
+                    merged["MAX_LENGTH"],
+                    merged["AVG_LENGTH"],
+                )
+            ],
+            "rule_id": merged["RULE_ID"],
+            "check_type": merged["CHECK_TYPE"],
+            "severity": merged["SEVERITY"],
+            "rationale": merged["RATIONALE"],
+        }
+    )
+
+    result["has_suggestion"] = result["rule_id"].notna()
+    result["include_in_dq_config"] = result["has_suggestion"]
+
+    return result[overview_columns]
+
 
 
 def fetch_suggested_checks(session: Any, table_fqn: str) -> pd.DataFrame:
