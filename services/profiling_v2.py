@@ -394,6 +394,7 @@ def get_overview_grid(session: Any, table_fqn: str) -> pd.DataFrame:
 
     normalized = _normalize_table_fqn(table_fqn)
     overview_columns = [
+        "include_in_dq_config",
         "column_name",
         "data_type",
         "null_info",
@@ -405,8 +406,8 @@ def get_overview_grid(session: Any, table_fqn: str) -> pd.DataFrame:
         "check_type",
         "severity",
         "rationale",
+        "confidence",
         "has_suggestion",
-        "include_in_dq_config",
     ]
     if not normalized:
         return pd.DataFrame(columns=overview_columns)
@@ -439,7 +440,7 @@ def get_overview_grid(session: Any, table_fqn: str) -> pd.DataFrame:
         WHERE TABLE_FQN = :table_fqn
         QUALIFY ROW_NUMBER() OVER (
             PARTITION BY TABLE_FQN, COLUMN_NAME
-            ORDER BY SUGGESTED_AT DESC, SEVERITY DESC
+            ORDER BY SUGGESTED_AT DESC, RULE_ID DESC
         ) = 1
     """
     try:
@@ -464,11 +465,41 @@ def get_overview_grid(session: Any, table_fqn: str) -> pd.DataFrame:
         ],
     )
 
+    classification_sql = f"""
+        SELECT TABLE_FQN, COLUMN_NAME, CONFIDENCE
+        FROM {COLUMN_CLASSIFICATION_TABLE}
+        WHERE TABLE_FQN = :table_fqn
+        QUALIFY ROW_NUMBER() OVER (
+            PARTITION BY TABLE_FQN, COLUMN_NAME
+            ORDER BY CLASSIFIED_AT DESC
+        ) = 1
+    """
+    try:
+        classifications = _fetch_dataframe(
+            session, classification_sql, params={"table_fqn": normalized}
+        )
+    except Exception as exc:  # pragma: no cover - Snowflake specific failures
+        LOGGER.exception(
+            "profiling_v2:classification_overview_failed target=%s", normalized
+        )
+        classifications = pd.DataFrame()
+
+    classifications = _ensure_columns(
+        classifications,
+        ["TABLE_FQN", "COLUMN_NAME", "CONFIDENCE"],
+    )
+
     merged = features.merge(
         suggestions,
         how="left",
         on=["TABLE_FQN", "COLUMN_NAME"],
         suffixes=("", "_SUGG"),
+    )
+
+    merged = merged.merge(
+        classifications,
+        how="left",
+        on=["TABLE_FQN", "COLUMN_NAME"],
     )
 
     result = pd.DataFrame(
@@ -499,11 +530,12 @@ def get_overview_grid(session: Any, table_fqn: str) -> pd.DataFrame:
             "check_type": merged["CHECK_TYPE"],
             "severity": merged["SEVERITY"],
             "rationale": merged["RATIONALE"],
+            "confidence": merged["CONFIDENCE"],
         }
     )
 
     result["has_suggestion"] = result["rule_id"].notna()
-    result["include_in_dq_config"] = result["has_suggestion"]
+    result["include_in_dq_config"] = result["has_suggestion"].astype(bool)
 
     return result[overview_columns]
 
