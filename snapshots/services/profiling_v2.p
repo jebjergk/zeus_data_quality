@@ -14,6 +14,8 @@ DISCOVERY_SCHEMA = "DISCOVERY"
 DISCOVERY_NAMESPACE = f"{DISCOVERY_DB}.{DISCOVERY_SCHEMA}"
 
 PROFILE_PROC = f"{DISCOVERY_NAMESPACE}.DQ_PROFILE_FULL"
+CLASSIFY_PROC = f"{DISCOVERY_NAMESPACE}.DQ_CLASSIFY_COLUMNS_HEURISTIC"
+SUGGESTIONS_PROC = f"{DISCOVERY_NAMESPACE}.DQ_APPLY_RULES"
 TABLE_SUMMARY_VIEW = f"{DISCOVERY_NAMESPACE}.DQ_TABLE_PROFILE_SUMMARY"
 COLUMN_FEATURES_TABLE = f"{DISCOVERY_NAMESPACE}.DQ_COLUMN_FEATURES"
 COLUMN_CLASSIFICATION_TABLE = f"{DISCOVERY_NAMESPACE}.DQ_COLUMN_CLASSIFICATION"
@@ -82,6 +84,50 @@ def run_profiling_v2(session: Any, table_fqn: str) -> None:
 
 # Backwards compatibility for earlier callers/tests.
 run_full_profile = run_profiling_v2
+
+
+def _run_single_stage(
+    session: Any,
+    table_fqn: str,
+    proc_name: str,
+    failure_message: str,
+) -> None:
+    normalized = _normalize_table_fqn(table_fqn)
+    if not normalized:
+        raise ProfilingError("Fully-qualified table name is required")
+
+    LOGGER.info("profiling_v2:call proc target=%s proc=%s", normalized, proc_name)
+    try:
+        sql = f"CALL {proc_name}(:table_fqn)"
+        _execute_sql(session, sql, params={"table_fqn": normalized}).collect()
+    except Exception as exc:  # pragma: no cover - Snowflake specific failures
+        message = _friendly_error_message(exc)
+        LOGGER.exception(
+            "profiling_v2:proc_failed target=%s proc=%s", normalized, proc_name
+        )
+        raise ProfilingError(f"{failure_message}: {message}") from exc
+
+
+def run_classification_only(session: Any, table_fqn: str) -> None:
+    """Re-run only the column classification stage for *table_fqn*."""
+
+    _run_single_stage(
+        session,
+        table_fqn,
+        CLASSIFY_PROC,
+        "Classification run failed",
+    )
+
+
+def run_suggestions_only(session: Any, table_fqn: str) -> None:
+    """Re-run only the suggestion generation stage for *table_fqn*."""
+
+    _run_single_stage(
+        session,
+        table_fqn,
+        SUGGESTIONS_PROC,
+        "Suggestions run failed",
+    )
 
 
 def _fetch_dataframe(session: Any, sql: str, params: Optional[Iterable[Any]] = None) -> pd.DataFrame:
