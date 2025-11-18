@@ -31,6 +31,31 @@ PROFILE_V2_STATUS_MESSAGE = (
 PROFILE_V2_STATUS_DETAILS = "Details: {details}"
 PROFILE_V2_COLUMNS_SUBHEADER = "Columns"
 PROFILE_V2_COLUMNS_EMPTY = "Run profiling to load column-level metrics."
+PROFILE_V2_COLUMNS_SOURCE_MANUAL = "manual override"
+PROFILE_V2_COLUMNS_SOURCE_HEURISTIC = "{source} heuristic"
+PROFILE_V2_COLUMNS_SOURCE_UNKNOWN = "unknown source"
+PROFILE_V2_COLUMNS_EDIT_HEADER = "Edit column classification"
+PROFILE_V2_COLUMNS_EDIT_HELP = (
+    "Override the detected content type and semantic role for individual columns."
+)
+PROFILE_V2_COLUMNS_EDIT_EMPTY = "No columns available to edit."
+PROFILE_V2_COLUMNS_EDIT_UNAVAILABLE = (
+    "Manual overrides are unavailable in this environment."
+)
+PROFILE_V2_COLUMN_EDIT_EXPANDER = "{column} · {source}"
+PROFILE_V2_COLUMN_EDIT_STATUS = (
+    "Confidence {confidence} · Classified at {classified_at}"
+)
+PROFILE_V2_COLUMN_CONTENT_LABEL = "Content type"
+PROFILE_V2_COLUMN_SEMANTIC_LABEL = "Semantic role"
+PROFILE_V2_COLUMN_SAVE_BUTTON = "Save manual classification"
+PROFILE_V2_COLUMN_EDIT_SPINNER = "Saving classification for {column}..."
+PROFILE_V2_COLUMN_EDIT_ERROR = (
+    "Failed to save manual classification for {column}: {error}"
+)
+PROFILE_V2_COLUMN_EDIT_SUCCESS = (
+    "Saved manual classification for {column}."
+)
 PROFILE_V2_SUGGESTIONS_SUBHEADER = "Suggested data quality checks"
 PROFILE_V2_SUGGESTIONS_EMPTY = "Run profiling to see suggested checks for this table."
 PROFILE_V2_VALUE_UNKNOWN = "—"
