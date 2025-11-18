@@ -485,9 +485,10 @@ def render_profile(
 
     st.divider()
 
-    button_cols = st.columns(2)
+    button_cols = st.columns(4)
     run_disabled = not (target_fqn and session)
     refresh_disabled = not (target_fqn and session)
+    rerun_disabled = not (target_fqn and session)
     run_clicked = button_cols[0].button(
         ui_strings.PROFILE_V2_RUN_BUTTON,
         disabled=run_disabled,
@@ -498,10 +499,23 @@ def render_profile(
         disabled=refresh_disabled,
         use_container_width=True,
     )
+    classify_clicked = button_cols[2].button(
+        ui_strings.PROFILE_V2_CLASSIFY_BUTTON,
+        disabled=rerun_disabled,
+        use_container_width=True,
+    )
+    suggestions_clicked = button_cols[3].button(
+        ui_strings.PROFILE_V2_SUGGESTIONS_BUTTON,
+        disabled=rerun_disabled,
+        use_container_width=True,
+    )
     status_placeholder = st.empty()
 
     if "profile_data_nonce" not in st.session_state:
         st.session_state["profile_data_nonce"] = 0
+
+    classify_fn = getattr(helpers, "run_classification_only", None)
+    suggestions_fn = getattr(helpers, "run_suggestions_only", None)
 
     if run_clicked and target_fqn:
         with st.spinner(ui_strings.PROFILE_V2_RUN_SPINNER.format(table=target_fqn)):
@@ -521,6 +535,50 @@ def render_profile(
     elif refresh_clicked and target_fqn:
         status_placeholder.info(ui_strings.PROFILE_V2_REFRESH_MESSAGE)
         st.session_state["profile_data_nonce"] += 1
+    elif classify_clicked and target_fqn:
+        if not callable(classify_fn):
+            status_placeholder.error(ui_strings.PROFILE_V2_CLASSIFY_UNAVAILABLE)
+        else:
+            with st.spinner(
+                ui_strings.PROFILE_V2_CLASSIFY_SPINNER.format(table=target_fqn)
+            ):
+                try:
+                    classify_fn(session, target_fqn)
+                except Exception as exc:
+                    status_placeholder.error(
+                        ui_strings.PROFILE_V2_CLASSIFY_ERROR.format(error=str(exc))
+                    )
+                else:
+                    st.session_state["profile_data_nonce"] += 1
+                    status_placeholder.success(
+                        ui_strings.PROFILE_V2_CLASSIFY_SUCCESS.format(
+                            table=target_fqn
+                        )
+                    )
+    elif suggestions_clicked and target_fqn:
+        if not callable(suggestions_fn):
+            status_placeholder.error(
+                ui_strings.PROFILE_V2_SUGGESTIONS_UNAVAILABLE
+            )
+        else:
+            with st.spinner(
+                ui_strings.PROFILE_V2_SUGGESTIONS_SPINNER.format(table=target_fqn)
+            ):
+                try:
+                    suggestions_fn(session, target_fqn)
+                except Exception as exc:
+                    status_placeholder.error(
+                        ui_strings.PROFILE_V2_SUGGESTIONS_ERROR.format(
+                            error=str(exc)
+                        )
+                    )
+                else:
+                    st.session_state["profile_data_nonce"] += 1
+                    status_placeholder.success(
+                        ui_strings.PROFILE_V2_SUGGESTIONS_SUCCESS.format(
+                            table=target_fqn
+                        )
+                    )
 
     if not target_fqn:
         st.info(ui_strings.PROFILE_V2_NO_TARGET)
