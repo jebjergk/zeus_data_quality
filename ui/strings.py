@@ -66,6 +66,24 @@ PROFILE_V2_COLUMN_EDIT_ERROR = (
 PROFILE_V2_COLUMN_EDIT_SUCCESS = (
     "Saved manual classification for {column}."
 )
+PROFILE_V2_COLUMN_DETAIL_HEADER = "Column details"
+PROFILE_V2_COLUMN_DETAIL_SELECT_LABEL = "Column"
+PROFILE_V2_COLUMN_DETAIL_SELECT_PLACEHOLDER = "Select a column..."
+PROFILE_V2_COLUMN_DETAIL_PLACEHOLDER = "Select a column to see details."
+PROFILE_V2_COLUMN_DETAIL_FEATURES_HEADER = "Profiling stats"
+PROFILE_V2_COLUMN_DETAIL_FEATURES_EMPTY = "Profiling stats are unavailable for this column."
+PROFILE_V2_COLUMN_DETAIL_CLASSIFICATION_HEADER = "Classification"
+PROFILE_V2_COLUMN_DETAIL_CLASSIFICATION_EMPTY = "No classification recorded for this column."
+PROFILE_V2_COLUMN_DETAIL_CLASSIFICATION_STATUS = (
+    "Confidence {confidence} · Classified at {classified_at}"
+)
+PROFILE_V2_COLUMN_DETAIL_CLASSIFICATION_SOURCE = "Source: {source}"
+PROFILE_V2_COLUMN_DETAIL_CLASSIFICATION_MANUAL = "manual override"
+PROFILE_V2_COLUMN_DETAIL_CLASSIFICATION_HEURISTIC = "{source} heuristic"
+PROFILE_V2_COLUMN_DETAIL_CLASSIFICATION_UNKNOWN = "unknown source"
+PROFILE_V2_COLUMN_DETAIL_SUGGESTIONS_HEADER = "Suggested checks"
+PROFILE_V2_COLUMN_DETAIL_SUGGESTIONS_EMPTY = "No suggested checks for this column."
+PROFILE_V2_COLUMN_DETAIL_ERROR = "Failed to load column details: {error}"
 PROFILE_V2_SUGGESTIONS_SUBHEADER = "Suggested data quality checks"
 PROFILE_V2_SUGGESTIONS_EMPTY = "Run profiling to see suggested checks for this table."
 PROFILE_V2_VALUE_UNKNOWN = "—"

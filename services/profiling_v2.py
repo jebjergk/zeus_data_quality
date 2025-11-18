@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, Iterable, Optional
+from typing import Any, Dict, Iterable, List, Optional
 
 import pandas as pd
 
@@ -132,6 +132,15 @@ def run_suggestions_only(session: Any, table_fqn: str) -> None:
 
 def _fetch_dataframe(session: Any, sql: str, params: Optional[Iterable[Any]] = None) -> pd.DataFrame:
     return _execute_sql(session, sql, params=params).to_pandas()
+
+
+def _normalize_column_name(column_name: Optional[str]) -> str:
+    value = str(column_name or "").strip()
+    return value
+
+
+def _casefolded_column(series: pd.Series) -> pd.Series:
+    return series.astype(str).str.strip().str.casefold()
 
 
 def _sort_summary_frame(df: pd.DataFrame) -> pd.DataFrame:
@@ -344,6 +353,98 @@ def fetch_suggested_checks(session: Any, table_fqn: str) -> pd.DataFrame:
     """Backwards-compatible wrapper for :func:`get_suggested_checks`."""
 
     return get_suggested_checks(session, table_fqn)
+
+
+def _filter_column_records(df: pd.DataFrame, column_name: str) -> pd.DataFrame:
+    if not isinstance(df, pd.DataFrame) or df.empty:
+        return pd.DataFrame()
+    if "COLUMN_NAME" not in df.columns:
+        return pd.DataFrame()
+    normalized = _normalize_column_name(column_name)
+    if not normalized:
+        return pd.DataFrame()
+    folded = _casefolded_column(df["COLUMN_NAME"])
+    mask = folded == normalized.casefold()
+    matches = df.loc[mask]
+    if matches.empty:
+        return pd.DataFrame()
+    return matches
+
+
+def _first_column_record(df: pd.DataFrame, column_name: str) -> Dict[str, Any]:
+    matches = _filter_column_records(df, column_name)
+    if matches.empty:
+        return {}
+    return matches.iloc[0].to_dict()
+
+
+def _suggested_checks_for_column(df: pd.DataFrame, column_name: str) -> List[Dict[str, Any]]:
+    matches = _filter_column_records(df, column_name)
+    if matches.empty:
+        return []
+    return matches.to_dict("records")
+
+
+def _pluck_fields(record: Dict[str, Any], fields: Iterable[str]) -> Dict[str, Any]:
+    if not record:
+        return {}
+    result: Dict[str, Any] = {}
+    for field in fields:
+        if field in record:
+            result[field] = record.get(field)
+    return result
+
+
+def get_column_detail(session: Any, table_fqn: str, column_name: str) -> Dict[str, Any]:
+    """Return profiling, classification, and suggestion metadata for one column."""
+
+    normalized = _normalize_table_fqn(table_fqn)
+    column = _normalize_column_name(column_name)
+    if not normalized or not column:
+        return {}
+
+    features = get_column_features(session, normalized)
+    classification = get_effective_classification(session, normalized)
+    suggestions = get_suggested_checks(session, normalized)
+    feature_record = _first_column_record(features, column)
+    classification_record = _first_column_record(classification, column)
+    suggestion_records = _suggested_checks_for_column(suggestions, column)
+    feature_fields = (
+        "DATA_TYPE",
+        "ROW_COUNT",
+        "NULL_COUNT",
+        "NULL_RATIO",
+        "DISTINCT_COUNT",
+        "DISTINCT_RATIO",
+        "MIN_VALUE",
+        "MAX_VALUE",
+        "AVG_LENGTH",
+        "MAX_LENGTH",
+    )
+    classification_fields = (
+        "CONTENT_TYPE",
+        "SEMANTIC_ROLE",
+        "SOURCE",
+        "CONFIDENCE",
+        "CLASSIFIED_AT",
+    )
+    detail = {
+        "table_fqn": normalized,
+        "column_name": column,
+        "features": _pluck_fields(feature_record, feature_fields),
+        "classification": _pluck_fields(classification_record, classification_fields),
+        "suggested_checks": [
+            {
+                "RULE_ID": record.get("RULE_ID"),
+                "CHECK_TYPE": record.get("CHECK_TYPE"),
+                "SEVERITY": record.get("SEVERITY"),
+                "PARAMETERS": record.get("PARAMS", record.get("PARAMETERS")),
+                "RATIONALE": record.get("RATIONALE"),
+            }
+            for record in suggestion_records
+        ],
+    }
+    return detail
 
 
 def fetch_recent_runs(session: Any, table_fqn: str, limit: int = 10) -> pd.DataFrame:

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
 import streamlit as st
@@ -241,6 +241,7 @@ def _classification_source_badge(source: Any) -> str:
 def _render_columns_grid(
     features: pd.DataFrame,
     classification: pd.DataFrame,
+    suggestions: pd.DataFrame,
     table_fqn: str,
     helpers: Any,
     session: Any,
@@ -249,6 +250,15 @@ def _render_columns_grid(
     prepared = _prepare_columns_grid(features, classification)
     if prepared.empty:
         st.info(ui_strings.PROFILE_V2_COLUMNS_EMPTY)
+        _render_column_detail_panel(
+            prepared,
+            features,
+            classification,
+            suggestions,
+            table_fqn,
+            helpers,
+            session,
+        )
         return
     working = prepared.copy()
     if "SOURCE" in working.columns:
@@ -271,8 +281,288 @@ def _render_columns_grid(
         "CLASSIFIED_AT",
     ]
     existing = [col for col in display_columns if col in working.columns]
-    st.dataframe(working[existing], use_container_width=True, hide_index=True)
+    grid_col, detail_col = st.columns((3, 2))
+    with grid_col:
+        st.dataframe(working[existing], use_container_width=True, hide_index=True)
+    with detail_col:
+        _render_column_detail_panel(
+            working,
+            features,
+            classification,
+            suggestions,
+            table_fqn,
+            helpers,
+            session,
+        )
     _render_column_editors(working, table_fqn, helpers, session)
+
+
+def _render_column_detail_panel(
+    prepared_grid: pd.DataFrame,
+    features: pd.DataFrame,
+    classification: pd.DataFrame,
+    suggestions: pd.DataFrame,
+    table_fqn: str,
+    helpers: Any,
+    session: Any,
+) -> None:
+    st.markdown(f"**{ui_strings.PROFILE_V2_COLUMN_DETAIL_HEADER}**")
+    column_names: List[str] = []
+    if isinstance(prepared_grid, pd.DataFrame) and not prepared_grid.empty:
+        if "COLUMN_NAME" in prepared_grid.columns:
+            column_names = [
+                str(value).strip()
+                for value in prepared_grid["COLUMN_NAME"].tolist()
+                if str(value or "").strip()
+            ]
+    placeholder_option = ui_strings.PROFILE_V2_COLUMN_DETAIL_SELECT_PLACEHOLDER
+    options: List[str] = [placeholder_option, *column_names]
+    stored_selection = st.session_state.get(
+        "profile_column_detail_selection", placeholder_option
+    )
+    if stored_selection not in options:
+        stored_selection = placeholder_option
+    selection = st.selectbox(
+        ui_strings.PROFILE_V2_COLUMN_DETAIL_SELECT_LABEL,
+        options,
+        index=options.index(stored_selection),
+    )
+    st.session_state["profile_column_detail_selection"] = selection
+    if selection == placeholder_option:
+        st.info(ui_strings.PROFILE_V2_COLUMN_DETAIL_PLACEHOLDER)
+        return
+    detail_data, helper_error = _load_column_detail_payload(
+        helpers,
+        session,
+        table_fqn,
+        selection,
+        features,
+        classification,
+        suggestions,
+    )
+    if helper_error:
+        st.warning(ui_strings.PROFILE_V2_COLUMN_DETAIL_ERROR.format(error=helper_error))
+    if not detail_data:
+        st.info(ui_strings.PROFILE_V2_COLUMN_DETAIL_PLACEHOLDER)
+        return
+    st.markdown(f"**{table_fqn} – {selection}**")
+    st.markdown(f"**{ui_strings.PROFILE_V2_COLUMN_DETAIL_FEATURES_HEADER}**")
+    _render_detail_key_values(
+        detail_data.get("features") or {},
+        ui_strings.PROFILE_V2_COLUMN_DETAIL_FEATURES_EMPTY,
+    )
+    st.markdown(f"**{ui_strings.PROFILE_V2_COLUMN_DETAIL_CLASSIFICATION_HEADER}**")
+    _render_detail_classification(detail_data.get("classification") or {})
+    st.markdown(f"**{ui_strings.PROFILE_V2_COLUMN_DETAIL_SUGGESTIONS_HEADER}**")
+    _render_detail_suggestions(detail_data.get("suggested_checks") or [])
+
+
+def _load_column_detail_payload(
+    helpers: Any,
+    session: Any,
+    table_fqn: str,
+    column_name: str,
+    features: pd.DataFrame,
+    classification: pd.DataFrame,
+    suggestions: pd.DataFrame,
+) -> Tuple[Dict[str, Any], Optional[str]]:
+    detail_fn = getattr(helpers, "get_column_detail", None)
+    helper_error: Optional[str] = None
+    detail_data: Dict[str, Any] = {}
+    if callable(detail_fn):
+        try:
+            detail_data = detail_fn(session, table_fqn, column_name)
+        except Exception as exc:  # pragma: no cover - Streamlit runtime feedback only
+            helper_error = str(exc)
+    if not detail_data:
+        detail_data = _build_column_detail_from_frames(
+            features,
+            classification,
+            suggestions,
+            table_fqn,
+            column_name,
+        )
+    return detail_data, helper_error
+
+
+def _build_column_detail_from_frames(
+    features: pd.DataFrame,
+    classification: pd.DataFrame,
+    suggestions: pd.DataFrame,
+    table_fqn: str,
+    column_name: str,
+) -> Dict[str, Any]:
+    column = str(column_name or "").strip()
+    if not column:
+        return {}
+    feature_record = _lookup_feature_record(features, column)
+    classification_record = _lookup_classification_record(classification, column)
+    suggestion_records = _lookup_suggestion_records(suggestions, column)
+    feature_fields = (
+        "DATA_TYPE",
+        "ROW_COUNT",
+        "NULL_COUNT",
+        "NULL_RATIO",
+        "DISTINCT_COUNT",
+        "DISTINCT_RATIO",
+        "MIN_VALUE",
+        "MAX_VALUE",
+        "AVG_LENGTH",
+        "MAX_LENGTH",
+    )
+    classification_fields = (
+        "CONTENT_TYPE",
+        "SEMANTIC_ROLE",
+        "SOURCE",
+        "CONFIDENCE",
+        "CLASSIFIED_AT",
+    )
+    return {
+        "table_fqn": table_fqn,
+        "column_name": column,
+        "features": {
+            key: feature_record.get(key)
+            for key in feature_fields
+            if key in feature_record
+        },
+        "classification": {
+            key: classification_record.get(key)
+            for key in classification_fields
+            if key in classification_record
+        },
+        "suggested_checks": [
+            {
+                "RULE_ID": record.get("RULE_ID"),
+                "CHECK_TYPE": record.get("CHECK_TYPE"),
+                "SEVERITY": record.get("SEVERITY"),
+                "PARAMETERS": record.get("PARAMS", record.get("PARAMETERS")),
+                "RATIONALE": record.get("RATIONALE"),
+            }
+            for record in suggestion_records
+        ],
+    }
+
+
+def _lookup_feature_record(features: pd.DataFrame, column_name: str) -> Dict[str, Any]:
+    if not isinstance(features, pd.DataFrame) or features.empty:
+        return {}
+    if "COLUMN_NAME" not in features.columns:
+        return {}
+    folded = features["COLUMN_NAME"].astype(str).str.strip().str.casefold()
+    matches = features.loc[folded == column_name.casefold()]
+    if matches.empty:
+        return {}
+    return matches.iloc[0].to_dict()
+
+
+def _lookup_classification_record(
+    classification: pd.DataFrame, column_name: str
+) -> Dict[str, Any]:
+    latest = _latest_classifications(classification)
+    if not latest:
+        return {}
+    normalized = str(column_name or "").strip()
+    record = latest.get(normalized)
+    if record:
+        return record
+    folded = normalized.casefold()
+    for key, value in latest.items():
+        if str(key or "").strip().casefold() == folded:
+            return value
+    return {}
+
+
+def _lookup_suggestion_records(
+    suggestions: pd.DataFrame, column_name: str
+) -> List[Dict[str, Any]]:
+    if not isinstance(suggestions, pd.DataFrame) or suggestions.empty:
+        return []
+    if "COLUMN_NAME" not in suggestions.columns:
+        return []
+    folded = suggestions["COLUMN_NAME"].astype(str).str.strip().str.casefold()
+    matches = suggestions.loc[folded == column_name.casefold()]
+    if matches.empty:
+        return []
+    return matches.to_dict("records")
+
+
+def _render_detail_key_values(values: Dict[str, Any], empty_message: str) -> None:
+    items = list(values.items())
+    if not items:
+        st.info(empty_message)
+        return
+    for start in range(0, len(items), 2):
+        cols = st.columns(2)
+        for offset, (key, value) in enumerate(items[start : start + 2]):
+            cols[offset].markdown(
+                f"**{key}**\n\n{_format_detail_value(value)}"
+            )
+
+
+def _render_detail_classification(classification: Dict[str, Any]) -> None:
+    if not classification:
+        st.info(ui_strings.PROFILE_V2_COLUMN_DETAIL_CLASSIFICATION_EMPTY)
+        return
+    content = classification.get("CONTENT_TYPE")
+    semantic = classification.get("SEMANTIC_ROLE")
+    st.write(
+        f"**{ui_strings.PROFILE_V2_COLUMN_CONTENT_LABEL}:** "
+        f"{_format_detail_value(content)}"
+    )
+    st.write(
+        f"**{ui_strings.PROFILE_V2_COLUMN_SEMANTIC_LABEL}:** "
+        f"{_format_detail_value(semantic)}"
+    )
+    confidence = _format_detail_value(classification.get("CONFIDENCE"))
+    classified_at = _format_timestamp(classification.get("CLASSIFIED_AT"))
+    st.caption(
+        ui_strings.PROFILE_V2_COLUMN_DETAIL_CLASSIFICATION_STATUS.format(
+            confidence=confidence,
+            classified_at=classified_at,
+        )
+    )
+    st.caption(
+        ui_strings.PROFILE_V2_COLUMN_DETAIL_CLASSIFICATION_SOURCE.format(
+            source=_classification_source_detail(classification.get("SOURCE")),
+        )
+    )
+
+
+def _classification_source_detail(source: Any) -> str:
+    normalized = str(source or "").strip().upper()
+    if normalized == "MANUAL":
+        return ui_strings.PROFILE_V2_COLUMN_DETAIL_CLASSIFICATION_MANUAL
+    if normalized:
+        return ui_strings.PROFILE_V2_COLUMN_DETAIL_CLASSIFICATION_HEURISTIC.format(
+            source=normalized
+        )
+    return ui_strings.PROFILE_V2_COLUMN_DETAIL_CLASSIFICATION_UNKNOWN
+
+
+def _render_detail_suggestions(records: List[Dict[str, Any]]) -> None:
+    if not records:
+        st.info(ui_strings.PROFILE_V2_COLUMN_DETAIL_SUGGESTIONS_EMPTY)
+        return
+    df = pd.DataFrame(records)
+    if df.empty:
+        st.info(ui_strings.PROFILE_V2_COLUMN_DETAIL_SUGGESTIONS_EMPTY)
+        return
+    if "PARAMETERS" in df.columns:
+        df["PARAMETERS"] = df["PARAMETERS"].map(_stringify_params)
+    st.dataframe(df, use_container_width=True, hide_index=True)
+
+
+def _format_detail_value(value: Any) -> str:
+    if value is None:
+        return ui_strings.PROFILE_V2_VALUE_UNKNOWN
+    if isinstance(value, (int, float)):
+        if pd.isna(value):
+            return ui_strings.PROFILE_V2_VALUE_UNKNOWN
+        return str(value)
+    text = str(value).strip()
+    if not text:
+        return ui_strings.PROFILE_V2_VALUE_UNKNOWN
+    return text
 
 
 def _render_column_editors(
@@ -609,6 +899,7 @@ def render_profile(
     _render_columns_grid(
         data.column_features,
         data.column_classification,
+        data.suggested_checks,
         target_fqn,
         helpers,
         session,
