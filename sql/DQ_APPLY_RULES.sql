@@ -1,5 +1,3 @@
--- Stored procedure: ZEUS_ANALYTICS_SIMU.DISCOVERY.DQ_APPLY_RULES
--- Generates suggested checks based on profiling metrics, semantic classification, and the rule library.
 CREATE OR REPLACE PROCEDURE ZEUS_ANALYTICS_SIMU.DISCOVERY.DQ_APPLY_RULES(
     IN_TABLE_FQN STRING
 )
@@ -152,7 +150,8 @@ BEGIN
     FROM column_context ctx
     JOIN active_rules rule_pattern
         ON rule_pattern.RULE_ID = 'PATTERN_BASIC'
-    WHERE ctx.CONTENT_TYPE ILIKE ANY (ARRAY['%code%', '%identifier%']);
+    WHERE ctx.CONTENT_TYPE ILIKE '%code%'
+       OR ctx.CONTENT_TYPE ILIKE '%identifier%';
     v_inserted := SQLROWCOUNT;
 
     RETURN 'OK: suggestions=' || COALESCE(:v_inserted, 0) || ', cleared=' || COALESCE(:v_deleted, 0);
