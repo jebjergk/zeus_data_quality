@@ -13,12 +13,12 @@ DECLARE
     v_deleted     NUMBER := 0;
     v_inserted    NUMBER := 0;
 BEGIN
-    IF (v_table_fqn = '') THEN
+    IF (:v_table_fqn = '') THEN
         RETURN 'ERROR: TABLE_FQN is required';
     END IF;
 
     DELETE FROM ZEUS_ANALYTICS_SIMU.DISCOVERY.DQ_SUGGESTED_CHECKS
-    WHERE TABLE_FQN = v_table_fqn;
+    WHERE TABLE_FQN = :v_table_fqn;
     v_deleted := SQLROWCOUNT;
 
     INSERT INTO ZEUS_ANALYTICS_SIMU.DISCOVERY.DQ_SUGGESTED_CHECKS (
@@ -41,7 +41,7 @@ BEGIN
             MIN_VALUE,
             MAX_VALUE
         FROM ZEUS_ANALYTICS_SIMU.DISCOVERY.DQ_COLUMN_FEATURES
-        WHERE TABLE_FQN = v_table_fqn
+        WHERE TABLE_FQN = :v_table_fqn
     ),
     classification AS (
         SELECT TABLE_FQN, COLUMN_NAME, LOWER(COALESCE(CONTENT_TYPE, '')) AS CONTENT_TYPE
@@ -56,7 +56,7 @@ BEGIN
                     ORDER BY CLASSIFIED_AT DESC
                 ) AS RN
             FROM ZEUS_ANALYTICS_SIMU.DISCOVERY.DQ_COLUMN_CLASSIFICATION
-            WHERE TABLE_FQN = v_table_fqn
+            WHERE TABLE_FQN = :v_table_fqn
         )
         WHERE RN = 1
     ),
@@ -79,7 +79,7 @@ BEGIN
     active_rules AS (
         SELECT RULE_ID, CHECK_TYPE, DEFAULT_SEVERITY
         FROM ZEUS_ANALYTICS_SIMU.DISCOVERY.DQ_RULE_LIBRARY
-        WHERE ACTIVE
+        WHERE ACTIVE = True
     )
     SELECT
         ctx.TABLE_FQN,
@@ -155,6 +155,6 @@ BEGIN
     WHERE ctx.CONTENT_TYPE ILIKE ANY (ARRAY['%code%', '%identifier%']);
     v_inserted := SQLROWCOUNT;
 
-    RETURN 'OK: suggestions=' || COALESCE(v_inserted, 0) || ', cleared=' || COALESCE(v_deleted, 0);
+    RETURN 'OK: suggestions=' || COALESCE(:v_inserted, 0) || ', cleared=' || COALESCE(:v_deleted, 0);
 END;
 $$;
