@@ -143,6 +143,33 @@ def _ensure_columns(df: pd.DataFrame, columns: Iterable[str]) -> pd.DataFrame:
     return df
 
 
+def _normalize_dataframe_columns(df: pd.DataFrame) -> pd.DataFrame:
+    if not isinstance(df, pd.DataFrame):
+        return pd.DataFrame()
+    renamed = {
+        column: str(column or "").strip().upper()
+        for column in df.columns
+    }
+    return df.rename(columns=renamed)
+
+
+def _latest_partition(
+    df: pd.DataFrame,
+    partition_cols: Iterable[str],
+    order_candidates: Iterable[str],
+) -> pd.DataFrame:
+    if not isinstance(df, pd.DataFrame) or df.empty:
+        return pd.DataFrame()
+    working = df.copy()
+    order_cols = [col for col in order_candidates if col in working.columns]
+    if order_cols:
+        working = working.sort_values(by=order_cols, ascending=[False] * len(order_cols))
+    subset = [col for col in partition_cols if col in working.columns]
+    if not subset:
+        return working
+    return working.drop_duplicates(subset=subset, keep="first")
+
+
 def _format_count_ratio(count: Any, ratio: Any) -> str:
     def _format_value(value: Any) -> str:
         if pd.isna(value):
@@ -438,10 +465,6 @@ def get_overview_grid(session: Any, table_fqn: str) -> pd.DataFrame:
         SELECT *
         FROM {SUGGESTED_CHECKS_TABLE}
         WHERE TABLE_FQN = :table_fqn
-        QUALIFY ROW_NUMBER() OVER (
-            PARTITION BY TABLE_FQN, COLUMN_NAME
-            ORDER BY SUGGESTED_AT DESC, RULE_ID DESC
-        ) = 1
     """
     try:
         suggestions = _fetch_dataframe(
@@ -453,6 +476,12 @@ def get_overview_grid(session: Any, table_fqn: str) -> pd.DataFrame:
         )
         suggestions = pd.DataFrame()
 
+    suggestions = _normalize_dataframe_columns(suggestions)
+    suggestions = _latest_partition(
+        suggestions,
+        partition_cols=["TABLE_FQN", "COLUMN_NAME"],
+        order_candidates=["SUGGESTED_AT", "UPDATED_AT", "CREATED_AT", "RULE_ID"],
+    )
     suggestions = _ensure_columns(
         suggestions,
         [
@@ -466,13 +495,9 @@ def get_overview_grid(session: Any, table_fqn: str) -> pd.DataFrame:
     )
 
     classification_sql = f"""
-        SELECT TABLE_FQN, COLUMN_NAME, CONFIDENCE
+        SELECT *
         FROM {COLUMN_CLASSIFICATION_TABLE}
         WHERE TABLE_FQN = :table_fqn
-        QUALIFY ROW_NUMBER() OVER (
-            PARTITION BY TABLE_FQN, COLUMN_NAME
-            ORDER BY CLASSIFIED_AT DESC
-        ) = 1
     """
     try:
         classifications = _fetch_dataframe(
@@ -484,6 +509,12 @@ def get_overview_grid(session: Any, table_fqn: str) -> pd.DataFrame:
         )
         classifications = pd.DataFrame()
 
+    classifications = _normalize_dataframe_columns(classifications)
+    classifications = _latest_partition(
+        classifications,
+        partition_cols=["TABLE_FQN", "COLUMN_NAME"],
+        order_candidates=["CLASSIFIED_AT", "UPDATED_AT", "CREATED_AT"],
+    )
     classifications = _ensure_columns(
         classifications,
         ["TABLE_FQN", "COLUMN_NAME", "CONFIDENCE"],
@@ -537,7 +568,18 @@ def get_overview_grid(session: Any, table_fqn: str) -> pd.DataFrame:
     result["has_suggestion"] = result["rule_id"].notna()
     result["include_in_dq_config"] = result["has_suggestion"].astype(bool)
 
-    return result[overview_columns]
+    overview = result[overview_columns]
+
+    if LOGGER.isEnabledFor(logging.DEBUG):
+        sample = overview.loc[overview["has_suggestion"]].head(5)
+        if not sample.empty:
+            LOGGER.debug(
+                "profiling_v2:overview_sample target=%s sample=%s",
+                normalized,
+                sample.to_dict("records"),
+            )
+
+    return overview
 
 
 
