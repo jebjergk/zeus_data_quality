@@ -26,13 +26,24 @@ class ProfilingError(RuntimeError):
 
 
 def _normalize_table_fqn(table_fqn: Optional[str]) -> str:
-    if not table_fqn:
+    """Return the table FQN when it is a clean DB.SCHEMA.TABLE string."""
+
+    if table_fqn is None:
         return ""
-    cleaned = str(table_fqn).strip()
-    if not cleaned:
+
+    value = str(table_fqn)
+    if not value:
         return ""
-    cleaned = cleaned.strip('"')
-    return cleaned.upper()
+
+    # Reject inputs with leading/trailing whitespace to avoid mutating the FQN.
+    if value != value.strip():
+        return ""
+
+    parts = value.split(".")
+    if len(parts) != 3 or any(not part for part in parts):
+        return ""
+
+    return value
 
 
 def _require_session(session: Any) -> Any:
@@ -127,7 +138,14 @@ def get_column_features(session: Any, table_fqn: str) -> pd.DataFrame:
         ORDER BY COLUMN_NAME
     """
     try:
-        return _fetch_dataframe(session, sql, params=[normalized])
+        df = _fetch_dataframe(session, sql, params=[normalized])
+        if not df.empty:
+            for column in ("MIN_VALUE", "MAX_VALUE"):
+                if column in df.columns:
+                    df[column] = df[column].apply(
+                        lambda value: None if pd.isna(value) else str(value)
+                    )
+        return df
     except Exception as exc:  # pragma: no cover - Snowflake specific failures
         LOGGER.exception("profiling_v2:column_features_failed target=%s", normalized)
         return pd.DataFrame()

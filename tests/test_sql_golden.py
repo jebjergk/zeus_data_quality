@@ -31,7 +31,7 @@ class RecordingSession:
 
 def test_run_profiling_v2_invokes_procedure():
     session = RecordingSession([None])
-    profiling_v2.run_profiling_v2(session, 'db.schema.table')
+    profiling_v2.run_profiling_v2(session, 'DB.SCHEMA.TABLE')
 
     assert session.calls, "Stored procedure call was not recorded"
     sql, params = session.calls[0]
@@ -54,7 +54,7 @@ def test_get_table_profile_summary_returns_frame():
     )
     session = RecordingSession([frame])
 
-    summary_frame = profiling_v2.get_table_profile_summary(session, 'db.schema.table')
+    summary_frame = profiling_v2.get_table_profile_summary(session, 'DB.SCHEMA.TABLE')
 
     assert list(summary_frame["ROW_COUNT"]) == [100, 250]
     assert summary_frame.shape == (2, 3)
