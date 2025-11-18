@@ -96,6 +96,7 @@ Zeus Data Quality provides a shared foundation for compliance, risk, and busines
 - [CONTRIBUTING](CONTRIBUTING.md)
 - [ARCHITECTURE](ARCHITECTURE.md)
 - [UI Contracts](docs/ui_change_guidance.md)
+- [Profiling v2 quick reference](docs/profiling_v2.md)
 - [PR Template](.github/pull_request_template.md)
 - No unsolicited UI/UX refactors; gate experiments behind flags.
 - Snapshot updates require explicit intent; set `UPDATE_SNAPSHOTS=1` when regenerating.
