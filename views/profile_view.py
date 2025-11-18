@@ -162,6 +162,7 @@ def _render_overview_grid(overview: pd.DataFrame, table_fqn: str) -> None:
     working = overview.copy()
     working.index = working["column_name"].astype(str)
     columns_to_display = [
+        "include_in_dq_config",
         "column_name",
         "data_type",
         "null_info",
@@ -173,7 +174,7 @@ def _render_overview_grid(overview: pd.DataFrame, table_fqn: str) -> None:
         "check_type",
         "severity",
         "rationale",
-        "include_in_dq_config",
+        "confidence",
     ]
     bool_columns = {"has_suggestion", "include_in_dq_config"}
     for column in columns_to_display + ["has_suggestion"]:
@@ -201,7 +202,9 @@ def _render_overview_grid(overview: pd.DataFrame, table_fqn: str) -> None:
             default=False,
         )
     }
-    read_only_columns = [column for column in columns_to_display if column != "include_in_dq_config"]
+    read_only_columns = [
+        column for column in columns_to_display if column != "include_in_dq_config"
+    ]
     for column in read_only_columns:
         column_config[column] = st.column_config.TextColumn(column, disabled=True)
 
