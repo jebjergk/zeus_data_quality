@@ -3,14 +3,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, List, Optional
 
 import pandas as pd
 import streamlit as st
 
 from services import profiling_v2 as profiling_service
 from ui import strings as ui_strings
-from utils.flags import DEBUG_PROFILING
 from views.table_picker import stateless_table_picker
 
 
@@ -18,7 +17,6 @@ from views.table_picker import stateless_table_picker
 class _ProfilingData:
     """Container for profiling metadata used by the UI."""
 
-    summary: Dict[str, Any]
     column_features: pd.DataFrame
     column_classification: pd.DataFrame
     suggested_checks: pd.DataFrame
@@ -33,29 +31,6 @@ def _format_timestamp(value: Any) -> str:
     return str(value)
 
 
-def _format_ratio(value: Optional[Any]) -> str:
-    if value is None:
-        return ui_strings.PROFILE_V2_VALUE_UNKNOWN
-    try:
-        numeric = float(value)
-    except (TypeError, ValueError):
-        return str(value)
-    percent = numeric * 100 if 0 <= numeric <= 1 else numeric
-    return f"{percent:.1f}%"
-
-
-def _format_number(value: Optional[Any]) -> str:
-    if value is None:
-        return ui_strings.PROFILE_V2_VALUE_UNKNOWN
-    try:
-        number = float(value)
-    except (TypeError, ValueError):
-        return str(value)
-    if number.is_integer():
-        return f"{int(number):,}"
-    return f"{number:,.2f}"
-
-
 def _stringify_params(value: Any) -> str:
     if value is None:
         return "{}"
@@ -67,13 +42,6 @@ def _stringify_params(value: Any) -> str:
         return json.dumps(value, sort_keys=True)
     except Exception:
         return str(value)
-
-
-def _lookup_summary(summary: Dict[str, Any], keys: Iterable[str]) -> Optional[Any]:
-    for key in keys:
-        if key in summary and summary[key] is not None:
-            return summary[key]
-    return None
 
 
 def _latest_classifications(class_df: pd.DataFrame) -> Dict[str, Dict[str, Any]]:
@@ -132,38 +100,127 @@ def _prepare_suggested_checks(df: pd.DataFrame) -> pd.DataFrame:
     return working[existing + trailing]
 
 
-def _prepare_classification(df: pd.DataFrame) -> pd.DataFrame:
-    if df.empty:
-        return df
+def _prepare_columns_grid(features: pd.DataFrame, classification: pd.DataFrame) -> pd.DataFrame:
+    merged = _merge_column_details(features, classification)
+    if merged.empty:
+        return merged
     desired_order: List[str] = [
         "COLUMN_NAME",
+        "DATA_TYPE",
+        "NULL_RATIO",
+        "DISTINCT_RATIO",
+        "MIN_VALUE",
+        "MAX_VALUE",
         "CONTENT_TYPE",
-        "SEMANTIC_CATEGORY",
         "SEMANTIC_ROLE",
-        "SOURCE",
         "CONFIDENCE",
-        "CLASSIFIED_AT",
     ]
-    existing = [col for col in desired_order if col in df.columns]
-    trailing = [col for col in df.columns if col not in existing]
-    return df[existing + trailing]
+    working = merged.copy()
+    for column in desired_order:
+        if column not in working.columns:
+            working[column] = None
+    if "COLUMN_NAME" in working.columns:
+        working = working.sort_values(by="COLUMN_NAME")
+    return working[desired_order]
 
 
-def _prepare_run_history(df: pd.DataFrame) -> pd.DataFrame:
-    if df.empty:
-        return df
-    desired_order: List[str] = [
-        "RUN_ID",
-        "TABLE_FQN",
-        "PROFILED_AT",
-        "ROW_COUNT",
-        "SAMPLE_PERCENT",
-        "STATUS",
-        "DURATION_SECONDS",
-    ]
-    existing = [col for col in desired_order if col in df.columns]
-    trailing = [col for col in df.columns if col not in existing]
-    return df[existing + trailing]
+def _calculate_duration_seconds(started: Any, finished: Any) -> Optional[float]:
+    if started is None or finished is None:
+        return None
+    try:
+        start_ts = pd.to_datetime(started)
+        finish_ts = pd.to_datetime(finished)
+    except Exception:
+        return None
+    if pd.isna(start_ts) or pd.isna(finish_ts):
+        return None
+    duration = finish_ts - start_ts
+    if duration.total_seconds() < 0:
+        return None
+    return float(duration.total_seconds())
+
+
+def _format_duration(seconds: Optional[float]) -> str:
+    if seconds is None:
+        return ui_strings.PROFILE_V2_VALUE_UNKNOWN
+    if seconds < 1:
+        return f"{seconds:.2f}s"
+    if seconds < 60:
+        return f"{seconds:.1f}s"
+    minutes, remainder = divmod(seconds, 60)
+    if minutes < 60:
+        return f"{int(minutes)}m {int(remainder)}s"
+    hours, minutes = divmod(minutes, 60)
+    return f"{int(hours)}h {int(minutes)}m"
+
+
+def _latest_run_record(run_history: pd.DataFrame) -> Optional[pd.Series]:
+    if not isinstance(run_history, pd.DataFrame) or run_history.empty:
+        return None
+    ordered = run_history
+    if "STARTED_AT" in ordered.columns:
+        ordered = ordered.sort_values(by="STARTED_AT", ascending=False)
+    return ordered.iloc[0]
+
+
+def _status_banner(status: str):
+    normalized = (status or "").upper()
+    if normalized in {"SUCCESS", "SUCCEEDED", "DONE"}:
+        return st.success
+    if normalized in {"RUNNING", "IN_PROGRESS", "STARTED", "QUEUED"}:
+        return st.warning
+    if normalized in {"FAILED", "ERROR"}:
+        return st.error
+    return st.info
+
+
+def _render_last_run_banner(run_history: pd.DataFrame, target_fqn: str) -> None:
+    st.subheader(ui_strings.PROFILE_V2_STATUS_SUBHEADER)
+    latest = _latest_run_record(run_history)
+    if latest is None:
+        st.info(ui_strings.PROFILE_V2_STATUS_EMPTY.format(table=target_fqn))
+        return
+    status_value = latest.get("STATUS") or ui_strings.PROFILE_V2_VALUE_UNKNOWN
+    started_at = latest.get("STARTED_AT")
+    finished_at = latest.get("FINISHED_AT") or started_at
+    run_id = (
+        latest.get("RUN_ID")
+        or latest.get("PROFILE_RUN_ID")
+        or ui_strings.PROFILE_V2_VALUE_UNKNOWN
+    )
+    duration_seconds = _calculate_duration_seconds(started_at, latest.get("FINISHED_AT"))
+    banner = _status_banner(str(status_value))
+    banner(
+        ui_strings.PROFILE_V2_STATUS_MESSAGE.format(
+            status=str(status_value),
+            timestamp=_format_timestamp(finished_at),
+            duration=_format_duration(duration_seconds),
+            run_id=run_id,
+        )
+    )
+    details = latest.get("DETAILS")
+    if details:
+        st.caption(
+            ui_strings.PROFILE_V2_STATUS_DETAILS.format(details=str(details))
+        )
+
+
+def _render_columns_grid(features: pd.DataFrame, classification: pd.DataFrame) -> None:
+    st.subheader(ui_strings.PROFILE_V2_COLUMNS_SUBHEADER)
+    prepared = _prepare_columns_grid(features, classification)
+    if prepared.empty:
+        st.info(ui_strings.PROFILE_V2_COLUMNS_EMPTY)
+        return
+    st.dataframe(prepared, use_container_width=True, hide_index=True)
+
+
+def _render_suggested_checks_grid(suggested_checks: pd.DataFrame) -> None:
+    st.subheader(ui_strings.PROFILE_V2_SUGGESTIONS_SUBHEADER)
+    prepared = _prepare_suggested_checks(suggested_checks)
+    if prepared.empty:
+        st.info(ui_strings.PROFILE_V2_SUGGESTIONS_EMPTY)
+        return
+    st.dataframe(prepared, use_container_width=True, hide_index=True)
 
 
 def _resolve_helpers(profiling_helpers: Optional[Any]):
@@ -176,45 +233,13 @@ def _extract_last_run_id(run_history: pd.DataFrame) -> Optional[str]:
     if "RUN_ID" not in run_history.columns:
         return None
     ordered = run_history
-    if "PROFILED_AT" in ordered.columns:
-        ordered = ordered.sort_values(by="PROFILED_AT", ascending=False)
+    for column in ("FINISHED_AT", "STARTED_AT", "PROFILED_AT"):
+        if column in ordered.columns:
+            ordered = ordered.sort_values(by=column, ascending=False)
+            break
     latest = ordered.iloc[0]
     run_id = latest.get("RUN_ID")
     return str(run_id) if run_id is not None else None
-
-
-def _render_debug_section(data: _ProfilingData, target_fqn: str) -> None:
-    if not DEBUG_PROFILING:
-        return
-
-    last_table = st.session_state.get("profile_last_table") or target_fqn
-    if not last_table:
-        last_table = ui_strings.PROFILE_V2_VALUE_UNKNOWN
-    last_run_id = (
-        st.session_state.get("profile_last_run_id")
-        or _extract_last_run_id(data.recent_runs)
-        or ui_strings.PROFILE_V2_VALUE_UNKNOWN
-    )
-    feature_rows = int(len(data.column_features.index)) if isinstance(data.column_features, pd.DataFrame) else 0
-    class_rows = int(len(data.column_classification.index)) if isinstance(data.column_classification, pd.DataFrame) else 0
-    suggestion_rows = int(len(data.suggested_checks.index)) if isinstance(data.suggested_checks, pd.DataFrame) else 0
-    debug_payload = {
-        "summary": data.summary,
-        "column_features": data.column_features.to_dict("records"),
-        "column_classification": data.column_classification.to_dict("records"),
-        "suggested_checks": data.suggested_checks.to_dict("records"),
-        "recent_runs": data.recent_runs.to_dict("records"),
-    }
-    with st.expander(ui_strings.PROFILE_V2_DEBUG_EXPANDER, expanded=False):
-        st.markdown(f"**{ui_strings.PROFILE_V2_DEBUG_STATUS_HEADER}**")
-        status_cols = st.columns(2)
-        status_cols[0].metric(ui_strings.PROFILE_V2_DEBUG_LAST_TABLE, last_table)
-        status_cols[1].metric(ui_strings.PROFILE_V2_DEBUG_LAST_RUN_ID, last_run_id)
-        row_cols = st.columns(3)
-        row_cols[0].metric(ui_strings.PROFILE_V2_DEBUG_FEATURE_ROWS, feature_rows)
-        row_cols[1].metric(ui_strings.PROFILE_V2_DEBUG_CLASS_ROWS, class_rows)
-        row_cols[2].metric(ui_strings.PROFILE_V2_DEBUG_SUGGESTION_ROWS, suggestion_rows)
-        st.json(debug_payload)
 
 
 def _load_metadata(
@@ -222,23 +247,6 @@ def _load_metadata(
     session: Any,
     table_fqn: str,
 ) -> _ProfilingData:
-    summary_fetch = getattr(helpers, "fetch_table_summary", None)
-    summary = summary_fetch(session, table_fqn) if callable(summary_fetch) else {}
-    if not summary:
-        summary_frame_fn = getattr(helpers, "get_table_profile_summary", None)
-        if callable(summary_frame_fn):
-            summary_frame = summary_frame_fn(session, table_fqn)
-            if isinstance(summary_frame, pd.DataFrame) and not summary_frame.empty:
-                order_cols = [
-                    col
-                    for col in ("PROFILED_AT", "UPDATED_AT", "RUN_TS")
-                    if col in summary_frame.columns
-                ]
-                if order_cols:
-                    summary_frame = summary_frame.sort_values(
-                        by=order_cols, ascending=False
-                    )
-                summary = summary_frame.iloc[0].to_dict()
     column_features_fn = getattr(helpers, "get_column_features", None)
     column_features = (
         column_features_fn(session, table_fqn)
@@ -260,82 +268,11 @@ def _load_metadata(
     run_history_fn = getattr(helpers, "fetch_recent_runs", None)
     recent_runs = run_history_fn(session, table_fqn) if callable(run_history_fn) else pd.DataFrame()
     return _ProfilingData(
-        summary=summary or {},
         column_features=column_features if isinstance(column_features, pd.DataFrame) else pd.DataFrame(),
-        column_classification=
-        column_classification if isinstance(column_classification, pd.DataFrame) else pd.DataFrame(),
+        column_classification=column_classification if isinstance(column_classification, pd.DataFrame) else pd.DataFrame(),
         suggested_checks=suggested_checks if isinstance(suggested_checks, pd.DataFrame) else pd.DataFrame(),
         recent_runs=recent_runs if isinstance(recent_runs, pd.DataFrame) else pd.DataFrame(),
     )
-
-
-def _render_summary(summary: Dict[str, Any], features: pd.DataFrame) -> None:
-    st.subheader(ui_strings.PROFILE_V2_SUMMARY_SUBHEADER)
-    if not summary:
-        st.info(ui_strings.PROFILE_V2_SUMMARY_EMPTY)
-        return
-    rows_value = _lookup_summary(summary, ["ROW_COUNT", "ROWS_PROFILED", "PROFILED_ROWS"])
-    sample_value = _lookup_summary(summary, ["SAMPLE_PERCENT", "SAMPLE_RATIO"])
-    duration_value = _lookup_summary(summary, ["DURATION_SECONDS", "RUNTIME_SECONDS"])
-    profiled_ts = _lookup_summary(summary, ["PROFILED_AT", "RUN_TS", "UPDATED_AT"])
-    metric_columns = st.columns(3)
-    metric_columns[0].metric(ui_strings.PROFILE_V2_SUMMARY_ROWS, _format_number(rows_value))
-    metric_columns[1].metric(ui_strings.PROFILE_V2_SUMMARY_SAMPLE, _format_ratio(sample_value))
-    metric_columns[2].metric(
-        ui_strings.PROFILE_V2_SUMMARY_DURATION,
-        _format_number(duration_value),
-        help=ui_strings.PROFILE_V2_SUMMARY_TIMESTAMP.format(
-            timestamp=_format_timestamp(profiled_ts)
-        ),
-    )
-    column_count = _lookup_summary(summary, ["COLUMN_COUNT", "TOTAL_COLUMNS"])
-    avg_null = _lookup_summary(summary, ["AVG_NULL_RATIO", "AVG_NULL_PERCENT"])
-    avg_distinct = _lookup_summary(summary, ["AVG_DISTINCT_RATIO", "AVG_DISTINCT_PERCENT"])
-    stats_cols = st.columns(4)
-    stats_cols[0].metric("Column count", _format_number(column_count or len(features.index)))
-    stats_cols[1].metric("Last profiled", _format_timestamp(profiled_ts))
-    stats_cols[2].metric("Avg. null ratio", _format_ratio(avg_null))
-    stats_cols[3].metric("Avg. distinct ratio", _format_ratio(avg_distinct))
-
-
-def _render_features_tab(features: pd.DataFrame, classification: pd.DataFrame) -> None:
-    st.subheader(ui_strings.PROFILE_V2_FEATURES_SUBHEADER)
-    if features.empty:
-        st.info(ui_strings.PROFILE_V2_FEATURES_EMPTY)
-        return
-    merged = _merge_column_details(features, classification)
-    st.dataframe(
-        merged,
-        use_container_width=True,
-        hide_index=True,
-    )
-
-
-def _render_classification_tab(classification: pd.DataFrame) -> None:
-    st.subheader(ui_strings.PROFILE_V2_CLASSIFICATION_SUBHEADER)
-    prepared = _prepare_classification(classification)
-    if prepared.empty:
-        st.info(ui_strings.PROFILE_V2_CLASSIFICATION_EMPTY)
-        return
-    st.dataframe(prepared, use_container_width=True, hide_index=True)
-
-
-def _render_suggestions_tab(suggested_checks: pd.DataFrame) -> None:
-    st.subheader(ui_strings.PROFILE_V2_SUGGESTIONS_SUBHEADER)
-    prepared = _prepare_suggested_checks(suggested_checks)
-    if prepared.empty:
-        st.info(ui_strings.PROFILE_V2_SUGGESTIONS_EMPTY)
-        return
-    st.dataframe(prepared, use_container_width=True, hide_index=True)
-
-
-def _render_run_history_tab(run_history: pd.DataFrame) -> None:
-    st.subheader(ui_strings.PROFILE_V2_RUNS_SUBHEADER)
-    prepared = _prepare_run_history(run_history)
-    if prepared.empty:
-        st.info(ui_strings.PROFILE_V2_RUNS_EMPTY)
-        return
-    st.dataframe(prepared, use_container_width=True, hide_index=True)
 
 
 def render_profile(
@@ -419,23 +356,8 @@ def render_profile(
     st.session_state["profile_last_table"] = target_fqn
     st.session_state["profile_last_run_id"] = _extract_last_run_id(data.recent_runs)
 
-    _render_summary(data.summary, data.column_features)
-
-    tab_titles = [
-        ui_strings.PROFILE_V2_TAB_FEATURES,
-        ui_strings.PROFILE_V2_TAB_CLASSIFICATION,
-        ui_strings.PROFILE_V2_TAB_SUGGESTIONS,
-        ui_strings.PROFILE_V2_TAB_RUNS,
-    ]
-    tabs = st.tabs(tab_titles)
-
-    with tabs[0]:
-        _render_features_tab(data.column_features, data.column_classification)
-    with tabs[1]:
-        _render_classification_tab(data.column_classification)
-    with tabs[2]:
-        _render_suggestions_tab(data.suggested_checks)
-    with tabs[3]:
-        _render_run_history_tab(data.recent_runs)
-
-    _render_debug_section(data, target_fqn)
+    _render_last_run_banner(data.recent_runs, target_fqn)
+    st.divider()
+    _render_columns_grid(data.column_features, data.column_classification)
+    st.divider()
+    _render_suggested_checks_grid(data.suggested_checks)
