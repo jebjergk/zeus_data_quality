@@ -63,7 +63,7 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 from uuid import uuid4
 
-ALLOWED_PAGES = {"home", "cfg", "profile", "monitor", "docs"}
+ALLOWED_PAGES = {"home", "cfg", "profile", "monitor", "docs", "rules"}
 
 if st.session_state["_rerun_count"] == 1:
     logging.info("route:init %s", current_view)
@@ -125,6 +125,7 @@ from views.profile_view import render_profile as render_profiling_view
 from views.table_picker import stateless_table_picker, session_cache_token
 from views.docs_view import render_docs as render_docs_view
 from views.config_editor import render_row_count_preview
+from views.rule_admin_view import render_rule_admin
 
 METADATA_DB, METADATA_SCHEMA = get_metadata_namespace()
 PROC_NAME = get_proc_name()
@@ -1730,6 +1731,14 @@ with st.sidebar:
         args=("monitor",),
     )
     st.button(
+        "DQ Rules",
+        use_container_width=True,
+        type="primary" if view == "rules" else "secondary",
+        key="nav_rules",
+        on_click=navigate_to,
+        args=("rules",),
+    )
+    st.button(
         "📘 Documentation",
         use_container_width=True,
         type="primary" if view == "docs" else "secondary",
@@ -1770,6 +1779,8 @@ elif view == "profile":
     render_profiling_view(session, METADATA_DB, METADATA_SCHEMA, profiling_v2)
 elif view == "monitor":
     render_monitor()
+elif view == "rules":
+    render_rule_admin(session, METADATA_DB, METADATA_SCHEMA)
 elif view == "docs":
     render_docs()
 else:
