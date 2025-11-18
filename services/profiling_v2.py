@@ -167,11 +167,11 @@ def get_column_classification(session: Any, table_fqn: str) -> pd.DataFrame:
     sql = f"""
         SELECT *
         FROM {COLUMN_CLASSIFICATION_TABLE}
-        WHERE TABLE_FQN = ?
+        WHERE TABLE_FQN = :table_fqn
         ORDER BY COLUMN_NAME, SOURCE DESC, CLASSIFIED_AT DESC
     """
     try:
-        return _fetch_dataframe(session, sql, params=[normalized])
+        return _fetch_dataframe(session, sql, params={"table_fqn": normalized})
     except Exception as exc:  # pragma: no cover - Snowflake specific failures
         LOGGER.exception(
             "profiling_v2:column_classification_failed target=%s", normalized
@@ -183,6 +183,95 @@ def fetch_column_classifications(session: Any, table_fqn: str) -> pd.DataFrame:
     """Backwards-compatible wrapper for :func:`get_column_classification`."""
 
     return get_column_classification(session, table_fqn)
+
+
+def get_effective_classification(session: Any, table_fqn: str) -> pd.DataFrame:
+    """Return the latest classification per column for rendering."""
+
+    normalized = _normalize_table_fqn(table_fqn)
+    if not normalized:
+        return pd.DataFrame()
+
+    sql = f"""
+        SELECT *
+        FROM {COLUMN_CLASSIFICATION_TABLE}
+        WHERE TABLE_FQN = :table_fqn
+        QUALIFY ROW_NUMBER() OVER (
+            PARTITION BY TABLE_FQN, COLUMN_NAME
+            ORDER BY CLASSIFIED_AT DESC
+        ) = 1
+        ORDER BY COLUMN_NAME
+    """
+    try:
+        return _fetch_dataframe(session, sql, params={"table_fqn": normalized})
+    except Exception as exc:  # pragma: no cover - Snowflake specific failures
+        LOGGER.exception(
+            "profiling_v2:effective_column_classification_failed target=%s",
+            normalized,
+        )
+        return pd.DataFrame()
+
+
+def save_manual_classification(
+    session: Any,
+    table_fqn: str,
+    column_name: str,
+    content_type: Optional[str],
+    semantic_role: Optional[str],
+    actor: Optional[str] = None,
+) -> None:
+    """Persist a manual classification override for *column_name*."""
+
+    normalized = _normalize_table_fqn(table_fqn)
+    if not normalized:
+        raise ProfilingError("Fully-qualified table name is required")
+
+    column = str(column_name or "").strip()
+    if not column:
+        raise ProfilingError("Column name is required for manual classification")
+
+    if actor:
+        LOGGER.info(
+            "profiling_v2:manual_override actor=%s table=%s column=%s",
+            actor,
+            normalized,
+            column,
+        )
+
+    sql = f"""
+        INSERT INTO {COLUMN_CLASSIFICATION_TABLE} (
+            TABLE_FQN,
+            COLUMN_NAME,
+            CONTENT_TYPE,
+            SEMANTIC_ROLE,
+            SOURCE,
+            CONFIDENCE,
+            CLASSIFIED_AT
+        ) VALUES (
+            :table_fqn,
+            :column_name,
+            :content_type,
+            :semantic_role,
+            'MANUAL',
+            1.0,
+            CURRENT_TIMESTAMP()
+        )
+    """
+    params = {
+        "table_fqn": normalized,
+        "column_name": column,
+        "content_type": (content_type or None),
+        "semantic_role": (semantic_role or None),
+    }
+    try:
+        _execute_sql(session, sql, params=params).collect()
+    except Exception as exc:  # pragma: no cover - Snowflake specific failures
+        LOGGER.exception(
+            "profiling_v2:manual_classification_failed target=%s column=%s",
+            normalized,
+            column,
+        )
+        raise ProfilingError("Failed to save manual classification") from exc
 
 
 def get_suggested_checks(session: Any, table_fqn: str) -> pd.DataFrame:

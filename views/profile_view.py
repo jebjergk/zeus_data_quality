@@ -72,7 +72,13 @@ def _merge_column_details(features: pd.DataFrame, classification: pd.DataFrame) 
         column_name = str(record.get("COLUMN_NAME", ""))
         class_record = class_lookup.get(column_name)
         if class_record:
-            for key in ("CONTENT_TYPE", "SEMANTIC_ROLE", "SOURCE", "CONFIDENCE"):
+            for key in (
+                "CONTENT_TYPE",
+                "SEMANTIC_ROLE",
+                "SOURCE",
+                "CONFIDENCE",
+                "CLASSIFIED_AT",
+            ):
                 if key in class_record:
                     merged[key] = class_record.get(key)
         records.append(merged)
@@ -122,7 +128,9 @@ def _prepare_columns_grid(features: pd.DataFrame, classification: pd.DataFrame) 
         "MAX_VALUE",
         "CONTENT_TYPE",
         "SEMANTIC_ROLE",
+        "SOURCE",
         "CONFIDENCE",
+        "CLASSIFIED_AT",
     ]
     working = merged.copy()
     for column in desired_order:
@@ -221,13 +229,169 @@ def _render_last_run_banner(run_history: pd.DataFrame, target_fqn: str) -> None:
         )
 
 
-def _render_columns_grid(features: pd.DataFrame, classification: pd.DataFrame) -> None:
+def _classification_source_badge(source: Any) -> str:
+    normalized = str(source or "").strip().upper()
+    if normalized == "MANUAL":
+        return ui_strings.PROFILE_V2_COLUMNS_SOURCE_MANUAL
+    if normalized:
+        return ui_strings.PROFILE_V2_COLUMNS_SOURCE_HEURISTIC.format(source=normalized)
+    return ui_strings.PROFILE_V2_COLUMNS_SOURCE_UNKNOWN
+
+
+def _render_columns_grid(
+    features: pd.DataFrame,
+    classification: pd.DataFrame,
+    table_fqn: str,
+    helpers: Any,
+    session: Any,
+) -> None:
     st.subheader(ui_strings.PROFILE_V2_COLUMNS_SUBHEADER)
     prepared = _prepare_columns_grid(features, classification)
     if prepared.empty:
         st.info(ui_strings.PROFILE_V2_COLUMNS_EMPTY)
         return
-    st.dataframe(prepared, use_container_width=True, hide_index=True)
+    working = prepared.copy()
+    if "SOURCE" in working.columns:
+        working["CLASSIFICATION_SOURCE"] = working["SOURCE"].map(
+            _classification_source_badge
+        )
+    else:
+        working["CLASSIFICATION_SOURCE"] = ui_strings.PROFILE_V2_COLUMNS_SOURCE_UNKNOWN
+    display_columns: List[str] = [
+        "COLUMN_NAME",
+        "DATA_TYPE",
+        "NULL_RATIO",
+        "DISTINCT_RATIO",
+        "MIN_VALUE",
+        "MAX_VALUE",
+        "CONTENT_TYPE",
+        "SEMANTIC_ROLE",
+        "CLASSIFICATION_SOURCE",
+        "CONFIDENCE",
+        "CLASSIFIED_AT",
+    ]
+    existing = [col for col in display_columns if col in working.columns]
+    st.dataframe(working[existing], use_container_width=True, hide_index=True)
+    _render_column_editors(working, table_fqn, helpers, session)
+
+
+def _render_column_editors(
+    prepared: pd.DataFrame,
+    table_fqn: str,
+    helpers: Any,
+    session: Any,
+) -> None:
+    if prepared.empty:
+        st.info(ui_strings.PROFILE_V2_COLUMNS_EDIT_EMPTY)
+        return
+    save_fn = getattr(helpers, "save_manual_classification", None)
+    if not callable(save_fn):
+        st.info(ui_strings.PROFILE_V2_COLUMNS_EDIT_UNAVAILABLE)
+        return
+    st.markdown(f"**{ui_strings.PROFILE_V2_COLUMNS_EDIT_HEADER}**")
+    st.caption(ui_strings.PROFILE_V2_COLUMNS_EDIT_HELP)
+    for record in prepared.to_dict("records"):
+        _render_column_editor_form(record, table_fqn, session, save_fn)
+
+
+def _render_column_editor_form(
+    record: Dict[str, Any],
+    table_fqn: str,
+    session: Any,
+    save_fn: Any,
+) -> None:
+    column_name = str(record.get("COLUMN_NAME") or "").strip()
+    if not column_name:
+        return
+    source_badge = _classification_source_badge(record.get("SOURCE"))
+    expander_label = ui_strings.PROFILE_V2_COLUMN_EDIT_EXPANDER.format(
+        column=column_name,
+        source=source_badge,
+    )
+    nonce = st.session_state.get("profile_data_nonce", 0)
+    form_key = f"profile_class_form_{table_fqn}_{column_name}_{nonce}"
+    with st.expander(expander_label, expanded=False):
+        st.caption(
+            ui_strings.PROFILE_V2_COLUMN_EDIT_STATUS.format(
+                confidence=_format_confidence(record.get("CONFIDENCE")),
+                classified_at=_format_timestamp(record.get("CLASSIFIED_AT")),
+            )
+        )
+        with st.form(form_key):
+            content_default = record.get("CONTENT_TYPE")
+            semantic_default = record.get("SEMANTIC_ROLE")
+            content_value = st.text_input(
+                ui_strings.PROFILE_V2_COLUMN_CONTENT_LABEL,
+                value=("" if content_default is None else str(content_default)),
+                key=f"{form_key}_content",
+            )
+            semantic_value = st.text_input(
+                ui_strings.PROFILE_V2_COLUMN_SEMANTIC_LABEL,
+                value=("" if semantic_default is None else str(semantic_default)),
+                key=f"{form_key}_semantic",
+            )
+            submitted = st.form_submit_button(
+                ui_strings.PROFILE_V2_COLUMN_SAVE_BUTTON,
+                use_container_width=True,
+            )
+        if submitted:
+            _handle_manual_classification_save(
+                save_fn,
+                session,
+                table_fqn,
+                column_name,
+                content_value,
+                semantic_value,
+            )
+
+
+def _format_confidence(value: Any) -> str:
+    if value is None:
+        return ui_strings.PROFILE_V2_VALUE_UNKNOWN
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return str(value)
+    if pd.isna(numeric):
+        return ui_strings.PROFILE_V2_VALUE_UNKNOWN
+    return f"{numeric:.2f}"
+
+
+def _handle_manual_classification_save(
+    save_fn: Any,
+    session: Any,
+    table_fqn: str,
+    column_name: str,
+    content_value: Optional[str],
+    semantic_value: Optional[str],
+) -> None:
+    content_clean = (content_value or "").strip() or None
+    semantic_clean = (semantic_value or "").strip() or None
+    spinner = ui_strings.PROFILE_V2_COLUMN_EDIT_SPINNER.format(column=column_name)
+    with st.spinner(spinner):
+        try:
+            save_fn(
+                session,
+                table_fqn,
+                column_name,
+                content_clean,
+                semantic_clean,
+            )
+        except Exception as exc:  # pragma: no cover - UI feedback only
+            st.error(
+                ui_strings.PROFILE_V2_COLUMN_EDIT_ERROR.format(
+                    column=column_name,
+                    error=str(exc),
+                )
+            )
+            return
+    st.success(
+        ui_strings.PROFILE_V2_COLUMN_EDIT_SUCCESS.format(column=column_name)
+    )
+    st.session_state["profile_data_nonce"] = (
+        st.session_state.get("profile_data_nonce", 0) + 1
+    )
+    st.experimental_rerun()
 
 
 def _render_suggested_checks_grid(suggested_checks: pd.DataFrame) -> None:
@@ -269,12 +433,16 @@ def _load_metadata(
         if callable(column_features_fn)
         else pd.DataFrame()
     )
-    column_class_fn = getattr(helpers, "get_column_classification", None)
-    column_classification = (
-        column_class_fn(session, table_fqn)
-        if callable(column_class_fn)
-        else pd.DataFrame()
-    )
+    effective_class_fn = getattr(helpers, "get_effective_classification", None)
+    if callable(effective_class_fn):
+        column_classification = effective_class_fn(session, table_fqn)
+    else:
+        column_class_fn = getattr(helpers, "get_column_classification", None)
+        column_classification = (
+            column_class_fn(session, table_fqn)
+            if callable(column_class_fn)
+            else pd.DataFrame()
+        )
     suggested_checks_fn = getattr(helpers, "get_suggested_checks", None)
     suggested_checks = (
         suggested_checks_fn(session, table_fqn)
@@ -380,6 +548,12 @@ def render_profile(
 
     _render_last_run_banner(data.recent_runs, target_fqn)
     st.divider()
-    _render_columns_grid(data.column_features, data.column_classification)
+    _render_columns_grid(
+        data.column_features,
+        data.column_classification,
+        target_fqn,
+        helpers,
+        session,
+    )
     st.divider()
     _render_suggested_checks_grid(data.suggested_checks)
