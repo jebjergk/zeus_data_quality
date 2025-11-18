@@ -131,6 +131,7 @@ def run_suggestions_only(session: Any, table_fqn: str) -> None:
     try:
         sql = f"CALL {SUGGESTIONS_PROC}(?)"
         _execute_sql(session, sql, params=[normalized]).collect()
+        LOGGER.info("profiling_v2:apply_rules_complete target=%s", normalized)
     except Exception as exc:  # pragma: no cover - Snowflake specific failures
         message = _friendly_error_message(exc)
         LOGGER.exception("profiling_v2:apply_rules_failed target=%s", normalized)
