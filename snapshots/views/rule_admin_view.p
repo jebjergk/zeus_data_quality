@@ -136,6 +136,7 @@ def render_rule_admin(session: Optional[Session], metadata_db: str, metadata_sch
     st.caption(f"Source table: {table_name}")
 
     st.session_state.setdefault("rule_admin_create_mode", False)
+    st.session_state.setdefault("rule_admin_editing_rule_id", None)
 
     if st.button("Create rule", use_container_width=False, key="rule_admin_create_btn"):
         st.session_state["rule_admin_create_mode"] = True
@@ -170,37 +171,32 @@ def render_rule_admin(session: Optional[Session], metadata_db: str, metadata_sch
             st.code(rule.get("EXPRESSION_TEMPLATE") or "", language="sql")
             st.caption("Parameter schema")
             st.code(_normalize_param_schema(rule.get("PARAM_SCHEMA")), language="json")
+            editing_rule_id = st.session_state.get("rule_admin_editing_rule_id")
+            is_editing = editing_rule_id == rule_id
 
-            with st.form(f"edit_rule_{rule_id}"):
-                description_value = st.text_area(
-                    "Description",
-                    value=rule.get("DESCRIPTION") or "",
-                    help="Optional free-form notes about this rule.",
+            if is_editing:
+                _render_edit_form(
+                    session=session,
+                    table_name=table_name,
+                    rule=rule,
+                    severity_choices=severity_choices,
                 )
-                severity_value = st.selectbox(
-                    "Default severity",
-                    options=severity_choices,
-                    index=_resolve_default_index(severity_choices, rule.get("DEFAULT_SEVERITY")),
-                )
-                active_value = st.checkbox(
-                    "Active",
-                    value=bool(rule.get("ACTIVE")),
-                    help="Inactive rules will not appear in configuration suggestions.",
-                )
-                submit = st.form_submit_button("Save changes", use_container_width=False)
-                if submit:
-                    try:
-                        _run_update(
-                            session,
-                            table_name,
-                            rule_id=rule_id,
-                            description=description_value.strip() or None,
-                            default_severity=severity_value.strip() or None,
-                            active=bool(active_value),
-                        )
-                        st.success(f"Rule {rule_id} updated.")
-                    except Exception as exc:
-                        st.error(f"Unable to update rule {rule_id}: {exc}")
+            else:
+                disabled = bool(editing_rule_id)
+                if st.button(
+                    "Edit rule",
+                    key=f"edit_rule_btn_{rule_id}",
+                    disabled=disabled,
+                    use_container_width=False,
+                ):
+                    st.session_state["rule_admin_editing_rule_id"] = rule_id
+                if disabled:
+                    st.info(
+                        "Another rule is currently being edited. "
+                        "Save or cancel to edit a different rule."
+                    )
+                else:
+                    st.caption("Click edit to modify this rule.")
 
 
 def _resolve_default_index(options: List[str], current_value: Optional[str]) -> int:
@@ -293,3 +289,49 @@ def _validate_create_inputs(
     except ValueError as exc:
         errors.append(str(exc))
     return errors
+
+
+def _render_edit_form(
+    *,
+    session: Session,
+    table_name: str,
+    rule: Dict[str, Any],
+    severity_choices: List[str],
+) -> None:
+    rule_id = str(rule.get("RULE_ID"))
+    severity_options = list(severity_choices)
+    with st.form(f"edit_rule_{rule_id}"):
+        description_value = st.text_area(
+            "Description",
+            value=rule.get("DESCRIPTION") or "",
+            help="Optional free-form notes about this rule.",
+        )
+        severity_value = st.selectbox(
+            "Default severity",
+            options=severity_options,
+            index=_resolve_default_index(severity_options, rule.get("DEFAULT_SEVERITY")),
+        )
+        active_value = st.checkbox(
+            "Active",
+            value=bool(rule.get("ACTIVE")),
+            help="Inactive rules will not appear in configuration suggestions.",
+        )
+        col_save, col_cancel = st.columns(2)
+        submit = col_save.form_submit_button("Save changes", use_container_width=False)
+        cancel = col_cancel.form_submit_button("Cancel")
+        if cancel:
+            st.session_state["rule_admin_editing_rule_id"] = None
+        if submit:
+            try:
+                _run_update(
+                    session,
+                    table_name,
+                    rule_id=rule_id,
+                    description=description_value.strip() or None,
+                    default_severity=severity_value.strip() or None,
+                    active=bool(active_value),
+                )
+                st.session_state["rule_admin_editing_rule_id"] = None
+                st.success(f"Rule {rule_id} updated.")
+            except Exception as exc:
+                st.error(f"Unable to update rule {rule_id}: {exc}")
