@@ -256,15 +256,133 @@ def _render_overview_grid(overview: pd.DataFrame, table_fqn: str) -> None:
     )
 
 
+def _normalize_classification_value(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value.strip()
+    if pd.isna(value):
+        return ""
+    return str(value).strip()
+
+
 def _render_classification_grid(
-    column_classification: pd.DataFrame,
+    classification: pd.DataFrame,
     table_fqn: str,
     helpers: Any,
     session: Any,
 ) -> None:
-    """Placeholder for the upcoming classification grid implementation."""
+    if not isinstance(classification, pd.DataFrame) or classification.empty:
+        st.info(ui_strings.PROFILE_V2_COLUMNS_EDIT_EMPTY)
+        return
 
-    st.info(ui_strings.PROFILE_V2_CLASSIFICATION_PLACEHOLDER)
+    latest_records = _latest_classifications(classification)
+    if isinstance(latest_records, dict) and latest_records:
+        working = pd.DataFrame.from_records(list(latest_records.values()))
+    else:
+        working = classification.copy()
+
+    save_fn = getattr(helpers, "save_manual_classification", None)
+    if not callable(save_fn):
+        st.info(ui_strings.PROFILE_V2_COLUMNS_EDIT_UNAVAILABLE)
+        return
+
+    st.markdown(f"**{ui_strings.PROFILE_V2_COLUMNS_EDIT_HEADER}**")
+    st.caption(ui_strings.PROFILE_V2_COLUMNS_EDIT_HELP)
+
+    if "COLUMN_NAME" not in working.columns:
+        working["COLUMN_NAME"] = ""
+    editable_columns = ["CONTENT_TYPE", "SEMANTIC_ROLE", "SOURCE", "CONFIDENCE", "CLASSIFIED_AT"]
+    for column in editable_columns:
+        if column not in working.columns:
+            working[column] = ""
+
+    working["COLUMN_NAME"] = working["COLUMN_NAME"].astype(str)
+    working = working.sort_values(by="COLUMN_NAME")
+    working = working.set_index("COLUMN_NAME", drop=False)
+
+    display_columns = ["COLUMN_NAME", *editable_columns]
+    nonce = st.session_state.get("profile_data_nonce", 0)
+    grid_key = f"profile_classification_grid_{table_fqn}_{nonce}"
+    column_config = {}
+    for column in display_columns:
+        disabled = column in {"COLUMN_NAME", "SOURCE", "CONFIDENCE", "CLASSIFIED_AT"}
+        column_config[column] = st.column_config.TextColumn(column, disabled=disabled)
+
+    edited_df = st.data_editor(
+        working[display_columns],
+        key=grid_key,
+        use_container_width=True,
+        hide_index=True,
+        num_rows="fixed",
+        column_config=column_config,
+    )
+
+    apply_clicked = st.button(
+        ui_strings.PROFILE_V2_COLUMN_SAVE_BUTTON,
+        use_container_width=False,
+    )
+
+    if not apply_clicked or not isinstance(edited_df, pd.DataFrame):
+        return
+
+    edited_df = edited_df.copy()
+    edited_df["COLUMN_NAME"] = edited_df["COLUMN_NAME"].astype(str)
+    edited_df = edited_df.set_index("COLUMN_NAME", drop=False)
+
+    compare_columns = ["CONTENT_TYPE", "SEMANTIC_ROLE"]
+    changes: List[Dict[str, Any]] = []
+    for column_name, original_row in working[compare_columns].iterrows():
+        if column_name not in edited_df.index:
+            continue
+        edited_row = edited_df.loc[column_name]
+        original_values = {
+            field: _normalize_classification_value(original_row.get(field))
+            for field in compare_columns
+        }
+        new_values = {
+            field: _normalize_classification_value(edited_row.get(field))
+            for field in compare_columns
+        }
+        if original_values == new_values:
+            continue
+        changes.append(
+            {
+                "column": column_name,
+                "content": new_values["CONTENT_TYPE"],
+                "semantic": new_values["SEMANTIC_ROLE"],
+            }
+        )
+
+    if not changes:
+        st.info(ui_strings.PROFILE_V2_COLUMN_EDIT_NO_CHANGES)
+        return
+
+    for change in changes:
+        column_name = change["column"]
+        try:
+            save_fn(
+                session,
+                table_fqn,
+                column_name,
+                change["content"] or None,
+                change["semantic"] or None,
+            )
+        except Exception as exc:  # pragma: no cover - UI feedback only
+            st.error(
+                ui_strings.PROFILE_V2_COLUMN_EDIT_ERROR.format(
+                    column=column_name,
+                    error=str(exc),
+                )
+            )
+            return
+
+    column_label = "1 column" if len(changes) == 1 else f"{len(changes)} columns"
+    st.success(
+        ui_strings.PROFILE_V2_COLUMN_EDIT_SUCCESS.format(column=column_label)
+    )
+    st.session_state["profile_data_nonce"] = nonce + 1
+    st.experimental_rerun()
 
 
 def _classification_source_detail(source: Any) -> str:
