@@ -256,6 +256,17 @@ def _render_overview_grid(overview: pd.DataFrame, table_fqn: str) -> None:
     )
 
 
+def _render_classification_grid(
+    column_classification: pd.DataFrame,
+    table_fqn: str,
+    helpers: Any,
+    session: Any,
+) -> None:
+    """Placeholder for the upcoming classification grid implementation."""
+
+    st.info(ui_strings.PROFILE_V2_CLASSIFICATION_PLACEHOLDER)
+
+
 def _classification_source_detail(source: Any) -> str:
     normalized = str(source or "").strip().upper()
     if normalized == "MANUAL":
@@ -588,6 +599,18 @@ def render_profile(
 
     _render_last_run_banner(data.recent_runs, target_fqn)
     st.divider()
-    _render_overview_grid(data.overview_grid, target_fqn)
-    st.divider()
-    _render_column_editors(data.column_classification, target_fqn, helpers, session)
+
+    tab_overview, tab_classification = st.tabs(
+        ["Profiling overview", "Column classification"]
+    )
+
+    with tab_overview:
+        _render_overview_grid(data.overview_grid, target_fqn)
+
+    with tab_classification:
+        _render_classification_grid(
+            data.column_classification,
+            target_fqn,
+            helpers,
+            session,
+        )

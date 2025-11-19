@@ -91,6 +91,9 @@ PROFILE_V2_COLUMNS_RULE_METADATA_NOTE = (
     "rationale by aggregating matches from DQ_SUGGESTED_CHECKS after running "
     "Classify ➜ Suggest."
 )
+PROFILE_V2_CLASSIFICATION_PLACEHOLDER = (
+    "Column classification grid is temporarily unavailable."
+)
 PROFILE_V2_VALUE_UNKNOWN = "—"
 
 # Config preview strings
