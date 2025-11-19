@@ -1731,7 +1731,7 @@ with st.sidebar:
         args=("monitor",),
     )
     st.button(
-        "DQ Rules",
+        "DQ Rule Library",
         use_container_width=True,
         type="primary" if view == "rules" else "secondary",
         key="nav_rules",
