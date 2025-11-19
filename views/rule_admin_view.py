@@ -199,7 +199,6 @@ def render_rule_admin(session: Optional[Session], metadata_db: str, metadata_sch
                             active=bool(active_value),
                         )
                         st.success(f"Rule {rule_id} updated.")
-                        st.experimental_rerun()
                     except Exception as exc:
                         st.error(f"Unable to update rule {rule_id}: {exc}")
 
@@ -260,7 +259,6 @@ def _render_create_form(session: Session, table_name: str) -> None:
                     )
                     st.session_state["rule_admin_create_mode"] = False
                     st.success(f"Rule {rule_id} created.")
-                    st.experimental_rerun()
                 except Exception as exc:
                     st.error(f"Unable to create rule: {exc}")
 
