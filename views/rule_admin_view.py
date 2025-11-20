@@ -179,32 +179,29 @@ def _render_rule_edit_page(session: Session, metadata_db: str, metadata_schema: 
     else:
         st.header("Create new data quality rule")
 
-    with st.form(key="dq_rule_editor_form"):
-        rule_id = st.text_input("Rule ID", value=rule_defaults["RULE_ID"])
-        check_type = st.text_input("Check type", value=rule_defaults["CHECK_TYPE"])
-        default_severity = st.text_input(
-            "Default severity", value=rule_defaults["DEFAULT_SEVERITY"]
-        )
-        active = st.checkbox("Active", value=rule_defaults["ACTIVE"])
-        description = st.text_area("Description", value=rule_defaults["DESCRIPTION"])
-        expression_template = st.text_area(
-            "Expression template", value=rule_defaults["EXPRESSION_TEMPLATE"], height=160
-        )
-        param_schema_text = st.text_area(
-            "Parameter schema (JSON)", value=rule_defaults["PARAM_SCHEMA"], height=140
-        )
+    rule_id = st.text_input("Rule ID", value=rule_defaults["RULE_ID"])
+    check_type = st.text_input("Check type", value=rule_defaults["CHECK_TYPE"])
+    default_severity = st.text_input(
+        "Default severity", value=rule_defaults["DEFAULT_SEVERITY"]
+    )
+    active = st.checkbox("Active", value=rule_defaults["ACTIVE"])
+    description = st.text_area("Description", value=rule_defaults["DESCRIPTION"])
+    expression_template = st.text_area(
+        "Expression template", value=rule_defaults["EXPRESSION_TEMPLATE"], height=160
+    )
+    param_schema_text = st.text_area(
+        "Parameter schema (JSON)", value=rule_defaults["PARAM_SCHEMA"], height=140
+    )
 
-        validate_clicked = st.form_submit_button(
-            "Validate rule", type="secondary", use_container_width=False
+    action_col1, action_col2, action_col3 = st.columns(3)
+    with action_col1:
+        validate_clicked = st.button(
+            "Validate rule", key="dq_rule_validate", type="secondary"
         )
-        save_clicked = st.form_submit_button("Save", type="primary")
-        cancel_clicked = st.form_submit_button("Cancel", type="secondary")
-
-    if cancel_clicked:
-        st.session_state["dq_rules_mode"] = "list"
-        st.session_state["dq_rules_selected_uid"] = None
-        st.info("Edit cancelled")
-        st.stop()
+    with action_col2:
+        save_clicked = st.button("Save", key="dq_rule_save", type="primary")
+    with action_col3:
+        cancel_clicked = st.button("Cancel", key="dq_rule_cancel", type="secondary")
 
     def _run_validation() -> str:
         try:
@@ -213,16 +210,23 @@ def _render_rule_edit_page(session: Session, metadata_db: str, metadata_schema: 
             st.info("Validation is not configured.")
             return "VALIDATION_NOT_CONFIGURED"
 
+    if cancel_clicked:
+        st.session_state["dq_rules_mode"] = "list"
+        st.session_state["dq_rules_selected_uid"] = None
+        st.info("Edit cancelled")
+        st.stop()
+
     validation_status: Optional[str] = None
     if validate_clicked:
         validation_status = _run_validation()
         if validation_status != "VALIDATION_NOT_CONFIGURED":
             _display_validation_feedback(validation_status)
+        return
 
     if not save_clicked:
         return
 
-    validation_status = validation_status or _run_validation()
+    validation_status = _run_validation()
     if validation_status != "VALIDATION_NOT_CONFIGURED" and validation_status != "OK":
         if active:
             _display_validation_feedback(validation_status)
