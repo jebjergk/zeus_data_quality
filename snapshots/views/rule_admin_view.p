@@ -172,9 +172,12 @@ def _render_rule_edit_page(session: Session, metadata_db: str, metadata_schema: 
                 "ACTIVE": bool(record.get("ACTIVE", True)),
             }
         )
-        st.header(f"Editing rule: {rule_defaults['RULE_ID']}")
+        header_check_type = rule_defaults.get("CHECK_TYPE", "").strip()
+        header_rule_id = rule_defaults.get("RULE_ID", "").strip()
+        header_suffix = f" ({header_check_type})" if header_check_type else ""
+        st.header(f"Editing rule: {header_rule_id}{header_suffix}")
     else:
-        st.header("Create new rule")
+        st.header("Create new data quality rule")
 
     with st.form(key="dq_rule_editor_form"):
         rule_id = st.text_input("Rule ID", value=rule_defaults["RULE_ID"])
