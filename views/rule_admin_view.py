@@ -342,30 +342,52 @@ def _render_rule_list(
     filtered_df = _apply_filters(rules_df, search_text=search, check_type=check_type_filter)
 
     if filtered_df.empty:
-        st.info("No rules available. Use 'Create new rule' to add the first rule.")
+        st.info("No rules match the current search or filter. Adjust filters or create a new rule.")
+        return
 
-    display_df = filtered_df.copy()
-    display_df["DESCRIPTION"] = display_df["DESCRIPTION"].fillna("").astype(str).str.slice(stop=120)
-    display_df = display_df[DISPLAY_COLUMNS]
-    st.dataframe(display_df, use_container_width=True, hide_index=True)
-
-    st.divider()
-    st.caption("Actions")
     for rule in filtered_df.to_dict("records"):
         rule_uid = rule.get("RULE_UID")
-        rule_id = rule.get("RULE_ID")
-        check_type = rule.get("CHECK_TYPE")
-        col_label, col_edit, col_delete = st.columns([3, 1, 1])
-        with col_label:
-            st.markdown(f"**{rule_id}** — {check_type}")
-        with col_edit:
-            if st.button("Edit", key=f"edit_rule_{rule_uid}"):
-                st.session_state["dq_rules_mode"] = "edit_existing"
-                st.session_state["dq_rules_selected_uid"] = rule_uid
-                st.stop()
-        with col_delete:
-            if st.button("Delete", key=f"delete_rule_{rule_uid}"):
-                _delete_rule(session, table_name, rule_uid)
+        rule_id = rule.get("RULE_ID", "")
+        check_type = rule.get("CHECK_TYPE", "")
+        default_severity = rule.get("DEFAULT_SEVERITY", "")
+        is_active = bool(rule.get("ACTIVE"))
+        updated_at = rule.get("UPDATED_AT")
+        description = (rule.get("DESCRIPTION") or "").strip()
+
+        with st.container():
+            col_id, col_type, col_severity, col_active, col_updated, col_edit, col_delete = st.columns(
+                [3, 2, 2, 2, 2, 1, 1]
+            )
+            with col_id:
+                st.markdown(f"**{rule_id}**")
+            with col_type:
+                st.markdown(f"`{check_type}`")
+            with col_severity:
+                st.markdown(f"Severity: {default_severity}")
+            with col_active:
+                status_label = "🟢 Active" if is_active else "⚪ Inactive"
+                st.markdown(status_label)
+            with col_updated:
+                updated_text = "—"
+                if pd.notna(updated_at):
+                    try:
+                        updated_text = pd.to_datetime(updated_at).strftime("%Y-%m-%d %H:%M:%S")
+                    except Exception:
+                        updated_text = str(updated_at)
+                st.markdown(f"Updated: {updated_text}")
+            with col_edit:
+                if st.button("Edit", key=f"edit_rule_{rule_uid}"):
+                    st.session_state["dq_rules_mode"] = "edit_existing"
+                    st.session_state["dq_rules_selected_uid"] = rule_uid
+                    st.stop()
+            with col_delete:
+                if st.button("Delete", key=f"delete_rule_{rule_uid}"):
+                    _delete_rule(session, table_name, rule_uid)
+                    st.stop()
+
+            if description:
+                st.caption(description)
+            st.divider()
 
 
 def _delete_rule(session: Session, table_name: str, rule_uid: Any) -> None:
