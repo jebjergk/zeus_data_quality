@@ -105,7 +105,7 @@ def _severity_options(df: pd.DataFrame) -> List[str]:
 
 
 def _render_rule_edit_page(session: Session, metadata_db: str, metadata_schema: str) -> None:
-    mode = st.session_state.get("dq_rules_mode")
+    mode = st.session_state.get("dq_rules_mode", "list")
     selected_uid = st.session_state.get("dq_rules_selected_uid")
 
     if mode not in {"edit_existing", "create_new"}:
@@ -116,9 +116,10 @@ def _render_rule_edit_page(session: Session, metadata_db: str, metadata_schema: 
 
     back_col, _ = st.columns([1, 3])
     with back_col:
-        if st.button("Back to rule list", key="dq_rules_back_to_list"):
+        if st.button("Back to rule list", key="rule_edit_back_to_list"):
             st.session_state["dq_rules_mode"] = "list"
             st.session_state["dq_rules_selected_uid"] = None
+            st.stop()
 
     rule_defaults: dict[str, Any] = {
         "RULE_ID": "",
@@ -199,7 +200,8 @@ def _render_rule_edit_page(session: Session, metadata_db: str, metadata_schema: 
     if cancel_clicked:
         st.session_state["dq_rules_mode"] = "list"
         st.session_state["dq_rules_selected_uid"] = None
-        return
+        st.info("Edit cancelled")
+        st.stop()
 
     def _run_validation() -> str:
         try:
@@ -286,9 +288,10 @@ def _render_rule_edit_page(session: Session, metadata_db: str, metadata_schema: 
         st.error(f"Unable to save rule: {exc}")
         return
 
-    st.success("Rule saved.")
     st.session_state["dq_rules_mode"] = "list"
     st.session_state["dq_rules_selected_uid"] = None
+    st.success("Rule saved")
+    st.stop()
 
 
 def _apply_filters(
@@ -316,7 +319,14 @@ def _render_rule_list(
     st.session_state.setdefault("dq_rules_search", "")
     st.session_state.setdefault("dq_rules_check_type_filter", "All")
 
-    search = st.text_input("Search rules", value=st.session_state["dq_rules_search"], key="dq_rules_search")
+    if st.button("Create new rule", key="create_new_rule"):
+        st.session_state["dq_rules_mode"] = "create_new"
+        st.session_state["dq_rules_selected_uid"] = None
+        st.stop()
+
+    search = st.text_input(
+        "Search rules", value=st.session_state["dq_rules_search"], key="dq_rules_search"
+    )
 
     distinct_types = sorted({str(val) for val in rules_df.get("CHECK_TYPE", []) if pd.notna(val)})
     check_type_options = ["All"] + distinct_types
@@ -349,6 +359,7 @@ def _render_rule_list(
             if st.button("Edit", key=f"edit_rule_{rule_uid}"):
                 st.session_state["dq_rules_mode"] = "edit_existing"
                 st.session_state["dq_rules_selected_uid"] = rule_uid
+                st.stop()
         with col_delete:
             if st.button("Delete", key=f"delete_rule_{rule_uid}"):
                 _delete_rule(session, table_name, rule_uid)
@@ -375,15 +386,12 @@ def render_rule_admin(session: Optional[Session], metadata_db: str, metadata_sch
     table_name = _fq_rule_table(metadata_db, metadata_schema)
     st.caption(f"Source table: {table_name}")
 
-    mode = st.session_state.get("dq_rules_mode", "list")
+    if "dq_rules_mode" not in st.session_state:
+        st.session_state["dq_rules_mode"] = "list"
+
+    mode = st.session_state["dq_rules_mode"]
 
     if mode == "list":
-        create_col, _ = st.columns([1, 3])
-        with create_col:
-            if st.button("Create new rule", key="dq_rules_create_btn"):
-                st.session_state["dq_rules_mode"] = "create_new"
-                st.session_state["dq_rules_selected_uid"] = None
-
         try:
             rules_df = _load_rules(session, table_name)
         except Exception as exc:
@@ -396,5 +404,15 @@ def render_rule_admin(session: Optional[Session], metadata_db: str, metadata_sch
 
         _render_rule_list(session=session, table_name=table_name, rules_df=rules_df)
         return
+    if mode in ("edit_existing", "create_new"):
+        _render_rule_edit_page(session, metadata_db, metadata_schema)
+        return
 
-    _render_rule_edit_page(session, metadata_db, metadata_schema)
+    st.session_state["dq_rules_mode"] = "list"
+    try:
+        rules_df = _load_rules(session, table_name)
+    except Exception as exc:
+        st.error(f"Unable to load rule library: {exc}")
+        return
+
+    _render_rule_list(session=session, table_name=table_name, rules_df=rules_df)
