@@ -325,7 +325,7 @@ def _render_rule_list(
     if st.button("Create new rule", key="create_new_rule"):
         st.session_state["dq_rules_mode"] = "create_new"
         st.session_state["dq_rules_selected_uid"] = None
-        st.stop()
+        st.experimental_rerun()
 
     search = st.text_input(
         "Search rules", value=st.session_state["dq_rules_search"], key="dq_rules_search"
@@ -382,7 +382,7 @@ def _render_rule_list(
                 if st.button("Edit", key=f"edit_rule_{rule_uid}"):
                     st.session_state["dq_rules_mode"] = "edit_existing"
                     st.session_state["dq_rules_selected_uid"] = rule_uid
-                    st.stop()
+                    st.experimental_rerun()
             with col_delete:
                 if st.button("Delete", key=f"delete_rule_{rule_uid}"):
                     _delete_rule(session, table_name, rule_uid)
@@ -431,7 +431,7 @@ def render_rule_admin(session: Optional[Session], metadata_db: str, metadata_sch
             if st.button("Create first rule", key="create_first_rule"):
                 st.session_state["dq_rules_mode"] = "create_new"
                 st.session_state["dq_rules_selected_uid"] = None
-                st.stop()
+                st.experimental_rerun()
             return
 
         _render_rule_list(session=session, table_name=table_name, rules_df=rules_df)
