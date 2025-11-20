@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from typing import Any, Dict, List, Optional
+from typing import Any, List, Optional
 
 import pandas as pd
 import streamlit as st
@@ -19,9 +19,9 @@ DISPLAY_COLUMNS: List[str] = [
     "RULE_ID",
     "CHECK_TYPE",
     "DEFAULT_SEVERITY",
-    "DESCRIPTION",
     "ACTIVE",
     "UPDATED_AT",
+    "DESCRIPTION",
 ]
 
 
@@ -75,87 +75,24 @@ def _normalize_param_schema(value: Any) -> str:
 
 
 def _load_rules(session: Session, table: str) -> pd.DataFrame:
-    df = session.table(table).to_pandas()
+    sql = f"""
+        SELECT
+            RULE_UID,
+            RULE_ID,
+            CHECK_TYPE,
+            DEFAULT_SEVERITY,
+            DESCRIPTION,
+            ACTIVE,
+            UPDATED_AT
+        FROM {table}
+    """
+    df = session.sql(sql).to_pandas()
     df.columns = [col.upper() for col in df.columns]
     if "UPDATED_AT" in df.columns:
         df["UPDATED_AT"] = pd.to_datetime(
             df["UPDATED_AT"], errors="coerce", utc=True
         ).dt.tz_convert(None)
     return df
-
-
-def _run_insert(
-    session: Session,
-    table: str,
-    *,
-    rule_id: str,
-    check_type: str,
-    expression_template: str,
-    param_schema_json: str,
-    default_severity: Optional[str],
-    description: Optional[str],
-    active: bool,
-) -> None:
-    sql = f"""
-        INSERT INTO {table} (
-            RULE_ID,
-            CHECK_TYPE,
-            EXPRESSION_TEMPLATE,
-            PARAM_SCHEMA,
-            DEFAULT_SEVERITY,
-            DESCRIPTION,
-            ACTIVE,
-            CREATED_AT,
-            UPDATED_AT
-        )
-        SELECT ?, ?, ?, PARSE_JSON(?), ?, ?, ?, CURRENT_TIMESTAMP(), CURRENT_TIMESTAMP()
-    """
-    params: List[Any] = [
-        rule_id,
-        check_type,
-        expression_template,
-        param_schema_json,
-        default_severity,
-        description,
-        active,
-    ]
-    session.sql(sql, params=params).collect()
-
-
-def _run_update(
-    session: Session,
-    table: str,
-    *,
-    rule_id: str,
-    check_type: str,
-    expression_template: str,
-    param_schema_json: str,
-    description: Optional[str],
-    default_severity: Optional[str],
-    active: bool,
-) -> None:
-    sql = f"""
-        UPDATE {table}
-        SET
-            CHECK_TYPE = ?,
-            EXPRESSION_TEMPLATE = ?,
-            PARAM_SCHEMA = PARSE_JSON(?),
-            DESCRIPTION = ?,
-            DEFAULT_SEVERITY = ?,
-            ACTIVE = ?,
-            UPDATED_AT = CURRENT_TIMESTAMP()
-        WHERE RULE_ID = ?
-    """
-    params: List[Any] = [
-        check_type,
-        expression_template,
-        param_schema_json,
-        description,
-        default_severity,
-        active,
-        rule_id,
-    ]
-    session.sql(sql, params=params).collect()
 
 
 def _severity_options(df: pd.DataFrame) -> List[str]:
@@ -165,6 +102,88 @@ def _severity_options(df: pd.DataFrame) -> List[str]:
     if not values:
         values = ["LOW", "MEDIUM", "HIGH"]
     return values
+
+
+def _render_rule_edit_page(session: Session, metadata_db: str, metadata_schema: str) -> None:
+    """Placeholder for the dedicated rule edit page (RL3A)."""
+
+    st.info("Rule edit page will be implemented in RL3A.")
+
+
+def _apply_filters(
+    df: pd.DataFrame, *, search_text: str = "", check_type: Optional[str] = None
+) -> pd.DataFrame:
+    filtered = df.copy()
+    if search_text:
+        needle = search_text.lower()
+        mask = (
+            filtered["RULE_ID"].astype(str).str.lower().str.contains(needle)
+            | filtered["CHECK_TYPE"].astype(str).str.lower().str.contains(needle)
+            | filtered["DESCRIPTION"].fillna("").astype(str).str.lower().str.contains(needle)
+        )
+        filtered = filtered[mask]
+    if check_type and check_type != "All":
+        filtered = filtered[filtered["CHECK_TYPE"].astype(str) == check_type]
+    return filtered
+
+
+def _render_rule_list(
+    *, session: Session, table_name: str, rules_df: pd.DataFrame
+) -> None:
+    st.subheader("Rule list")
+
+    st.session_state.setdefault("dq_rules_search", "")
+    st.session_state.setdefault("dq_rules_check_type_filter", "All")
+
+    search = st.text_input("Search rules", value=st.session_state["dq_rules_search"], key="dq_rules_search")
+
+    distinct_types = sorted({str(val) for val in rules_df.get("CHECK_TYPE", []) if pd.notna(val)})
+    check_type_options = ["All"] + distinct_types
+    check_type_filter = st.selectbox(
+        "Filter by check type",
+        options=check_type_options,
+        index=check_type_options.index(st.session_state.get("dq_rules_check_type_filter", "All"))
+        if st.session_state.get("dq_rules_check_type_filter", "All") in check_type_options
+        else 0,
+        key="dq_rules_check_type_filter",
+    )
+
+    filtered_df = _apply_filters(rules_df, search_text=search, check_type=check_type_filter)
+
+    display_df = filtered_df.copy()
+    display_df["DESCRIPTION"] = display_df["DESCRIPTION"].fillna("").astype(str).str.slice(stop=120)
+    display_df = display_df[DISPLAY_COLUMNS]
+    st.dataframe(display_df, use_container_width=True, hide_index=True)
+
+    st.divider()
+    st.caption("Actions")
+    for rule in filtered_df.to_dict("records"):
+        rule_uid = rule.get("RULE_UID")
+        rule_id = rule.get("RULE_ID")
+        check_type = rule.get("CHECK_TYPE")
+        col_label, col_edit, col_delete = st.columns([3, 1, 1])
+        with col_label:
+            st.markdown(f"**{rule_id}** — {check_type}")
+        with col_edit:
+            if st.button("Edit", key=f"edit_rule_{rule_uid}"):
+                st.session_state["dq_rules_mode"] = "edit_existing"
+                st.session_state["dq_rules_selected_uid"] = rule_uid
+                st.experimental_rerun()
+        with col_delete:
+            if st.button("Delete", key=f"delete_rule_{rule_uid}"):
+                _delete_rule(session, table_name, rule_uid)
+                st.experimental_rerun()
+
+
+def _delete_rule(session: Session, table_name: str, rule_uid: Any) -> None:
+    try:
+        session.sql(
+            f"DELETE FROM {table_name} WHERE RULE_UID = :1",
+            params=[rule_uid],
+        ).collect()
+        st.success("Rule deleted.")
+    except Exception as exc:  # pragma: no cover - surface Snowflake errors
+        st.error(f"Unable to delete rule: {exc}")
 
 
 def render_rule_admin(session: Optional[Session], metadata_db: str, metadata_schema: str) -> None:
@@ -177,14 +196,18 @@ def render_rule_admin(session: Optional[Session], metadata_db: str, metadata_sch
     table_name = _fq_rule_table(metadata_db, metadata_schema)
     st.caption(f"Source table: {table_name}")
 
-    st.session_state.setdefault("rule_admin_create_mode", False)
-    st.session_state.setdefault("rule_admin_editing_rule_id", None)
+    mode = st.session_state.get("dq_rules_mode", "list")
 
-    if st.button("Create rule", use_container_width=False, key="rule_admin_create_btn"):
-        st.session_state["rule_admin_create_mode"] = True
+    if mode != "list":
+        _render_rule_edit_page(session, metadata_db, metadata_schema)
+        return
 
-    if st.session_state.get("rule_admin_create_mode"):
-        _render_create_form(session, table_name)
+    create_col, _ = st.columns([1, 3])
+    with create_col:
+        if st.button("Create new rule", key="dq_rules_create_btn"):
+            st.session_state["dq_rules_mode"] = "create_new"
+            st.session_state["dq_rules_selected_uid"] = None
+            st.experimental_rerun()
 
     try:
         rules_df = _load_rules(session, table_name)
@@ -193,286 +216,7 @@ def render_rule_admin(session: Optional[Session], metadata_db: str, metadata_sch
         return
 
     if rules_df.empty:
-        st.info("No rules available. Use the create form above to add the first rule.")
+        st.info("No rules available. Use 'Create new rule' to add the first rule.")
         return
 
-    display_df = rules_df.copy()
-    missing_cols = [col for col in DISPLAY_COLUMNS if col not in display_df.columns]
-    for col in missing_cols:
-        display_df[col] = ""
-    display_df = display_df[DISPLAY_COLUMNS]
-    st.dataframe(display_df, use_container_width=True, hide_index=True)
-
-    severity_choices = _severity_options(rules_df)
-
-    for rule in rules_df.to_dict("records"):
-        rule_id = str(rule.get("RULE_ID"))
-        header = f"{rule_id} – {rule.get('CHECK_TYPE') or ''}"
-        with st.expander(header):
-            st.caption("Expression template")
-            st.code(rule.get("EXPRESSION_TEMPLATE") or "", language="sql")
-            st.caption("Parameter schema")
-            st.code(_normalize_param_schema(rule.get("PARAM_SCHEMA")), language="json")
-            editing_rule_id = st.session_state.get("rule_admin_editing_rule_id")
-            is_editing = editing_rule_id == rule_id
-
-            if is_editing:
-                _render_edit_form(
-                    session=session,
-                    table_name=table_name,
-                    rule=rule,
-                    severity_choices=severity_choices,
-                )
-            else:
-                disabled = bool(editing_rule_id)
-                if st.button(
-                    "Edit rule",
-                    key=f"edit_rule_btn_{rule_id}",
-                    disabled=disabled,
-                    use_container_width=False,
-                ):
-                    st.session_state["rule_admin_editing_rule_id"] = rule_id
-                if disabled:
-                    st.info(
-                        "Another rule is currently being edited. "
-                        "Save or cancel to edit a different rule."
-                    )
-                else:
-                    st.caption("Click edit to modify this rule.")
-
-
-def _resolve_default_index(options: List[str], current_value: Optional[str]) -> int:
-    if not current_value:
-        return 0
-    normalized = str(current_value).strip()
-    try:
-        return options.index(normalized)
-    except ValueError:
-        options.insert(0, normalized)
-        return 0
-
-
-def _render_create_form(session: Session, table_name: str) -> None:
-    st.subheader("Create new rule")
-    with st.form("rule_admin_create_form", clear_on_submit=False):
-        rule_id = st.text_input("Rule ID", help="Unique identifier for the rule.")
-        check_type = st.text_input("Check type", help="Logical grouping for the rule.")
-        expression_template = st.text_area(
-            "Expression template",
-            help="SQL expression using placeholders such as {column_expr}.",
-        )
-        param_schema = st.text_area(
-            "Parameter schema (JSON)",
-            help="Provide a JSON array describing template parameters.",
-        )
-        default_severity = st.text_input("Default severity", value="MEDIUM")
-        description = st.text_area("Description", help="Optional rationale.")
-        active_value = st.checkbox(
-            "Active",
-            value=True,
-            help="Inactive rules will be saved as drafts and hidden from suggestions.",
-        )
-        col_save, col_validate, col_cancel = st.columns(3)
-        save = col_save.form_submit_button("Save rule", key="create_save_rule")
-        validate = col_validate.form_submit_button(
-            "Validate rule", key="create_validate_rule"
-        )
-        cancel = col_cancel.form_submit_button("Cancel", key="create_cancel_rule")
-        if cancel:
-            st.session_state["rule_admin_create_mode"] = False
-        if validate:
-            status = _validate_expression_template(session, expression_template)
-            _display_validation_feedback(status)
-        if save:
-            errors = _validate_create_inputs(
-                rule_id=rule_id,
-                check_type=check_type,
-                expression_template=expression_template,
-                param_schema=param_schema,
-            )
-            if errors:
-                for err in errors:
-                    st.error(err)
-            else:
-                can_save = True
-                validation_status = ""
-                param_schema_json = ""
-                try:
-                    param_schema_json = _canonicalize_schema(param_schema)
-                except ValueError as exc:
-                    st.error(str(exc))
-                    can_save = False
-                    param_schema_json = ""
-                if can_save:
-                    validation_status = _validate_expression_template(
-                        session, expression_template
-                    )
-                    if validation_status != "OK" and bool(active_value):
-                        st.error(
-                            "Rule is invalid and cannot be saved as active: "
-                            f"{validation_status}"
-                        )
-                        can_save = False
-                if can_save:
-                    try:
-                        _run_insert(
-                            session,
-                            table_name,
-                            rule_id=rule_id.strip(),
-                            check_type=check_type.strip(),
-                            expression_template=expression_template.strip(),
-                            param_schema_json=param_schema_json,
-                            default_severity=default_severity.strip() or None,
-                            description=description.strip() or None,
-                            active=bool(active_value),
-                        )
-                        st.session_state["rule_admin_create_mode"] = False
-                        if validation_status == "OK":
-                            st.success(f"Rule {rule_id} created.")
-                        else:
-                            st.warning(
-                                "Rule saved as inactive draft; expression is currently "
-                                f"invalid: {validation_status}"
-                            )
-                    except Exception as exc:
-                        st.error(f"Unable to create rule: {exc}")
-
-
-def _canonicalize_schema(input_text: str) -> str:
-    text = input_text.strip() if input_text else "[]"
-    if not text:
-        text = "[]"
-    try:
-        parsed = json.loads(text)
-    except json.JSONDecodeError:
-        raise ValueError("Parameter schema must be valid JSON.")
-    return json.dumps(parsed)
-
-
-def _validate_create_inputs(
-    *,
-    rule_id: str,
-    check_type: str,
-    expression_template: str,
-    param_schema: str,
-) -> List[str]:
-    errors: List[str] = []
-    if not rule_id.strip():
-        errors.append("Rule ID is required.")
-    if not check_type.strip():
-        errors.append("Check type is required.")
-    if not expression_template.strip():
-        errors.append("Expression template is required.")
-    try:
-        _canonicalize_schema(param_schema)
-    except ValueError as exc:
-        errors.append(str(exc))
-    return errors
-
-
-def _render_edit_form(
-    *,
-    session: Session,
-    table_name: str,
-    rule: Dict[str, Any],
-    severity_choices: List[str],
-) -> None:
-    rule_id = str(rule.get("RULE_ID"))
-    severity_options = list(severity_choices)
-    with st.form(f"edit_rule_{rule_id}"):
-        check_type_value = st.text_input(
-            "Check type",
-            value=rule.get("CHECK_TYPE") or "",
-            help="Logical grouping for the rule.",
-        )
-        expression_template_value = st.text_area(
-            "Expression template",
-            value=rule.get("EXPRESSION_TEMPLATE") or "",
-            help="SQL expression using placeholders such as {column_expr}.",
-        )
-        param_schema_value = st.text_area(
-            "Parameter schema (JSON)",
-            value=_normalize_param_schema(rule.get("PARAM_SCHEMA")),
-            help="JSON array describing template parameters.",
-        )
-        description_value = st.text_area(
-            "Description",
-            value=rule.get("DESCRIPTION") or "",
-            help="Optional free-form notes about this rule.",
-        )
-        severity_value = st.selectbox(
-            "Default severity",
-            options=severity_options,
-            index=_resolve_default_index(severity_options, rule.get("DEFAULT_SEVERITY")),
-        )
-        active_value = st.checkbox(
-            "Active",
-            value=bool(rule.get("ACTIVE")),
-            help="Inactive rules will not appear in configuration suggestions.",
-        )
-        col_save, col_validate, col_cancel = st.columns(3)
-        submit = col_save.form_submit_button(
-            "Save changes", use_container_width=False, key=f"save_rule_{rule_id}"
-        )
-        validate = col_validate.form_submit_button(
-            "Validate rule", use_container_width=False, key=f"validate_rule_{rule_id}"
-        )
-        cancel = col_cancel.form_submit_button("Cancel", key=f"cancel_rule_{rule_id}")
-        if cancel:
-            st.session_state["rule_admin_editing_rule_id"] = None
-        if validate:
-            status = _validate_expression_template(session, expression_template_value)
-            _display_validation_feedback(status)
-        if submit:
-            can_save = True
-            validation_status = ""
-            param_schema_json = ""
-            errors = _validate_create_inputs(
-                rule_id=rule_id,
-                check_type=check_type_value,
-                expression_template=expression_template_value,
-                param_schema=param_schema_value,
-            )
-            if errors:
-                for err in errors:
-                    st.error(err)
-                can_save = False
-            try:
-                param_schema_json = _canonicalize_schema(param_schema_value)
-            except ValueError as exc:
-                st.error(str(exc))
-                can_save = False
-                param_schema_json = ""
-            if can_save:
-                validation_status = _validate_expression_template(
-                    session, expression_template_value
-                )
-                if validation_status != "OK" and bool(active_value):
-                    st.error(
-                        "Rule is invalid and cannot be saved as active: "
-                        f"{validation_status}"
-                    )
-                    can_save = False
-            if can_save:
-                try:
-                    _run_update(
-                        session,
-                        table_name,
-                        rule_id=rule_id,
-                        check_type=check_type_value.strip(),
-                        expression_template=expression_template_value.strip(),
-                        param_schema_json=param_schema_json,
-                        description=description_value.strip() or None,
-                        default_severity=severity_value.strip() or None,
-                        active=bool(active_value),
-                    )
-                    st.session_state["rule_admin_editing_rule_id"] = None
-                    if validation_status == "OK":
-                        st.success(f"Rule {rule_id} updated.")
-                    else:
-                        st.warning(
-                            "Rule saved as inactive draft; expression is currently "
-                            f"invalid: {validation_status}"
-                        )
-                except Exception as exc:
-                    st.error(f"Unable to update rule {rule_id}: {exc}")
+    _render_rule_list(session=session, table_name=table_name, rules_df=rules_df)
