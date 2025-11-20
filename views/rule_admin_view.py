@@ -423,35 +423,27 @@ def render_rule_admin(session: Optional[Session], metadata_db: str, metadata_sch
 
     mode = st.session_state.get("dq_rules_mode", "list")
 
-    if mode == "list":
-        try:
-            rules_df = _load_rules(session, table_name)
-        except Exception as exc:
-            st.error(f"Unable to load rule library: {exc}")
-            return
-
-        if rules_df.empty:
-            st.info("No rules found in the library. Create the first rule to get started.")
-            if st.button("Create first rule", key="create_first_rule"):
-                st.session_state["dq_rules_mode"] = "create_new"
-                st.session_state["dq_rules_selected_uid"] = None
-                st.experimental_rerun()
-            return
-
-        _render_rule_list(session=session, table_name=table_name, rules_df=rules_df)
-        return
-
     if mode in {"edit_existing", "create_new"}:
         _render_rule_edit_page(session, metadata_db, metadata_schema)
         return
 
-    st.session_state["dq_rules_mode"] = "list"
-    st.session_state["dq_rules_selected_uid"] = None
+    if mode != "list":
+        st.session_state["dq_rules_mode"] = "list"
+        st.session_state["dq_rules_selected_uid"] = None
+        st.experimental_rerun()
 
     try:
         rules_df = _load_rules(session, table_name)
     except Exception as exc:
         st.error(f"Unable to load rule library: {exc}")
+        return
+
+    if rules_df.empty:
+        st.info("No rules found in the library. Create the first rule to get started.")
+        if st.button("Create first rule", key="create_first_rule"):
+            st.session_state["dq_rules_mode"] = "create_new"
+            st.session_state["dq_rules_selected_uid"] = None
+            st.experimental_rerun()
         return
 
     _render_rule_list(session=session, table_name=table_name, rules_df=rules_df)
