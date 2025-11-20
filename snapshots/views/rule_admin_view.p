@@ -419,11 +419,6 @@ def render_rule_admin(session: Optional[Session], metadata_db: str, metadata_sch
 
     mode = st.session_state.get("dq_rules_mode", "list")
 
-    if mode not in {"list", "edit_existing", "create_new"}:
-        mode = "list"
-        st.session_state["dq_rules_mode"] = "list"
-        st.session_state["dq_rules_selected_uid"] = None
-
     if mode == "list":
         try:
             rules_df = _load_rules(session, table_name)
@@ -445,3 +440,14 @@ def render_rule_admin(session: Optional[Session], metadata_db: str, metadata_sch
     if mode in {"edit_existing", "create_new"}:
         _render_rule_edit_page(session, metadata_db, metadata_schema)
         return
+
+    st.session_state["dq_rules_mode"] = "list"
+    st.session_state["dq_rules_selected_uid"] = None
+
+    try:
+        rules_df = _load_rules(session, table_name)
+    except Exception as exc:
+        st.error(f"Unable to load rule library: {exc}")
+        return
+
+    _render_rule_list(session=session, table_name=table_name, rules_df=rules_df)
