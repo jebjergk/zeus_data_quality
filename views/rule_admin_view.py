@@ -119,7 +119,6 @@ def _render_rule_edit_page(session: Session, metadata_db: str, metadata_schema: 
         if st.button("Back to rule list", key="dq_rules_back_to_list"):
             st.session_state["dq_rules_mode"] = "list"
             st.session_state["dq_rules_selected_uid"] = None
-            st.experimental_rerun()
 
     rule_defaults: dict[str, Any] = {
         "RULE_ID": "",
@@ -200,7 +199,6 @@ def _render_rule_edit_page(session: Session, metadata_db: str, metadata_schema: 
     if cancel_clicked:
         st.session_state["dq_rules_mode"] = "list"
         st.session_state["dq_rules_selected_uid"] = None
-        st.experimental_rerun()
         return
 
     def _run_validation() -> str:
@@ -291,7 +289,6 @@ def _render_rule_edit_page(session: Session, metadata_db: str, metadata_schema: 
     st.success("Rule saved.")
     st.session_state["dq_rules_mode"] = "list"
     st.session_state["dq_rules_selected_uid"] = None
-    st.experimental_rerun()
 
 
 def _apply_filters(
@@ -352,11 +349,9 @@ def _render_rule_list(
             if st.button("Edit", key=f"edit_rule_{rule_uid}"):
                 st.session_state["dq_rules_mode"] = "edit_existing"
                 st.session_state["dq_rules_selected_uid"] = rule_uid
-                st.experimental_rerun()
         with col_delete:
             if st.button("Delete", key=f"delete_rule_{rule_uid}"):
                 _delete_rule(session, table_name, rule_uid)
-                st.experimental_rerun()
 
 
 def _delete_rule(session: Session, table_name: str, rule_uid: Any) -> None:
@@ -382,25 +377,24 @@ def render_rule_admin(session: Optional[Session], metadata_db: str, metadata_sch
 
     mode = st.session_state.get("dq_rules_mode", "list")
 
-    if mode != "list":
-        _render_rule_edit_page(session, metadata_db, metadata_schema)
+    if mode == "list":
+        create_col, _ = st.columns([1, 3])
+        with create_col:
+            if st.button("Create new rule", key="dq_rules_create_btn"):
+                st.session_state["dq_rules_mode"] = "create_new"
+                st.session_state["dq_rules_selected_uid"] = None
+
+        try:
+            rules_df = _load_rules(session, table_name)
+        except Exception as exc:
+            st.error(f"Unable to load rule library: {exc}")
+            return
+
+        if rules_df.empty:
+            st.info("No rules available. Use 'Create new rule' to add the first rule.")
+            return
+
+        _render_rule_list(session=session, table_name=table_name, rules_df=rules_df)
         return
 
-    create_col, _ = st.columns([1, 3])
-    with create_col:
-        if st.button("Create new rule", key="dq_rules_create_btn"):
-            st.session_state["dq_rules_mode"] = "create_new"
-            st.session_state["dq_rules_selected_uid"] = None
-            st.experimental_rerun()
-
-    try:
-        rules_df = _load_rules(session, table_name)
-    except Exception as exc:
-        st.error(f"Unable to load rule library: {exc}")
-        return
-
-    if rules_df.empty:
-        st.info("No rules available. Use 'Create new rule' to add the first rule.")
-        return
-
-    _render_rule_list(session=session, table_name=table_name, rules_df=rules_df)
+    _render_rule_edit_page(session, metadata_db, metadata_schema)
