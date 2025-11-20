@@ -105,9 +105,193 @@ def _severity_options(df: pd.DataFrame) -> List[str]:
 
 
 def _render_rule_edit_page(session: Session, metadata_db: str, metadata_schema: str) -> None:
-    """Placeholder for the dedicated rule edit page (RL3A)."""
+    mode = st.session_state.get("dq_rules_mode")
+    selected_uid = st.session_state.get("dq_rules_selected_uid")
 
-    st.info("Rule edit page will be implemented in RL3A.")
+    if mode not in {"edit_existing", "create_new"}:
+        st.info("Rule editor is available only in edit or create mode.")
+        return
+
+    table_name = _fq_rule_table(metadata_db, metadata_schema)
+
+    back_col, _ = st.columns([1, 3])
+    with back_col:
+        if st.button("Back to rule list", key="dq_rules_back_to_list"):
+            st.session_state["dq_rules_mode"] = "list"
+            st.session_state["dq_rules_selected_uid"] = None
+            st.experimental_rerun()
+
+    rule_defaults: dict[str, Any] = {
+        "RULE_ID": "",
+        "CHECK_TYPE": "",
+        "DEFAULT_SEVERITY": "",
+        "DESCRIPTION": "",
+        "EXPRESSION_TEMPLATE": "",
+        "PARAM_SCHEMA": "[]",
+        "ACTIVE": True,
+    }
+
+    if mode == "edit_existing":
+        if selected_uid is None:
+            st.info("No rule selected for editing.")
+            return
+        try:
+            rule_df = session.sql(
+                f"""
+                SELECT
+                    RULE_UID,
+                    RULE_ID,
+                    CHECK_TYPE,
+                    DEFAULT_SEVERITY,
+                    DESCRIPTION,
+                    EXPRESSION_TEMPLATE,
+                    PARAM_SCHEMA,
+                    ACTIVE
+                FROM {table_name}
+                WHERE RULE_UID = :1
+                """,
+                params=[selected_uid],
+            ).to_pandas()
+        except Exception as exc:  # pragma: no cover - surface Snowflake errors to UI
+            st.error(f"Unable to load rule: {exc}")
+            return
+
+        if rule_df.empty:
+            st.error("Rule not found.")
+            return
+
+        record = rule_df.iloc[0].to_dict()
+        rule_defaults.update(
+            {
+                "RULE_ID": record.get("RULE_ID", ""),
+                "CHECK_TYPE": record.get("CHECK_TYPE", ""),
+                "DEFAULT_SEVERITY": record.get("DEFAULT_SEVERITY", ""),
+                "DESCRIPTION": record.get("DESCRIPTION", ""),
+                "EXPRESSION_TEMPLATE": record.get("EXPRESSION_TEMPLATE", ""),
+                "PARAM_SCHEMA": _normalize_param_schema(record.get("PARAM_SCHEMA")),
+                "ACTIVE": bool(record.get("ACTIVE", True)),
+            }
+        )
+        st.header(f"Editing rule: {rule_defaults['RULE_ID']}")
+    else:
+        st.header("Create new rule")
+
+    with st.form(key="dq_rule_editor_form"):
+        rule_id = st.text_input("Rule ID", value=rule_defaults["RULE_ID"])
+        check_type = st.text_input("Check type", value=rule_defaults["CHECK_TYPE"])
+        default_severity = st.text_input(
+            "Default severity", value=rule_defaults["DEFAULT_SEVERITY"]
+        )
+        active = st.checkbox("Active", value=rule_defaults["ACTIVE"])
+        description = st.text_area("Description", value=rule_defaults["DESCRIPTION"])
+        expression_template = st.text_area(
+            "Expression template", value=rule_defaults["EXPRESSION_TEMPLATE"], height=160
+        )
+        param_schema_text = st.text_area(
+            "Parameter schema (JSON)", value=rule_defaults["PARAM_SCHEMA"], height=140
+        )
+
+        validate_clicked = st.form_submit_button(
+            "Validate rule", type="secondary", use_container_width=False
+        )
+        save_clicked = st.form_submit_button("Save", type="primary")
+        cancel_clicked = st.form_submit_button("Cancel", type="secondary")
+
+    if cancel_clicked:
+        st.session_state["dq_rules_mode"] = "list"
+        st.session_state["dq_rules_selected_uid"] = None
+        st.experimental_rerun()
+        return
+
+    def _run_validation() -> str:
+        try:
+            return _validate_expression_template(session, expression_template)
+        except NameError:  # pragma: no cover - validator not available
+            st.info("Validation is not configured.")
+            return "VALIDATION_NOT_CONFIGURED"
+
+    validation_status: Optional[str] = None
+    if validate_clicked:
+        validation_status = _run_validation()
+        if validation_status != "VALIDATION_NOT_CONFIGURED":
+            _display_validation_feedback(validation_status)
+
+    if not save_clicked:
+        return
+
+    validation_status = validation_status or _run_validation()
+    if validation_status != "VALIDATION_NOT_CONFIGURED" and validation_status != "OK":
+        if active:
+            _display_validation_feedback(validation_status)
+            return
+        st.warning("Rule saved as inactive due to validation issues.")
+
+    normalized_param_schema = param_schema_text.strip() or "[]"
+
+    try:
+        if mode == "edit_existing":
+            session.sql(
+                f"""
+                UPDATE {table_name}
+                SET
+                    RULE_ID = :1,
+                    CHECK_TYPE = :2,
+                    DEFAULT_SEVERITY = :3,
+                    ACTIVE = :4,
+                    DESCRIPTION = :5,
+                    EXPRESSION_TEMPLATE = :6,
+                    PARAM_SCHEMA = PARSE_JSON(:7),
+                    UPDATED_AT = CURRENT_TIMESTAMP()
+                WHERE RULE_UID = :8
+                """,
+                params=
+                [
+                    rule_id,
+                    check_type,
+                    default_severity,
+                    active,
+                    description,
+                    expression_template,
+                    normalized_param_schema,
+                    selected_uid,
+                ],
+            ).collect()
+        else:
+            session.sql(
+                f"""
+                INSERT INTO {table_name} (
+                    RULE_ID,
+                    CHECK_TYPE,
+                    DEFAULT_SEVERITY,
+                    ACTIVE,
+                    DESCRIPTION,
+                    EXPRESSION_TEMPLATE,
+                    PARAM_SCHEMA,
+                    CREATED_AT,
+                    UPDATED_AT
+                ) VALUES (
+                    :1, :2, :3, :4, :5, :6, PARSE_JSON(:7), CURRENT_TIMESTAMP(), CURRENT_TIMESTAMP()
+                )
+                """,
+                params=
+                [
+                    rule_id,
+                    check_type,
+                    default_severity,
+                    active,
+                    description,
+                    expression_template,
+                    normalized_param_schema,
+                ],
+            ).collect()
+    except Exception as exc:  # pragma: no cover - surfacing Snowflake errors to UI
+        st.error(f"Unable to save rule: {exc}")
+        return
+
+    st.success("Rule saved.")
+    st.session_state["dq_rules_mode"] = "list"
+    st.session_state["dq_rules_selected_uid"] = None
+    st.experimental_rerun()
 
 
 def _apply_filters(
