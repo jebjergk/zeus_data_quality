@@ -4,8 +4,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
-
-import matplotlib.pyplot as plt
 import pandas as pd
 import streamlit as st
 
@@ -262,6 +260,8 @@ def _render_sampling_summary(run_info: Dict[str, Any]) -> None:
         sample_rows = sample_est_rows if sample_est_rows is not None else 0
 
     remainder_rows = max(total_rows - sample_rows, 0)
+
+    import matplotlib.pyplot as plt
 
     fig, ax = plt.subplots()
     ax.pie(
