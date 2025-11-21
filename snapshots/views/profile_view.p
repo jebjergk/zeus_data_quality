@@ -223,13 +223,32 @@ def _render_last_run_banner(run_history: pd.DataFrame, target_fqn: str) -> None:
         )
 
 
-def _render_sampling_summary(run_info: Dict[str, Any]) -> None:
-    st.subheader("Sampling summary")
-    row_count = run_info.get("row_count") if run_info else None
-    sample_mode_raw = run_info.get("sample_mode") if run_info else None
-    sample_mode = str(sample_mode_raw).upper() if sample_mode_raw is not None else None
-    sample_percent = run_info.get("sample_percent") if run_info else None
-    sample_est_rows = run_info.get("sample_est_rows") if run_info else None
+def _render_sampling_summary(run_info: Any) -> None:
+    """Render sampling metadata and pie chart for the last profiling run.
+
+    This MUST NOT call st.stop(), even if metadata is missing, so the rest of the
+    page (overview grid, classification) still renders.
+    """
+
+    if run_info is None:
+        st.info("No sampling metadata available for this run.")
+        return
+
+    def _get_field(*names: str) -> Any:
+        if isinstance(run_info, dict):
+            for name in names:
+                if name in run_info:
+                    return run_info.get(name)
+        else:
+            for name in names:
+                if hasattr(run_info, name):
+                    return getattr(run_info, name)
+        return None
+
+    row_count = _get_field("ROW_COUNT", "row_count")
+    sample_mode = _get_field("SAMPLE_MODE", "sample_mode")
+    sample_percent = _get_field("SAMPLE_PERCENT", "sample_percent")
+    sample_est_rows = _get_field("SAMPLE_EST_ROWS", "sample_est_rows")
 
     if (
         row_count is None
@@ -237,37 +256,62 @@ def _render_sampling_summary(run_info: Dict[str, Any]) -> None:
         and sample_percent is None
         and sample_est_rows is None
     ):
-        st.info("No sampling meta data available")
+        st.info("No sampling metadata available for this run.")
         return
 
-    total_rows = int(row_count) if row_count is not None else 0
+    total_rows = None
+    try:
+        if row_count is not None:
+            total_rows = int(row_count)
+    except Exception:
+        total_rows = None
 
-    if sample_mode == "FULL":
-        sampled_rows = total_rows
-        sampling_label = "FULL SCAN (no sampling)"
-        display_percent = 100.0
-    else:
-        sampled_rows = int(sample_est_rows) if sample_est_rows is not None else 0
+    if not total_rows or total_rows <= 0:
+        st.info("Sampling metadata is present but total row count is zero or invalid.")
+        return
+
+    mode_str = (str(sample_mode) or "").upper() if sample_mode is not None else ""
+
+    if mode_str == "SAMPLE":
+        sampled_rows = None
+        try:
+            if sample_est_rows is not None:
+                sampled_rows = int(sample_est_rows)
+        except Exception:
+            sampled_rows = None
+
+        if sampled_rows is None:
+            try:
+                if sample_percent is not None:
+                    sampled_rows = int(round(total_rows * float(sample_percent) / 100.0))
+            except Exception:
+                sampled_rows = None
+
+        if sampled_rows is None:
+            sampled_rows = total_rows
+
         display_percent = (
             float(sample_percent)
             if sample_percent is not None
-            else (100.0 * sampled_rows / total_rows if total_rows > 0 else 0.0)
+            else (100.0 * sampled_rows / total_rows)
         )
         sampling_label = "SYSTEM sampling"
+    else:
+        sampled_rows = total_rows
+        display_percent = 100.0
+        sampling_label = "FULL scan (no sampling)"
 
+    remainder_rows = max(total_rows - sampled_rows, 0)
+
+    st.subheader("Sampling summary")
     st.markdown(f"Table size: **{total_rows:,}** rows")
     st.markdown(
         f"Sample used: approx. **{sampled_rows:,}** rows (~{display_percent:.1f}%)"
     )
     st.markdown(f"Sampling mode: **{sampling_label}**")
 
-    if total_rows <= 0:
-        st.info("Sampling chart not available because table row count is zero.")
-        return
-
-    remainder_rows = max(total_rows - sampled_rows, 0)
-
-    _render_sampling_pie_chart(sampled_rows, remainder_rows)
+    if total_rows > 0:
+        _render_sampling_pie_chart(sampled_rows, remainder_rows)
 
 
 def _render_sampling_pie_chart(sample_rows: float, remainder_rows: float) -> None:
