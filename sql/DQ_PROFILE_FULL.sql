@@ -67,9 +67,12 @@ BEGIN
     v_info_schema_table := :v_database_name || '.INFORMATION_SCHEMA.TABLES';
 
     EXECUTE IMMEDIATE
-        'SELECT COALESCE(ROW_COUNT, 0) into ? FROM IDENTIFIER(?) WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?'
+        $$SELECT COALESCE(ROW_COUNT, 0)
+          FROM IDENTIFIER(?)
+         WHERE TABLE_SCHEMA = ?
+           AND TABLE_NAME = ?$$
+        INTO :v_row_count
         USING (
-            v_row_count,
             v_info_schema_table,
             v_schema_name,
             v_table_name
@@ -91,7 +94,9 @@ BEGIN
         v_from_clause := :v_table_fqn || ' SAMPLE SYSTEM (' || :v_sample_percent || ')';
     END IF;
 
-    EXECUTE IMMEDIATE 'SELECT COUNT(*) INTO ' ||  :v_profiled_rows || ' FROM ' || :v_from_clause;
+    EXECUTE IMMEDIATE
+        'SELECT COUNT(*) FROM ' || :v_from_clause
+        INTO :v_profiled_rows;
 
     v_completed_at := CURRENT_TIMESTAMP();
 
@@ -124,7 +129,7 @@ EXCEPTION
     WHEN OTHER THEN
         v_completed_at := CURRENT_TIMESTAMP();
         v_status := 'FAILED';
-        v_error := TRY_CAST(error_message() AS STRING);
+        v_error := SQLERRM;
 
         INSERT INTO ZEUS_ANALYTICS_SIMU.DISCOVERY.DQ_PROFILE_RUN (
             TARGET_TABLE,
