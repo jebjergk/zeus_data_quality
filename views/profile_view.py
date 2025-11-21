@@ -20,6 +20,7 @@ class _ProfilingData:
     overview_grid: pd.DataFrame
     column_classification: pd.DataFrame
     recent_runs: pd.DataFrame
+    run_info: Dict[str, Any]
 
 
 OVERVIEW_GRID_DISPLAY_COLUMNS: List[str] = [
@@ -115,6 +116,37 @@ def _latest_run_record(run_history: pd.DataFrame) -> Optional[pd.Series]:
     if "STARTED_AT" in ordered.columns:
         ordered = ordered.sort_values(by="STARTED_AT", ascending=False)
     return ordered.iloc[0]
+
+
+def _extract_run_info(run_history: pd.DataFrame) -> Dict[str, Any]:
+    if not isinstance(run_history, pd.DataFrame) or run_history.empty:
+        return {}
+
+    latest = _latest_run_record(run_history)
+    if latest is None:
+        return {}
+
+    def _normalize_value(key: str):
+        value = latest.get(key)
+        return None if pd.isna(value) else value
+
+    sample_mode_raw = _normalize_value("SAMPLE_MODE")
+    sample_mode = str(sample_mode_raw).upper() if sample_mode_raw is not None else None
+    row_count = _normalize_value("ROW_COUNT")
+    sample_percent = _normalize_value("SAMPLE_PERCENT")
+    sample_est_rows = _normalize_value("SAMPLE_EST_ROWS")
+
+    if sample_mode == "FULL":
+        sample_percent = 100 if sample_percent is None else sample_percent
+        if sample_est_rows is None and row_count is not None:
+            sample_est_rows = row_count
+
+    return {
+        "row_count": row_count,
+        "sample_mode": sample_mode,
+        "sample_percent": sample_percent,
+        "sample_est_rows": sample_est_rows,
+    }
 
 
 def _status_banner(status: str):
@@ -567,6 +599,7 @@ def _load_metadata(
         overview_grid=overview_grid if isinstance(overview_grid, pd.DataFrame) else pd.DataFrame(),
         column_classification=column_classification if isinstance(column_classification, pd.DataFrame) else pd.DataFrame(),
         recent_runs=recent_runs if isinstance(recent_runs, pd.DataFrame) else pd.DataFrame(),
+        run_info=_extract_run_info(recent_runs),
     )
 
 
@@ -714,6 +747,7 @@ def render_profile(
 
     st.session_state["profile_last_table"] = target_fqn
     st.session_state["profile_last_run_id"] = _extract_last_run_id(data.recent_runs)
+    st.session_state["profile_last_run_info"] = data.run_info
 
     _render_last_run_banner(data.recent_runs, target_fqn)
     st.divider()
