@@ -262,17 +262,12 @@ def _render_sampling_summary(run_info: Dict[str, Any]) -> None:
     st.markdown(f"Sampling mode: **{sampling_label}**")
 
     if total_rows <= 0:
-        st.info("Sampling chart unavailable: table row count missing.")
+        st.info("Sampling chart not available because table row count is zero.")
         return
 
-    if sample_mode == "FULL":
-        sample_rows = total_rows
-    else:
-        sample_rows = sampled_rows
+    remainder_rows = max(total_rows - sampled_rows, 0)
 
-    remainder_rows = max(total_rows - sample_rows, 0)
-
-    _render_sampling_pie_chart(sample_rows, remainder_rows)
+    _render_sampling_pie_chart(sampled_rows, remainder_rows)
 
 
 def _render_sampling_pie_chart(sample_rows: float, remainder_rows: float) -> None:
