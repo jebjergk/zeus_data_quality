@@ -732,7 +732,11 @@ def fetch_recent_runs(session: Any, table_fqn: str, limit: int = 10) -> pd.DataF
             STARTED_AT,
             FINISHED_AT,
             STATUS,
-            DETAILS
+            DETAILS,
+            ROW_COUNT,
+            SAMPLE_MODE,
+            SAMPLE_PERCENT,
+            SAMPLE_EST_ROWS
         FROM {PROFILE_RUN_TABLE}
         WHERE TABLE_FQN = ?
         ORDER BY STARTED_AT DESC
