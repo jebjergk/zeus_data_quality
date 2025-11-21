@@ -67,9 +67,12 @@ BEGIN
     v_info_schema_table := :v_database_name || '.INFORMATION_SCHEMA.TABLES';
 
     EXECUTE IMMEDIATE
-        'SELECT COALESCE(ROW_COUNT, 0) into ? FROM IDENTIFIER(?) WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?'
+        $$SELECT COALESCE(ROW_COUNT, 0)
+          FROM IDENTIFIER(?)
+         WHERE TABLE_SCHEMA = ?
+           AND TABLE_NAME = ?$$
+        INTO :v_row_count
         USING (
-            v_row_count,
             v_info_schema_table,
             v_schema_name,
             v_table_name
