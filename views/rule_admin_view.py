@@ -119,7 +119,7 @@ def _render_rule_edit_page(session: Session, metadata_db: str, metadata_schema: 
         if st.button("Back to rule list", key="rule_edit_back_to_list"):
             st.session_state["dq_rules_mode"] = "list"
             st.session_state["dq_rules_selected_uid"] = None
-            st.stop()
+            st.rerun()
 
     rule_defaults: dict[str, Any] = {
         "RULE_ID": "",
@@ -214,7 +214,7 @@ def _render_rule_edit_page(session: Session, metadata_db: str, metadata_schema: 
         st.session_state["dq_rules_mode"] = "list"
         st.session_state["dq_rules_selected_uid"] = None
         st.info("Edit cancelled")
-        st.stop()
+        st.rerun()
 
     validation_status: Optional[str] = None
     if validate_clicked:
@@ -298,7 +298,7 @@ def _render_rule_edit_page(session: Session, metadata_db: str, metadata_schema: 
     st.session_state["dq_rules_mode"] = "list"
     st.session_state["dq_rules_selected_uid"] = None
     st.success("Rule saved")
-    st.stop()
+    st.rerun()
 
 
 def _apply_filters(
@@ -317,24 +317,6 @@ def _apply_filters(
         filtered = filtered[filtered["CHECK_TYPE"].astype(str) == check_type]
     return filtered
 
-
-def _enter_rule_edit_mode(rule_uid: Any) -> None:
-    st.session_state["dq_rules_mode"] = "edit_existing"
-    st.session_state["dq_rules_selected_uid"] = rule_uid
-    st.stop()
-
-
-def _enter_rule_create_mode() -> None:
-    st.session_state["dq_rules_mode"] = "create_new"
-    st.session_state["dq_rules_selected_uid"] = None
-    st.stop()
-
-
-def _delete_rule_and_stop(session: Session, table_name: str, rule_uid: Any) -> None:
-    _delete_rule(session, table_name, rule_uid)
-    st.stop()
-
-
 def _render_rule_list(
     *, session: Session, table_name: str, rules_df: pd.DataFrame
 ) -> None:
@@ -343,12 +325,13 @@ def _render_rule_list(
     st.session_state.setdefault("dq_rules_search", "")
     st.session_state.setdefault("dq_rules_check_type_filter", "All")
 
-    st.button(
-        "Create new rule",
-        key="create_new_rule",
-        on_click=_enter_rule_create_mode,
-    )
+    # Create new rule
+    if st.button("Create new rule", key="create_new_rule"):
+        st.session_state["dq_rules_mode"] = "create_new"
+        st.session_state["dq_rules_selected_uid"] = None
+        st.rerun()
 
+    # Search + filter
     search = st.text_input(
         "Search rules", value=st.session_state["dq_rules_search"], key="dq_rules_search"
     )
@@ -358,7 +341,9 @@ def _render_rule_list(
     check_type_filter = st.selectbox(
         "Filter by check type",
         options=check_type_options,
-        index=check_type_options.index(st.session_state.get("dq_rules_check_type_filter", "All"))
+        index=check_type_options.index(
+            st.session_state.get("dq_rules_check_type_filter", "All")
+        )
         if st.session_state.get("dq_rules_check_type_filter", "All") in check_type_options
         else 0,
         key="dq_rules_check_type_filter",
@@ -370,6 +355,7 @@ def _render_rule_list(
         st.info("No rules match the current search or filter. Adjust filters or create a new rule.")
         return
 
+    # Snowflake-style rows
     for rule in filtered_df.to_dict("records"):
         rule_uid = rule.get("RULE_UID")
         rule_id = rule.get("RULE_ID", "")
@@ -400,20 +386,19 @@ def _render_rule_list(
                     except Exception:
                         updated_text = str(updated_at)
                 st.markdown(f"Updated: {updated_text}")
+
+            # EDIT button – inline, no callback
             with col_edit:
-                st.button(
-                    "Edit",
-                    key=f"edit_rule_{rule_uid}",
-                    on_click=_enter_rule_edit_mode,
-                    args=(rule_uid,),
-                )
+                if st.button("Edit", key=f"edit_rule_{rule_uid}"):
+                    st.session_state["dq_rules_mode"] = "edit_existing"
+                    st.session_state["dq_rules_selected_uid"] = rule_uid
+                    st.rerun()
+
+            # DELETE button – inline, no callback
             with col_delete:
-                st.button(
-                    "Delete",
-                    key=f"delete_rule_{rule_uid}",
-                    on_click=_delete_rule_and_stop,
-                    args=(session, table_name, rule_uid),
-                )
+                if st.button("Delete", key=f"delete_rule_{rule_uid}"):
+                    _delete_rule(session, table_name, rule_uid)
+                    st.rerun()
 
             if description:
                 st.caption(description)
@@ -451,9 +436,10 @@ def render_rule_admin(session: Optional[Session], metadata_db: str, metadata_sch
         return
 
     if mode != "list":
+        # Fallback: reset to list, but do NOT stop – just continue to render list
         st.session_state["dq_rules_mode"] = "list"
         st.session_state["dq_rules_selected_uid"] = None
-        st.stop()
+        mode = "list"
 
     try:
         rules_df = _load_rules(session, table_name)
