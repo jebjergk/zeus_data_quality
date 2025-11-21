@@ -225,39 +225,50 @@ def _render_last_run_banner(run_history: pd.DataFrame, target_fqn: str) -> None:
 
 def _render_sampling_summary(run_info: Dict[str, Any]) -> None:
     st.subheader("Sampling summary")
-    if not run_info:
-        st.caption("No sampling metadata available.")
+    row_count = run_info.get("row_count") if run_info else None
+    sample_mode_raw = run_info.get("sample_mode") if run_info else None
+    sample_mode = str(sample_mode_raw).upper() if sample_mode_raw is not None else None
+    sample_percent = run_info.get("sample_percent") if run_info else None
+    sample_est_rows = run_info.get("sample_est_rows") if run_info else None
+
+    if (
+        row_count is None
+        and sample_mode is None
+        and sample_percent is None
+        and sample_est_rows is None
+    ):
+        st.info("No sampling meta data available")
         return
 
-    row_count = run_info.get("row_count")
-    sample_mode = str(run_info.get("sample_mode") or "").upper()
-    sample_percent = run_info.get("sample_percent")
-    sample_est_rows = run_info.get("sample_est_rows")
+    total_rows = int(row_count) if row_count is not None else 0
 
     if sample_mode == "FULL":
-        sample_mode_display = "FULL SCAN (no sampling)"
-        sample_percent_display = 100.0 if sample_percent is None else sample_percent
-        sample_est_rows_display = row_count
+        sampled_rows = total_rows
+        sampling_label = "FULL SCAN (no sampling)"
+        display_percent = 100.0
     else:
-        sample_mode_display = "SYSTEM sampling" if sample_mode else ui_strings.PROFILE_V2_VALUE_UNKNOWN
-        sample_percent_display = sample_percent
-        sample_est_rows_display = sample_est_rows
+        sampled_rows = int(sample_est_rows) if sample_est_rows is not None else 0
+        display_percent = (
+            float(sample_percent)
+            if sample_percent is not None
+            else (100.0 * sampled_rows / total_rows if total_rows > 0 else 0.0)
+        )
+        sampling_label = "SYSTEM sampling"
 
-    st.markdown(f"**Table size:** {_format_count(row_count)} rows")
+    st.markdown(f"Table size: **{total_rows:,}** rows")
     st.markdown(
-        f"**Sample used:** {_format_count(sample_est_rows_display)} rows (~{_format_percent(sample_percent_display)})"
+        f"Sample used: approx. **{sampled_rows:,}** rows (~{display_percent:.1f}%)"
     )
-    st.markdown(f"**Sampling mode:** {sample_mode_display}")
+    st.markdown(f"Sampling mode: **{sampling_label}**")
 
-    total_rows = row_count
-    if total_rows is None or total_rows <= 0:
+    if total_rows <= 0:
         st.info("Sampling chart unavailable: table row count missing.")
         return
 
     if sample_mode == "FULL":
         sample_rows = total_rows
     else:
-        sample_rows = sample_est_rows if sample_est_rows is not None else 0
+        sample_rows = sampled_rows
 
     remainder_rows = max(total_rows - sample_rows, 0)
 
