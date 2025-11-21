@@ -324,6 +324,17 @@ def _enter_rule_edit_mode(rule_uid: Any) -> None:
     st.stop()
 
 
+def _enter_rule_create_mode() -> None:
+    st.session_state["dq_rules_mode"] = "create_new"
+    st.session_state["dq_rules_selected_uid"] = None
+    st.stop()
+
+
+def _delete_rule_and_stop(session: Session, table_name: str, rule_uid: Any) -> None:
+    _delete_rule(session, table_name, rule_uid)
+    st.stop()
+
+
 def _render_rule_list(
     *, session: Session, table_name: str, rules_df: pd.DataFrame
 ) -> None:
@@ -332,10 +343,11 @@ def _render_rule_list(
     st.session_state.setdefault("dq_rules_search", "")
     st.session_state.setdefault("dq_rules_check_type_filter", "All")
 
-    if st.button("Create new rule", key="create_new_rule"):
-        st.session_state["dq_rules_mode"] = "create_new"
-        st.session_state["dq_rules_selected_uid"] = None
-        st.stop()
+    st.button(
+        "Create new rule",
+        key="create_new_rule",
+        on_click=_enter_rule_create_mode,
+    )
 
     search = st.text_input(
         "Search rules", value=st.session_state["dq_rules_search"], key="dq_rules_search"
@@ -396,9 +408,12 @@ def _render_rule_list(
                     args=(rule_uid,),
                 )
             with col_delete:
-                if st.button("Delete", key=f"delete_rule_{rule_uid}"):
-                    _delete_rule(session, table_name, rule_uid)
-                    st.stop()
+                st.button(
+                    "Delete",
+                    key=f"delete_rule_{rule_uid}",
+                    on_click=_delete_rule_and_stop,
+                    args=(session, table_name, rule_uid),
+                )
 
             if description:
                 st.caption(description)
