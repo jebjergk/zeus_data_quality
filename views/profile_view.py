@@ -261,15 +261,18 @@ def _render_sampling_summary(run_info: Dict[str, Any]) -> None:
 
     remainder_rows = max(total_rows - sample_rows, 0)
 
-    import matplotlib.pyplot as plt
+    try:
+        import matplotlib.pyplot as plt
 
-    fig, ax = plt.subplots()
-    ax.pie(
-        [sample_rows, remainder_rows],
-        labels=["Sample", "Remainder"],
-        autopct="%1.1f%%",
-    )
-    st.pyplot(fig)
+        fig, ax = plt.subplots()
+        ax.pie(
+            [sample_rows, remainder_rows],
+            labels=["Sample", "Remainder"],
+            autopct="%1.1f%%",
+        )
+        st.pyplot(fig)
+    except ModuleNotFoundError:
+        st.info("Sampling pie chart is unavailable (matplotlib not found in this environment).")
 
 
 def _classification_source_badge(source: Any) -> str:
