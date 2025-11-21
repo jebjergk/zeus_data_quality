@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
+import matplotlib.pyplot as plt
 import pandas as pd
 import streamlit as st
 
@@ -249,6 +250,26 @@ def _render_sampling_summary(run_info: Dict[str, Any]) -> None:
         f"**Sample used:** {_format_count(sample_est_rows_display)} rows (~{_format_percent(sample_percent_display)})"
     )
     st.markdown(f"**Sampling mode:** {sample_mode_display}")
+
+    total_rows = row_count
+    if total_rows is None or total_rows <= 0:
+        st.info("Sampling chart unavailable: table row count missing.")
+        return
+
+    if sample_mode == "FULL":
+        sample_rows = total_rows
+    else:
+        sample_rows = sample_est_rows if sample_est_rows is not None else 0
+
+    remainder_rows = max(total_rows - sample_rows, 0)
+
+    fig, ax = plt.subplots()
+    ax.pie(
+        [sample_rows, remainder_rows],
+        labels=["Sample", "Remainder"],
+        autopct="%1.1f%%",
+    )
+    st.pyplot(fig)
 
 
 def _classification_source_badge(source: Any) -> str:
