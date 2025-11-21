@@ -285,6 +285,11 @@ def _prepare_overview_frame(overview: pd.DataFrame) -> pd.DataFrame:
     if not isinstance(overview, pd.DataFrame):
         return pd.DataFrame(columns=_OVERVIEW_INTERNAL_COLUMNS)
     working = overview.copy()
+    extraneous_columns = [
+        column for column in working.columns if column not in _OVERVIEW_INTERNAL_COLUMNS
+    ]
+    if extraneous_columns:
+        working = working.drop(columns=extraneous_columns)
     for column in _OVERVIEW_INTERNAL_COLUMNS:
         if column not in working.columns:
             working[column] = False if column in _OVERVIEW_BOOL_COLUMNS else ""
