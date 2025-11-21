@@ -94,9 +94,7 @@ BEGIN
         v_from_clause := :v_table_fqn || ' SAMPLE SYSTEM (' || :v_sample_percent || ')';
     END IF;
 
-    EXECUTE IMMEDIATE
-        'SELECT COUNT(*) FROM ' || :v_from_clause
-        INTO :v_profiled_rows;
+    EXECUTE IMMEDIATE 'SELECT COUNT(*) FROM ' || :v_from_clause INTO v_profiled_rows;
 
     v_completed_at := CURRENT_TIMESTAMP();
 
