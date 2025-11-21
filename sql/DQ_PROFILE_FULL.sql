@@ -91,7 +91,7 @@ BEGIN
         v_from_clause := :v_table_fqn || ' SAMPLE SYSTEM (' || :v_sample_percent || ')';
     END IF;
 
-    EXECUTE IMMEDIATE 'SELECT COUNT(*) INTO ' ||  :v_profiled_rows || ' FROM ' || :v_from_clause;
+    EXECUTE IMMEDIATE 'SELECT COUNT(*) FROM ' || :v_from_clause INTO v_profiled_rows;
 
     v_completed_at := CURRENT_TIMESTAMP();
 
@@ -124,7 +124,7 @@ EXCEPTION
     WHEN OTHER THEN
         v_completed_at := CURRENT_TIMESTAMP();
         v_status := 'FAILED';
-        v_error := TRY_CAST(error_message() AS STRING);
+        v_error := SQLERRM;
 
         INSERT INTO ZEUS_ANALYTICS_SIMU.DISCOVERY.DQ_PROFILE_RUN (
             TARGET_TABLE,
