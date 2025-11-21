@@ -728,6 +728,9 @@ def fetch_recent_runs(session: Any, table_fqn: str, limit: int = 10) -> pd.DataF
     sql = f"""
         SELECT
             PROFILE_RUN_ID AS RUN_ID,
+            DATABASE_NAME,
+            SCHEMA_NAME,
+            TABLE_NAME,
             TABLE_FQN,
             STARTED_AT,
             FINISHED_AT,
@@ -736,7 +739,9 @@ def fetch_recent_runs(session: Any, table_fqn: str, limit: int = 10) -> pd.DataF
             ROW_COUNT,
             SAMPLE_MODE,
             SAMPLE_PERCENT,
-            SAMPLE_EST_ROWS
+            SAMPLE_EST_ROWS,
+            CREATED_AT,
+            UPDATED_AT
         FROM {PROFILE_RUN_TABLE}
         WHERE TABLE_FQN = ?
         ORDER BY STARTED_AT DESC
