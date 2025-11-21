@@ -318,6 +318,12 @@ def _apply_filters(
     return filtered
 
 
+def _enter_rule_edit_mode(rule_uid: Any) -> None:
+    st.session_state["dq_rules_mode"] = "edit_existing"
+    st.session_state["dq_rules_selected_uid"] = rule_uid
+    st.stop()
+
+
 def _render_rule_list(
     *, session: Session, table_name: str, rules_df: pd.DataFrame
 ) -> None:
@@ -383,10 +389,12 @@ def _render_rule_list(
                         updated_text = str(updated_at)
                 st.markdown(f"Updated: {updated_text}")
             with col_edit:
-                if st.button("Edit", key=f"edit_rule_{rule_uid}"):
-                    st.session_state["dq_rules_mode"] = "edit_existing"
-                    st.session_state["dq_rules_selected_uid"] = rule_uid
-                    st.stop()
+                st.button(
+                    "Edit",
+                    key=f"edit_rule_{rule_uid}",
+                    on_click=_enter_rule_edit_mode,
+                    args=(rule_uid,),
+                )
             with col_delete:
                 if st.button("Delete", key=f"delete_rule_{rule_uid}"):
                     _delete_rule(session, table_name, rule_uid)
