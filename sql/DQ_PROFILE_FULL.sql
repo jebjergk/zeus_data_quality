@@ -1,30 +1,6 @@
 -- DQ_PROFILE_FULL Stored Procedure
 -- Captures profiling metadata with sampling awareness for Profiling v2.
 
--- Ensure the run history table is present with sampling metadata columns.
-CREATE or replace TABLE ZEUS_ANALYTICS_SIMU.DISCOVERY.DQ_PROFILE_RUN (
-    RUN_ID            NUMBER AUTOINCREMENT START 1 INCREMENT 1,
-    TARGET_TABLE      STRING,
-    STARTED_AT        TIMESTAMP,
-    COMPLETED_AT      TIMESTAMP,
-    STATUS            STRING,
-    DURATION_SECONDS  NUMBER,
-    ERROR_MESSAGE     STRING,
-    ROW_COUNT         NUMBER,
-    SAMPLE_MODE       STRING,
-    SAMPLE_PERCENT    NUMBER,
-    SAMPLE_EST_ROWS   NUMBER
-    
-);
-
-ALTER TABLE IF EXISTS ZEUS_ANALYTICS_SIMU.DISCOVERY.DQ_PROFILE_RUN
-    ADD COLUMN IF NOT EXISTS ROW_COUNT NUMBER,
-    ADD COLUMN IF NOT EXISTS SAMPLE_MODE STRING,
-    ADD COLUMN IF NOT EXISTS SAMPLE_PERCENT NUMBER,
-    ADD COLUMN IF NOT EXISTS SAMPLE_EST_ROWS NUMBER;
-
-call ZEUS_ANALYTICS_SIMU.DISCOVERY.DQ_PROFILE_FULL('ZEUS_ANALYTICS_SIMU.CORE.D1_BOERSEN_SEGMENT_DEC','ZEUS_ANALYTICS_SIMU','CORE','D1_BOERSEN_SEGMENT_DEC');
-
 CREATE OR REPLACE PROCEDURE ZEUS_ANALYTICS_SIMU.DISCOVERY.DQ_PROFILE_FULL(
     IN_TABLE_FQN STRING,
     DATABASE_NAME STRING DEFAULT NULL,
@@ -32,7 +8,7 @@ CREATE OR REPLACE PROCEDURE ZEUS_ANALYTICS_SIMU.DISCOVERY.DQ_PROFILE_FULL(
     TABLE_NAME STRING DEFAULT NULL,
     MAX_SAMPLE_ROWS NUMBER DEFAULT 100000
 )
-RETURNS STRING
+RETURNS NUMBER
 LANGUAGE SQL
 EXECUTE AS CALLER
 AS
@@ -47,17 +23,22 @@ DECLARE
     v_sample_mode STRING := NULL;
     v_sample_percent NUMBER := NULL;
     v_sample_est_rows NUMBER := NULL;
-    v_started_at TIMESTAMP := CURRENT_TIMESTAMP();
-    v_completed_at TIMESTAMP;
-    v_status STRING := 'SUCCESS';
-    v_error STRING := NULL;
-    v_from_clause STRING;
     v_profiled_rows NUMBER := 0;
+    v_from_clause STRING;
     v_info_schema_table STRING;
-    rs resultset;
+    v_info_schema_columns STRING;
+    v_started_at TIMESTAMP := CURRENT_TIMESTAMP();
+    v_finished_at TIMESTAMP;
+    v_status STRING := 'RUNNING';
+    v_details STRING := NULL;
+    v_profile_run_id NUMBER := NULL;
+    v_feature_sql STRING := '';
+    v_is_string BOOLEAN;
+    v_col_ident STRING;
+    v_union_prefix STRING := '';
 BEGIN
     IF (:v_table_fqn = '' AND (v_database_name IS NULL OR v_schema_name IS NULL OR v_table_name IS NULL)) THEN
-        RETURN 'ERROR: Table identifier is required';
+        RAISE STATEMENT_ERROR WITH MESSAGE = 'Table identifier is required';
     END IF;
 
     IF (:v_table_fqn IS NOT NULL AND :v_table_fqn != '') THEN
@@ -69,22 +50,16 @@ BEGIN
     END IF;
 
     v_info_schema_table := :v_database_name || '.INFORMATION_SCHEMA.TABLES';
+    v_info_schema_columns := :v_database_name || '.INFORMATION_SCHEMA.COLUMNS';
 
-   rs := (EXECUTE IMMEDIATE
-    'SELECT COALESCE(ROW_COUNT, 0) as single_row_count
-      FROM IDENTIFIER(?)
-     WHERE TABLE_SCHEMA = ?
-       AND TABLE_NAME = ?'
-    USING (
-        v_info_schema_table,
-        v_schema_name,
-        v_table_name)
-    );
+    EXECUTE IMMEDIATE
+        'SELECT COALESCE(ROW_COUNT, 0)
+           FROM IDENTIFIER(?)
+          WHERE TABLE_SCHEMA = ?
+            AND TABLE_NAME = ?'
+        INTO :v_row_count
+        USING (v_info_schema_table, v_schema_name, v_table_name);
 
-    for first_row in rs do
-        v_row_count := first_row.single_row_count;
-    end for;
-    
     IF (:v_row_count <= :v_max_sample_rows) THEN
         v_sample_mode := 'FULL';
         v_sample_percent := NULL;
@@ -101,69 +76,135 @@ BEGIN
         v_from_clause := :v_table_fqn || ' SAMPLE SYSTEM (' || :v_sample_percent || ')';
     END IF;
 
-    rs := (EXECUTE IMMEDIATE 'SELECT COUNT(*) as single_row_count FROM ' || :v_from_clause);
-
-    for first_row in rs do
-        v_profiled_rows := first_row.single_row_count;
-    end for;
-    
-    v_completed_at := CURRENT_TIMESTAMP();
+    EXECUTE IMMEDIATE 'SELECT COUNT(*) FROM ' || :v_from_clause INTO :v_profiled_rows;
 
     INSERT INTO ZEUS_ANALYTICS_SIMU.DISCOVERY.DQ_PROFILE_RUN (
-        TARGET_TABLE,
+        DATABASE_NAME,
+        SCHEMA_NAME,
+        TABLE_NAME,
+        TABLE_FQN,
         STARTED_AT,
-        COMPLETED_AT,
         STATUS,
-        DURATION_SECONDS,
-        ERROR_MESSAGE,
         ROW_COUNT,
         SAMPLE_MODE,
         SAMPLE_PERCENT,
-        SAMPLE_EST_ROWS
+        SAMPLE_EST_ROWS,
+        CREATED_AT,
+        UPDATED_AT
     )
     SELECT
+        :v_database_name,
+        :v_schema_name,
+        :v_table_name,
         :v_table_fqn,
         :v_started_at,
-        :v_completed_at,
         :v_status,
-        DATEDIFF('second', :v_started_at, :v_completed_at),
-        :v_error,
         :v_row_count,
         :v_sample_mode,
         :v_sample_percent,
-        COALESCE(:v_sample_est_rows, :v_profiled_rows);
+        COALESCE(:v_sample_est_rows, :v_profiled_rows),
+        CURRENT_TIMESTAMP(),
+        CURRENT_TIMESTAMP();
 
-    RETURN 'OK';
-EXCEPTION
-    WHEN OTHER THEN
-        v_completed_at := CURRENT_TIMESTAMP();
-        v_status := 'FAILED';
-        v_error := SQLERRM;
+    SELECT MAX(PROFILE_RUN_ID)
+      INTO :v_profile_run_id
+      FROM ZEUS_ANALYTICS_SIMU.DISCOVERY.DQ_PROFILE_RUN
+     WHERE TABLE_FQN = :v_table_fqn
+       AND STARTED_AT = :v_started_at;
 
-        INSERT INTO ZEUS_ANALYTICS_SIMU.DISCOVERY.DQ_PROFILE_RUN (
-            TARGET_TABLE,
-            STARTED_AT,
-            COMPLETED_AT,
-            STATUS,
-            DURATION_SECONDS,
-            ERROR_MESSAGE,
+    IF (:v_profile_run_id IS NULL) THEN
+        RAISE STATEMENT_ERROR WITH MESSAGE = 'Failed to capture PROFILE_RUN_ID';
+    END IF;
+
+    FOR rec IN (
+        SELECT COLUMN_NAME, DATA_TYPE
+        FROM IDENTIFIER(:v_info_schema_columns)
+        WHERE TABLE_SCHEMA = :v_schema_name
+          AND TABLE_NAME = :v_table_name
+        ORDER BY ORDINAL_POSITION
+    ) DO
+        v_col_ident := '"' || REPLACE(rec.COLUMN_NAME, '"', '""') || '"';
+        v_is_string := REGEXP_LIKE(UPPER(rec.DATA_TYPE), 'CHAR|TEXT|STRING');
+
+        v_feature_sql := v_feature_sql || v_union_prefix || CHR(10) ||
+            'SELECT ' || :v_profile_run_id || ' AS PROFILE_RUN_ID,' || CHR(10) ||
+            '       ' || QUOTE_LITERAL(:v_database_name) || ' AS DATABASE_NAME,' || CHR(10) ||
+            '       ' || QUOTE_LITERAL(:v_schema_name) || ' AS SCHEMA_NAME,' || CHR(10) ||
+            '       ' || QUOTE_LITERAL(:v_table_name) || ' AS TABLE_NAME,' || CHR(10) ||
+            '       ' || QUOTE_LITERAL(:v_table_fqn) || ' AS TABLE_FQN,' || CHR(10) ||
+            '       ' || QUOTE_LITERAL(rec.COLUMN_NAME) || ' AS COLUMN_NAME,' || CHR(10) ||
+            '       ' || QUOTE_LITERAL(rec.DATA_TYPE) || ' AS DATA_TYPE,' || CHR(10) ||
+            '       ' || :v_profiled_rows || ' AS ROW_COUNT,' || CHR(10) ||
+            '       NULL_COUNT,' || CHR(10) ||
+            '       NULL_COUNT / NULLIF(' || :v_profiled_rows || ', 0) AS NULL_RATIO,' || CHR(10) ||
+            '       DISTINCT_COUNT,' || CHR(10) ||
+            '       DISTINCT_COUNT / NULLIF(' || :v_profiled_rows || ', 0) AS DISTINCT_RATIO,' || CHR(10) ||
+            '       MIN_VALUE,' || CHR(10) ||
+            '       MAX_VALUE,' || CHR(10) ||
+            '       ' || IFF(v_is_string, 'MIN_LENGTH_RAW', 'NULL') || ' AS MIN_LENGTH,' || CHR(10) ||
+            '       ' || IFF(v_is_string, 'MAX_LENGTH_RAW', 'NULL') || ' AS MAX_LENGTH,' || CHR(10) ||
+            '       ' || IFF(v_is_string, 'AVG_LENGTH_RAW', 'NULL') || ' AS AVG_LENGTH,' || CHR(10) ||
+            '       CURRENT_TIMESTAMP(),' || CHR(10) ||
+            '       CURRENT_TIMESTAMP()' || CHR(10) ||
+            '  FROM (SELECT' || CHR(10) ||
+            '                SUM(IFF(' || v_col_ident || ' IS NULL, 1, 0)) AS NULL_COUNT,' || CHR(10) ||
+            '                COUNT(DISTINCT ' || v_col_ident || ') AS DISTINCT_COUNT,' || CHR(10) ||
+            '                MIN(' || v_col_ident || ') AS MIN_VALUE,' || CHR(10) ||
+            '                MAX(' || v_col_ident || ') AS MAX_VALUE,' || CHR(10) ||
+            '                MIN(LENGTH(TO_VARCHAR(' || v_col_ident || '))) AS MIN_LENGTH_RAW,' || CHR(10) ||
+            '                MAX(LENGTH(TO_VARCHAR(' || v_col_ident || '))) AS MAX_LENGTH_RAW,' || CHR(10) ||
+            '                AVG(LENGTH(TO_VARCHAR(' || v_col_ident || '))) AS AVG_LENGTH_RAW' || CHR(10) ||
+            '          FROM ' || :v_from_clause || ')';
+        v_union_prefix := CHR(10) || 'UNION ALL';
+    END FOR;
+
+    EXECUTE IMMEDIATE 'INSERT INTO ZEUS_ANALYTICS_SIMU.DISCOVERY.DQ_COLUMN_FEATURES (
+            PROFILE_RUN_ID,
+            DATABASE_NAME,
+            SCHEMA_NAME,
+            TABLE_NAME,
+            TABLE_FQN,
+            COLUMN_NAME,
+            DATA_TYPE,
             ROW_COUNT,
-            SAMPLE_MODE,
-            SAMPLE_PERCENT,
-            SAMPLE_EST_ROWS
-        )
-        SELECT
-            :v_table_fqn,
-            :v_started_at,
-            :v_completed_at,
-            :v_status,
-            DATEDIFF('second', :v_started_at, :v_completed_at),
-            :v_error,
-            :v_row_count,
-            :v_sample_mode,
-            :v_sample_percent,
-            :v_sample_est_rows;
+            NULL_COUNT,
+            NULL_RATIO,
+            DISTINCT_COUNT,
+            DISTINCT_RATIO,
+            MIN_VALUE,
+            MAX_VALUE,
+            MIN_LENGTH,
+            MAX_LENGTH,
+            AVG_LENGTH,
+            CREATED_AT,
+            UPDATED_AT
+        ) ' || v_feature_sql;
 
-        RETURN 'ERROR: ' || COALESCE(:v_error, 'Unknown error');
+    v_finished_at := CURRENT_TIMESTAMP();
+    v_status := 'SUCCESS';
+
+    UPDATE ZEUS_ANALYTICS_SIMU.DISCOVERY.DQ_PROFILE_RUN
+       SET FINISHED_AT = :v_finished_at,
+           STATUS = :v_status,
+           DETAILS = NULL,
+           UPDATED_AT = CURRENT_TIMESTAMP()
+     WHERE PROFILE_RUN_ID = :v_profile_run_id;
+
+    RETURN v_profile_run_id;
+EXCEPTION
+    WHEN STATEMENT_ERROR OR EXPRESSION_ERROR OR OTHER THEN
+        v_finished_at := CURRENT_TIMESTAMP();
+        v_status := 'FAILED';
+        v_details := SQLERRM;
+
+        IF (v_profile_run_id IS NOT NULL) THEN
+            UPDATE ZEUS_ANALYTICS_SIMU.DISCOVERY.DQ_PROFILE_RUN
+               SET FINISHED_AT = :v_finished_at,
+                   STATUS = :v_status,
+                   DETAILS = :v_details,
+                   UPDATED_AT = CURRENT_TIMESTAMP()
+             WHERE PROFILE_RUN_ID = :v_profile_run_id;
+        END IF;
+        RAISE;
 END;
 $$;
