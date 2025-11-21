@@ -2,7 +2,7 @@
 -- Captures profiling metadata with sampling awareness for Profiling v2.
 
 -- Ensure the run history table is present with sampling metadata columns.
-CREATE TABLE IF NOT EXISTS ZEUS_ANALYTICS_SIMU.DISCOVERY.DQ_PROFILE_RUN (
+CREATE or replace TABLE ZEUS_ANALYTICS_SIMU.DISCOVERY.DQ_PROFILE_RUN (
     RUN_ID            NUMBER AUTOINCREMENT START 1 INCREMENT 1,
     TARGET_TABLE      STRING,
     STARTED_AT        TIMESTAMP,
@@ -14,6 +14,7 @@ CREATE TABLE IF NOT EXISTS ZEUS_ANALYTICS_SIMU.DISCOVERY.DQ_PROFILE_RUN (
     SAMPLE_MODE       STRING,
     SAMPLE_PERCENT    NUMBER,
     SAMPLE_EST_ROWS   NUMBER
+    
 );
 
 ALTER TABLE IF EXISTS ZEUS_ANALYTICS_SIMU.DISCOVERY.DQ_PROFILE_RUN
@@ -51,6 +52,7 @@ DECLARE
     v_from_clause STRING;
     v_profiled_rows NUMBER := 0;
     v_info_schema_table STRING;
+    rs resultset;
 BEGIN
     IF (:v_table_fqn = '' AND (v_database_name IS NULL OR v_schema_name IS NULL OR v_table_name IS NULL)) THEN
         RETURN 'ERROR: Table identifier is required';
@@ -66,18 +68,21 @@ BEGIN
 
     v_info_schema_table := :v_database_name || '.INFORMATION_SCHEMA.TABLES';
 
-    EXECUTE IMMEDIATE
-        $$SELECT COALESCE(ROW_COUNT, 0)
-          FROM IDENTIFIER(?)
-         WHERE TABLE_SCHEMA = ?
-           AND TABLE_NAME = ?$$
-        INTO :v_row_count
-        USING (
-            v_info_schema_table,
-            v_schema_name,
-            v_table_name
-        );
-        
+   rs := (EXECUTE IMMEDIATE
+    'SELECT COALESCE(ROW_COUNT, 0) as single_row_count
+      FROM IDENTIFIER(?)
+     WHERE TABLE_SCHEMA = ?
+       AND TABLE_NAME = ?'
+    USING (
+        v_info_schema_table,
+        v_schema_name,
+        v_table_name)
+    );
+
+    for first_row in rs do
+        v_row_count := first_row.single_row_count;
+    end for;
+    
     IF (:v_row_count <= :v_max_sample_rows) THEN
         v_sample_mode := 'FULL';
         v_sample_percent := NULL;
@@ -94,8 +99,12 @@ BEGIN
         v_from_clause := :v_table_fqn || ' SAMPLE SYSTEM (' || :v_sample_percent || ')';
     END IF;
 
-    EXECUTE IMMEDIATE 'SELECT COUNT(*) FROM ' || :v_from_clause INTO v_profiled_rows;
+    rs := (EXECUTE IMMEDIATE 'SELECT COUNT(*) FROM ' || :v_from_clause);
 
+    for first_row in rs do
+        v_profiled_rows := first_row.single_row_count;
+    end for;
+    
     v_completed_at := CURRENT_TIMESTAMP();
 
     INSERT INTO ZEUS_ANALYTICS_SIMU.DISCOVERY.DQ_PROFILE_RUN (
@@ -156,4 +165,3 @@ EXCEPTION
         RETURN 'ERROR: ' || COALESCE(:v_error, 'Unknown error');
 END;
 $$;
-
