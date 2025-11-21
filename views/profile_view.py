@@ -109,6 +109,32 @@ def _format_duration(seconds: Optional[float]) -> str:
     return f"{int(hours)}h {int(minutes)}m"
 
 
+def _format_count(value: Any) -> str:
+    if value is None:
+        return ui_strings.PROFILE_V2_VALUE_UNKNOWN
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return str(value)
+    if pd.isna(numeric):
+        return ui_strings.PROFILE_V2_VALUE_UNKNOWN
+    if numeric.is_integer():
+        return f"{int(numeric):,}"
+    return f"{numeric:,.2f}"
+
+
+def _format_percent(value: Any) -> str:
+    if value is None:
+        return ui_strings.PROFILE_V2_VALUE_UNKNOWN
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return str(value)
+    if pd.isna(numeric):
+        return ui_strings.PROFILE_V2_VALUE_UNKNOWN
+    return f"{numeric:.2f}%"
+
+
 def _latest_run_record(run_history: pd.DataFrame) -> Optional[pd.Series]:
     if not isinstance(run_history, pd.DataFrame) or run_history.empty:
         return None
@@ -196,6 +222,33 @@ def _render_last_run_banner(run_history: pd.DataFrame, target_fqn: str) -> None:
                 details=_truncate_details(details)
             )
         )
+
+
+def _render_sampling_summary(run_info: Dict[str, Any]) -> None:
+    st.subheader("Sampling summary")
+    if not run_info:
+        st.caption("No sampling metadata available.")
+        return
+
+    row_count = run_info.get("row_count")
+    sample_mode = str(run_info.get("sample_mode") or "").upper()
+    sample_percent = run_info.get("sample_percent")
+    sample_est_rows = run_info.get("sample_est_rows")
+
+    if sample_mode == "FULL":
+        sample_mode_display = "FULL SCAN (no sampling)"
+        sample_percent_display = 100.0 if sample_percent is None else sample_percent
+        sample_est_rows_display = row_count
+    else:
+        sample_mode_display = "SYSTEM sampling" if sample_mode else ui_strings.PROFILE_V2_VALUE_UNKNOWN
+        sample_percent_display = sample_percent
+        sample_est_rows_display = sample_est_rows
+
+    st.markdown(f"**Table size:** {_format_count(row_count)} rows")
+    st.markdown(
+        f"**Sample used:** {_format_count(sample_est_rows_display)} rows (~{_format_percent(sample_percent_display)})"
+    )
+    st.markdown(f"**Sampling mode:** {sample_mode_display}")
 
 
 def _classification_source_badge(source: Any) -> str:
@@ -750,6 +803,7 @@ def render_profile(
     st.session_state["profile_last_run_info"] = data.run_info
 
     _render_last_run_banner(data.recent_runs, target_fqn)
+    _render_sampling_summary(data.run_info)
     st.divider()
 
     tab_overview, tab_classification = st.tabs(
