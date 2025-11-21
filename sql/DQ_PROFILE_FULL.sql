@@ -124,7 +124,7 @@ EXCEPTION
     WHEN OTHER THEN
         v_completed_at := CURRENT_TIMESTAMP();
         v_status := 'FAILED';
-        v_error := TRY_CAST(error_message() AS STRING);
+        v_error := SQLERRM;
 
         INSERT INTO ZEUS_ANALYTICS_SIMU.DISCOVERY.DQ_PROFILE_RUN (
             TARGET_TABLE,
