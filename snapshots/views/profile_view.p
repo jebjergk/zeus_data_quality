@@ -4,12 +4,16 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
+import logging
 import pandas as pd
 import streamlit as st
 
 from services import profiling_v2 as profiling_service
 from ui import strings as ui_strings
 from views.table_picker import stateless_table_picker
+
+st.session_state.setdefault("busy_profiling", False)
+st.session_state.setdefault("freeze_view", False)
 
 
 @dataclass
@@ -798,21 +802,42 @@ def render_profile(
     classify_fn = getattr(helpers, "run_classification_only", None)
     suggestions_fn = getattr(helpers, "run_suggestions_only", None)
 
-    if run_clicked and target_fqn:
-        with st.spinner(ui_strings.PROFILE_V2_RUN_SPINNER.format(table=target_fqn)):
+    fqn = (
+        st.session_state.get("editor_target_fqn")
+        or st.session_state.get("profile_target_fqn")
+        or ""
+    )
+
+    if run_clicked:
+        if not fqn:
+            st.warning("Select a table first.")
+        elif not st.session_state["busy_profiling"]:
+            st.session_state["busy_profiling"] = True
+            st.session_state["freeze_view"] = True
             try:
-                helpers.run_profiling_v2(session, target_fqn)
+                with st.spinner(
+                    ui_strings.PROFILE_V2_RUN_SPINNER.format(table=fqn)
+                ):
+                    helpers.run_profiling_v2(session, fqn)
             except Exception as exc:
+                logging.exception("profiling:unhandled")
+                st.session_state["last_profile_err"] = (
+                    f"{type(exc).__name__}: {exc}"
+                )
                 status_placeholder.error(
                     ui_strings.PROFILE_V2_RUN_ERROR.format(error=str(exc))
                 )
             else:
                 st.session_state["profile_data_nonce"] += 1
-                st.session_state["profile_last_table"] = target_fqn
+                st.session_state["profile_last_table"] = fqn
                 st.session_state["profile_last_run_id"] = None
+                st.session_state["last_profile_err"] = None
                 status_placeholder.success(
-                    ui_strings.PROFILE_V2_RUN_SUCCESS.format(table=target_fqn)
+                    ui_strings.PROFILE_V2_RUN_SUCCESS.format(table=fqn)
                 )
+            finally:
+                st.session_state["busy_profiling"] = False
+                st.session_state["freeze_view"] = False
     elif refresh_clicked and target_fqn:
         status_placeholder.info(ui_strings.PROFILE_V2_REFRESH_MESSAGE)
         st.session_state["profile_data_nonce"] += 1
@@ -860,6 +885,10 @@ def render_profile(
                             table=target_fqn
                         )
                     )
+
+    last_profile_err = st.session_state.get("last_profile_err")
+    if last_profile_err:
+        status_placeholder.error(last_profile_err)
 
     if not target_fqn:
         st.info(ui_strings.PROFILE_V2_NO_TARGET)

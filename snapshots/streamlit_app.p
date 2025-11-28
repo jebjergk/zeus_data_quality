@@ -34,10 +34,11 @@ Forbidden patterns:
 import logging
 import streamlit as st
 
-# safe inits
+# Safe inits (no rendering)
 st.session_state["_rerun_count"] = st.session_state.get("_rerun_count", 0) + 1
 st.session_state.setdefault("active_view", "home")
-st.session_state.setdefault("page", st.session_state["active_view"])
+st.session_state.setdefault("page", st.session_state["active_view"])  # keep if router uses 'page'
+st.session_state.setdefault("freeze_view", False)
 
 current_view = st.session_state.get("active_view", "home")
 
@@ -74,7 +75,11 @@ if "_last_query_page" not in st.session_state:
 
 def set_view(view: str) -> None:
     """Update the active view explicitly via user navigation."""
+    if st.session_state.get("freeze_view"):
+        logging.info("route:blocked while frozen (wanted=%s)", view)
+        return
     st.session_state["active_view"] = view
+    st.session_state["page"] = view
     logging.info("route:set %s", view)
 
 try:
@@ -136,6 +141,16 @@ CHECKS_TBL = f"{METADATA_DB}.{METADATA_SCHEMA}.DQ_CHECK"
 # RUN_RESULTS_TBL already defined above
 
 st.set_page_config(page_title="Zeus Data Quality", layout="wide")
+
+# Hard override during profiling: force Profile view and stop further processing
+if st.session_state.get("freeze_view"):
+    logging.info("dispatch:hard-freeze → profile")
+    st.session_state["active_view"] = "profile"
+    st.session_state["page"] = "profile"  # keep in sync if your router uses 'page'
+    from views.profile_view import render_profile
+
+    render_profile()
+    st.stop()  # halt this rerun so no other routing can change the page
 
 st.caption(
     f"rerun #{st.session_state.get('_rerun_count')} "
@@ -234,7 +249,6 @@ def _get_page_from_query_params() -> Optional[str]:
 def navigate_to(page: str) -> None:
     """Update the current page selection in session state."""
     set_view(page)
-    st.session_state["page"] = page
     st.session_state["_last_query_page"] = page
     try:
         current = dict(st.query_params)  # type: ignore[attr-defined]
@@ -1679,7 +1693,6 @@ if query_page and query_page != last_query_page:
     st.session_state["_last_query_page"] = query_page
     if query_page != st.session_state.get("active_view"):
         set_view(query_page)
-        st.session_state["page"] = query_page
 elif query_page is None:
     if "_last_query_page" not in st.session_state:
         st.session_state["_last_query_page"] = st.session_state.get(
