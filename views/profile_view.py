@@ -4,9 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
-import logging
 import pandas as pd
-import streamlit as st
+import streamlit as st, logging
 
 from services import profiling_v2 as profiling_service
 from ui import strings as ui_strings
@@ -14,6 +13,9 @@ from views.table_picker import stateless_table_picker
 
 st.session_state.setdefault("busy_profiling", False)
 st.session_state.setdefault("freeze_view", False)
+st.session_state.setdefault("last_profile_summary", None)
+st.session_state.setdefault("last_profile_rows", [])
+st.session_state.setdefault("last_profile_err", None)
 
 
 @dataclass
@@ -555,7 +557,6 @@ def _render_classification_grid(
         ui_strings.PROFILE_V2_COLUMN_EDIT_SUCCESS.format(column=column_label)
     )
     st.session_state["profile_data_nonce"] = nonce + 1
-    st.experimental_rerun()
 
 
 def _classification_source_detail(source: Any) -> str:
@@ -691,11 +692,38 @@ def _handle_manual_classification_save(
     st.session_state["profile_data_nonce"] = (
         st.session_state.get("profile_data_nonce", 0) + 1
     )
-    st.experimental_rerun()
 
 
 def _resolve_helpers(profiling_helpers: Optional[Any]):
     return profiling_helpers or profiling_service
+
+
+def _run_table_profile(helpers: Any, session: Any, table_fqn: str) -> Dict[str, Any]:
+    run_fn = getattr(helpers, "run_profiling_v2", None)
+    summary_fn = getattr(helpers, "fetch_table_summary", None)
+    column_fn = getattr(helpers, "get_column_features", None)
+    if not callable(run_fn):
+        return {
+            "ok": False,
+            "summary": None,
+            "column_rows": [],
+            "err": "Profiling engine unavailable",
+        }
+
+    with st.spinner(ui_strings.PROFILE_V2_RUN_SPINNER.format(table=table_fqn)):
+        run_fn(session, table_fqn)
+
+    summary = summary_fn(session, table_fqn) if callable(summary_fn) else None
+    columns = column_fn(session, table_fqn) if callable(column_fn) else pd.DataFrame()
+    column_rows = (
+        columns.to_dict("records") if isinstance(columns, pd.DataFrame) else []
+    )
+    return {
+        "ok": True,
+        "summary": summary,
+        "column_rows": column_rows,
+        "err": None,
+    }
 
 
 def _extract_last_run_id(run_history: pd.DataFrame) -> Optional[str]:
@@ -802,11 +830,9 @@ def render_profile(
     classify_fn = getattr(helpers, "run_classification_only", None)
     suggestions_fn = getattr(helpers, "run_suggestions_only", None)
 
-    fqn = (
-        st.session_state.get("editor_target_fqn")
-        or st.session_state.get("profile_target_fqn")
-        or ""
-    )
+    fqn = (st.session_state.get("editor_target_fqn") or "")
+    if not fqn:
+        fqn = st.session_state.get("profile_target_fqn") or ""
 
     if run_clicked:
         if not fqn:
@@ -815,26 +841,28 @@ def render_profile(
             st.session_state["busy_profiling"] = True
             st.session_state["freeze_view"] = True
             try:
-                with st.spinner(
-                    ui_strings.PROFILE_V2_RUN_SPINNER.format(table=fqn)
-                ):
-                    helpers.run_profiling_v2(session, fqn)
-            except Exception as exc:
+                res = _run_table_profile(helpers, session, fqn)
+                if res.get("ok"):
+                    st.session_state["last_profile_summary"] = res.get("summary")
+                    st.session_state["last_profile_rows"] = (
+                        res.get("column_rows") or []
+                    )
+                    st.session_state["last_profile_err"] = None
+                    st.session_state["profile_data_nonce"] += 1
+                    st.session_state["profile_last_table"] = fqn
+                    st.session_state["profile_last_run_id"] = None
+                    status_placeholder.success(
+                        ui_strings.PROFILE_V2_RUN_SUCCESS.format(table=fqn)
+                    )
+                else:
+                    st.session_state["last_profile_summary"] = None
+                    st.session_state["last_profile_rows"] = []
+                    st.session_state["last_profile_err"] = res.get("err")
+            except Exception as e:
                 logging.exception("profiling:unhandled")
-                st.session_state["last_profile_err"] = (
-                    f"{type(exc).__name__}: {exc}"
-                )
-                status_placeholder.error(
-                    ui_strings.PROFILE_V2_RUN_ERROR.format(error=str(exc))
-                )
-            else:
-                st.session_state["profile_data_nonce"] += 1
-                st.session_state["profile_last_table"] = fqn
-                st.session_state["profile_last_run_id"] = None
-                st.session_state["last_profile_err"] = None
-                status_placeholder.success(
-                    ui_strings.PROFILE_V2_RUN_SUCCESS.format(table=fqn)
-                )
+                st.session_state["last_profile_summary"] = None
+                st.session_state["last_profile_rows"] = []
+                st.session_state["last_profile_err"] = f"{type(e).__name__}: {e}"
             finally:
                 st.session_state["busy_profiling"] = False
                 st.session_state["freeze_view"] = False
@@ -915,8 +943,21 @@ def render_profile(
     st.session_state["profile_last_run_id"] = _extract_last_run_id(data.recent_runs)
     st.session_state["profile_last_run_info"] = data.run_info
 
+    cached_rows = st.session_state.get("last_profile_rows") or []
+    overview_grid = (
+        pd.DataFrame(cached_rows)
+        if cached_rows
+        else data.overview_grid
+    )
+    cached_run_info = st.session_state.get("last_profile_summary")
+    run_info = (
+        cached_run_info
+        if isinstance(cached_run_info, dict) and cached_run_info
+        else data.run_info
+    )
+
     _render_last_run_banner(data.recent_runs, target_fqn)
-    _render_sampling_summary(data.run_info)
+    _render_sampling_summary(run_info)
     st.divider()
 
     tab_overview, tab_classification = st.tabs(
@@ -924,7 +965,7 @@ def render_profile(
     )
 
     with tab_overview:
-        _render_overview_grid(data.overview_grid, target_fqn)
+        _render_overview_grid(overview_grid, target_fqn)
 
     with tab_classification:
         _render_classification_grid(
