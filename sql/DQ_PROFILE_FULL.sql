@@ -34,6 +34,12 @@ DECLARE
     v_col_ident STRING;
     v_union_prefix STRING := '';
     v_tmpstr string;
+    v_database_literal STRING;
+    v_schema_literal STRING;
+    v_table_literal STRING;
+    v_table_fqn_literal STRING;
+    v_col_literal STRING;
+    v_data_type_literal STRING;
     v_rs resultset;
     e_table_error exception (-20001,'Table identifier is required');
     e_no_profile_id exception (-20002,'Failed to capture PROFILE_RUN_ID');
@@ -139,9 +145,14 @@ BEGIN
     END IF;
 
     
-    v_rs := (EXECUTE IMMEDIATE 
+    v_rs := (EXECUTE IMMEDIATE
             'SELECT COLUMN_NAME, DATA_TYPE FROM identifier(?) where TABLE_SCHEMA = ? AND TABLE_NAME = ? ORDER BY ORDINAL_POSITION'
             USING (v_info_schema_columns, v_schema_name, v_table_name));
+
+    v_database_literal := IFF(v_database_name IS NULL, 'NULL', '\'' || REPLACE(v_database_name, '\'', '\'\'\'') || '\'');
+    v_schema_literal := IFF(v_schema_name IS NULL, 'NULL', '\'' || REPLACE(v_schema_name, '\'', '\'\'\'') || '\'');
+    v_table_literal := IFF(v_table_name IS NULL, 'NULL', '\'' || REPLACE(v_table_name, '\'', '\'\'\'') || '\'');
+    v_table_fqn_literal := IFF(v_table_fqn IS NULL, 'NULL', '\'' || REPLACE(v_table_fqn, '\'', '\'\'\'') || '\'');
 
    /* FOR rec IN (
         SELECT COLUMN_NAME, DATA_TYPE
@@ -154,15 +165,17 @@ BEGIN
     FOR rec in v_rs DO
         v_col_ident := '"' || REPLACE(rec.COLUMN_NAME, '"', '""') || '"';
         v_is_string := REGEXP_LIKE(UPPER(rec.DATA_TYPE), 'CHAR|TEXT|STRING');
+        v_col_literal := IFF(rec:"COLUMN_NAME" IS NULL, 'NULL', '\'' || REPLACE(rec:"COLUMN_NAME", '\'', '\'\'\'') || '\'');
+        v_data_type_literal := IFF(rec:"DATA_TYPE" IS NULL, 'NULL', '\'' || REPLACE(rec:"DATA_TYPE", '\'', '\'\'\'') || '\'');
 
         v_feature_sql := v_feature_sql || v_union_prefix || CHR(10) ||
             'SELECT ' || :v_profile_run_id || ' AS PROFILE_RUN_ID,' || CHR(10) ||
-            '       ' || QUOTE_LITERAL(:v_database_name) || ' AS DATABASE_NAME,' || CHR(10) ||
-            '       ' || QUOTE_LITERAL(:v_schema_name) || ' AS SCHEMA_NAME,' || CHR(10) ||
-            '       ' || QUOTE_LITERAL(:v_table_name) || ' AS TABLE_NAME,' || CHR(10) ||
-            '       ' || QUOTE_LITERAL(:v_table_fqn) || ' AS TABLE_FQN,' || CHR(10) ||
-            '       ' || QUOTE_LITERAL(rec:"COLUMN_NAME") || ' AS COLUMN_NAME,' || CHR(10) ||
-            '       ' || QUOTE_LITERAL(rec:"DATA_TYPE") || ' AS DATA_TYPE,' || CHR(10) ||
+            '       ' || :v_database_literal || ' AS DATABASE_NAME,' || CHR(10) ||
+            '       ' || :v_schema_literal || ' AS SCHEMA_NAME,' || CHR(10) ||
+            '       ' || :v_table_literal || ' AS TABLE_NAME,' || CHR(10) ||
+            '       ' || :v_table_fqn_literal || ' AS TABLE_FQN,' || CHR(10) ||
+            '       ' || :v_col_literal || ' AS COLUMN_NAME,' || CHR(10) ||
+            '       ' || :v_data_type_literal || ' AS DATA_TYPE,' || CHR(10) ||
             '       ' || :v_profiled_rows || ' AS ROW_COUNT,' || CHR(10) ||
             '       NULL_COUNT,' || CHR(10) ||
             '       NULL_COUNT / NULLIF(' || :v_profiled_rows || ', 0) AS NULL_RATIO,' || CHR(10) ||
