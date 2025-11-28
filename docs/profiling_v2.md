@@ -30,6 +30,8 @@ All procedures live in the `DISCOVERY` schema (`profiling_v2.DISCOVERY_NAMESPACE
 
 These tables are always referenced with the namespace defined by `services.profiling_v2.DISCOVERY_NAMESPACE` (defaults to `ZEUS_ANALYTICS_SIMU.DISCOVERY`).
 
+If your existing `DQ_COLUMN_FEATURES` table is missing columns referenced by the stored procedures, run `sql/DQ_COLUMN_FEATURES_DDL.sql` in your Snowflake account. The script creates the table when absent and uses `ADD COLUMN IF NOT EXISTS` to align older deployments without dropping data.
+
 ## Manual verification in Snowflake
 
 1. Choose a fully qualified table name (e.g. `DEMO_DB.PUBLIC.CUSTOMERS`).
