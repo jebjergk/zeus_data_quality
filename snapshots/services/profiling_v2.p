@@ -475,116 +475,10 @@ def get_overview_grid(session: Session, table_fqn: str) -> pd.DataFrame:
     if not normalized:
         return pd.DataFrame(columns=overview_columns)
 
-    sql = f"""
-        WITH features AS (
-            SELECT
-                TABLE_FQN,
-                COLUMN_NAME,
-                DATA_TYPE,
-                ROW_COUNT,
-                NULL_COUNT,
-                NULL_RATIO,
-                DISTINCT_COUNT,
-                DISTINCT_RATIO,
-                MIN_VALUE,
-                MAX_VALUE
-            FROM {COLUMN_FEATURES_TABLE}
-            WHERE TABLE_FQN = :1
-        ),
-        suggestions AS (
-            SELECT
-                TABLE_FQN,
-                COLUMN_NAME,
-                LISTAGG(RULE_ID, ', ')    WITHIN GROUP (ORDER BY SUGGESTED_AT DESC, RULE_ID) AS RULE_ID,
-                LISTAGG(CHECK_TYPE, '; ') WITHIN GROUP (ORDER BY SUGGESTED_AT DESC, RULE_ID) AS CHECK_TYPE,
-                LISTAGG(SEVERITY, ', ')   WITHIN GROUP (ORDER BY SUGGESTED_AT DESC, RULE_ID) AS SEVERITY,
-                LISTAGG(RATIONALE, ' | ') WITHIN GROUP (ORDER BY SUGGESTED_AT DESC, RULE_ID) AS RATIONALE
-            FROM {SUGGESTED_CHECKS_TABLE}
-            WHERE TABLE_FQN = :1
-            GROUP BY TABLE_FQN, COLUMN_NAME
-        ),
-        classification AS (
-            SELECT
-                TABLE_FQN,
-                COLUMN_NAME,
-                CONFIDENCE
-            FROM (
-                SELECT
-                    TABLE_FQN,
-                    COLUMN_NAME,
-                    CONFIDENCE,
-                    CLASSIFIED_AT,
-                    ROW_NUMBER() OVER (
-                        PARTITION BY TABLE_FQN, COLUMN_NAME
-                        ORDER BY CLASSIFIED_AT DESC
-                    ) AS RN
-                FROM {COLUMN_CLASSIFICATION_TABLE}
-                WHERE TABLE_FQN = :1
-            )
-            WHERE RN = 1
-        )
-        SELECT
-            f.TABLE_FQN,
-            f.COLUMN_NAME,
-            f.DATA_TYPE,
-            f.ROW_COUNT,
-            f.NULL_COUNT,
-            f.NULL_RATIO,
-            f.DISTINCT_COUNT,
-            f.DISTINCT_RATIO,
-            f.MIN_VALUE,
-            f.MAX_VALUE,
-            s.RULE_ID,
-            s.CHECK_TYPE,
-            s.SEVERITY,
-            s.RATIONALE,
-            c.CONFIDENCE
-        FROM features f
-        LEFT JOIN suggestions s
-          ON s.TABLE_FQN = f.TABLE_FQN
-         AND s.COLUMN_NAME = f.COLUMN_NAME
-        LEFT JOIN classification c
-          ON c.TABLE_FQN = f.TABLE_FQN
-         AND c.COLUMN_NAME = f.COLUMN_NAME
-    """
-
-    try:
-        df = session.sql(sql, params=[normalized]).to_pandas()
-    except Exception as exc:  # pragma: no cover - Snowflake specific failures
-        LOGGER.exception("profiling_v2:overview_fetch_failed target=%s", normalized)
-        return pd.DataFrame(columns=overview_columns)
-
-    if df.empty:
-        return pd.DataFrame(columns=overview_columns)
-
-    df.columns = [str(column).lower() for column in df.columns]
-
-    def fmt_ratio(count: Any, ratio: Any) -> str:
-        if pd.isna(count) and pd.isna(ratio):
-            return "-"
-        if pd.isna(ratio):
-            return str(int(count)) if pd.notna(count) else "0"
-        try:
-            pct = float(ratio) * 100.0
-        except Exception:
-            return str(count)
-        count_str = str(int(count)) if pd.notna(count) else "0"
-        return f"{count_str} ({pct:.2f}%)"
-
-    df["null_info"] = df.apply(
-        lambda row: fmt_ratio(row.get("null_count"), row.get("null_ratio")),
-        axis=1,
-    )
-    df["distinct_info"] = df.apply(
-        lambda row: fmt_ratio(row.get("distinct_count"), row.get("distinct_ratio")),
-        axis=1,
-    )
-
-    df["min_value"] = df.get("min_value")
-    df["max_value"] = df.get("max_value")
-    df["length_info"] = "- / - / -"
-    df["has_suggestion"] = df["rule_id"].notna()
-    df["include_in_dq_config"] = df["has_suggestion"].astype(bool)
+    def _stringify(value: Any) -> str:
+        if value is None or pd.isna(value):
+            return ""
+        return str(value)
 
     def norm_conf(value: Any) -> str:
         if value is None or pd.isna(value):
@@ -594,30 +488,87 @@ def get_overview_grid(session: Session, table_fqn: str) -> pd.DataFrame:
         except Exception:
             return str(value)
 
-    df["confidence"] = df.get("confidence").map(norm_conf)
+    features = _normalize_dataframe_columns(get_column_features(session, normalized))
+    if features.empty:
+        return pd.DataFrame(columns=overview_columns)
 
-    for column in ("rule_id", "check_type", "severity", "rationale"):
-        if column not in df.columns:
-            df[column] = None
-        df[column] = df[column].astype(object).where(df[column].notna(), "-")
+    suggestions = _normalize_dataframe_columns(get_suggested_checks(session, normalized))
+    classification = _normalize_dataframe_columns(
+        get_column_classification(session, normalized)
+    )
 
-    overview = pd.DataFrame()
-    overview["include_in_dq_config"] = df["include_in_dq_config"].astype(bool)
-    overview["column_name"] = df["column_name"].astype(str)
-    overview["data_type"] = df.get("data_type", "").astype(str)
-    overview["null_info"] = df["null_info"].astype(str)
-    overview["distinct_info"] = df["distinct_info"].astype(str)
-    overview["min_value"] = df["min_value"].fillna("").astype(str)
-    overview["max_value"] = df["max_value"].fillna("").astype(str)
-    overview["length_info"] = df["length_info"].astype(str)
-    overview["rule_id"] = df["rule_id"]
-    overview["check_type"] = df["check_type"]
-    overview["severity"] = df["severity"]
-    overview["rationale"] = df["rationale"]
-    overview["confidence"] = df["confidence"]
-    overview["has_suggestion"] = df["has_suggestion"].astype(bool)
+    suggestion_lookup: Dict[str, Dict[str, Any]] = {}
+    if not suggestions.empty and "COLUMN_NAME" in suggestions.columns:
+        ordering: List[str] = []
+        ascending: List[bool] = []
+        if "SUGGESTED_AT" in suggestions.columns:
+            ordering.append("SUGGESTED_AT")
+            ascending.append(False)
+        if "RULE_ID" in suggestions.columns:
+            ordering.append("RULE_ID")
+            ascending.append(True)
+        working_suggestions = suggestions.copy()
+        if ordering:
+            working_suggestions = working_suggestions.sort_values(
+                by=ordering, ascending=ascending
+            )
 
-    return overview[overview_columns]
+        for column, group in working_suggestions.groupby("COLUMN_NAME"):
+            def _join(field: str, sep: str) -> Optional[str]:
+                if field not in group.columns:
+                    return None
+                values = [value for value in group[field].tolist() if pd.notna(value)]
+                if not values:
+                    return None
+                return sep.join(str(value) for value in values)
+
+            suggestion_lookup[str(column)] = {
+                "rule_id": _join("RULE_ID", ", ") or "-",
+                "check_type": _join("CHECK_TYPE", "; ") or "-",
+                "severity": _join("SEVERITY", ", ") or "-",
+                "rationale": _join("RATIONALE", " | ") or "-",
+                "has_suggestion": bool(len(group)),
+            }
+
+    latest_classifications = _latest_classifications(classification)
+
+    overview_rows: List[Dict[str, Any]] = []
+    for _, row in features.iterrows():
+        column_name = _normalize_column_name(row.get("COLUMN_NAME"))
+        column_suggestions = suggestion_lookup.get(column_name, {})
+        classification_row = latest_classifications.get(column_name, {})
+
+        overview_rows.append(
+            {
+                "include_in_dq_config": bool(column_suggestions.get("has_suggestion", False)),
+                "column_name": column_name,
+                "data_type": _stringify(row.get("DATA_TYPE")),
+                "null_info": _format_count_ratio(
+                    row.get("NULL_COUNT"), row.get("NULL_RATIO")
+                ),
+                "distinct_info": _format_count_ratio(
+                    row.get("DISTINCT_COUNT"), row.get("DISTINCT_RATIO")
+                ),
+                "min_value": _stringify(row.get("MIN_VALUE")),
+                "max_value": _stringify(row.get("MAX_VALUE")),
+                "length_info": _format_length_triplet(
+                    row.get("MIN_LENGTH"),
+                    row.get("MAX_LENGTH"),
+                    row.get("AVG_LENGTH"),
+                ),
+                "rule_id": column_suggestions.get("rule_id", "-"),
+                "check_type": column_suggestions.get("check_type", "-"),
+                "severity": column_suggestions.get("severity", "-"),
+                "rationale": _truncate_details(
+                    column_suggestions.get("rationale", "-"), max_length=500
+                ),
+                "confidence": norm_conf(classification_row.get("CONFIDENCE")),
+                "has_suggestion": bool(column_suggestions.get("has_suggestion", False)),
+            }
+        )
+
+    overview = pd.DataFrame.from_records(overview_rows, columns=overview_columns)
+    return overview
 
 
 def fetch_suggested_checks(session: Any, table_fqn: str) -> pd.DataFrame:
