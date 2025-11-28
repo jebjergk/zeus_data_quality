@@ -31,8 +31,7 @@ Forbidden patterns:
 • Do not allow manual editing of the configuration name or target caption formatting.
 """
 
-import logging
-import streamlit as st
+import streamlit as st, logging
 
 # Safe inits (no rendering)
 st.session_state["_rerun_count"] = st.session_state.get("_rerun_count", 0) + 1
@@ -142,15 +141,15 @@ CHECKS_TBL = f"{METADATA_DB}.{METADATA_SCHEMA}.DQ_CHECK"
 
 st.set_page_config(page_title="Zeus Data Quality", layout="wide")
 
-# Hard override during profiling: force Profile view and stop further processing
+# Hard override: if profiling is running, force Profile render and stop further dispatch
 if st.session_state.get("freeze_view"):
-    logging.info("dispatch:hard-freeze → profile")
+    logging.info("dispatch:hard-freeze → profile (early)")
     st.session_state["active_view"] = "profile"
-    st.session_state["page"] = "profile"  # keep in sync if your router uses 'page'
+    st.session_state["page"] = "profile"  # keep router key in sync
     from views.profile_view import render_profile
 
     render_profile()
-    st.stop()  # halt this rerun so no other routing can change the page
+    st.stop()  # end this rerun so no later code can change view
 
 st.caption(
     f"rerun #{st.session_state.get('_rerun_count')} "
