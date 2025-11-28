@@ -36,9 +36,18 @@ DECLARE
     v_is_string BOOLEAN;
     v_col_ident STRING;
     v_union_prefix STRING := '';
+    v_database_literal STRING;
+    v_schema_literal STRING;
+    v_table_literal STRING;
+    v_table_fqn_literal STRING;
+    v_col_literal STRING;
+    v_data_type_literal STRING;
+    v_rs RESULTSET;
+    e_table_error EXCEPTION (-20001, 'Table identifier is required');
+    e_no_profile_id EXCEPTION (-20002, 'Failed to capture PROFILE_RUN_ID');
 BEGIN
     IF (:v_table_fqn = '' AND (v_database_name IS NULL OR v_schema_name IS NULL OR v_table_name IS NULL)) THEN
-        RAISE STATEMENT_ERROR WITH MESSAGE = 'Table identifier is required';
+        RAISE e_table_error;
     END IF;
 
     IF (:v_table_fqn IS NOT NULL AND :v_table_fqn != '') THEN
@@ -49,16 +58,40 @@ BEGIN
         v_table_fqn := :v_database_name || '.' || :v_schema_name || '.' || :v_table_name;
     END IF;
 
+    v_database_literal := IFF(
+        :v_database_name IS NULL,
+        'NULL',
+        CHR(39) || REPLACE(:v_database_name, CHR(39), CHR(39) || CHR(39)) || CHR(39)
+    );
+    v_schema_literal := IFF(
+        :v_schema_name IS NULL,
+        'NULL',
+        CHR(39) || REPLACE(:v_schema_name, CHR(39), CHR(39) || CHR(39)) || CHR(39)
+    );
+    v_table_literal := IFF(
+        :v_table_name IS NULL,
+        'NULL',
+        CHR(39) || REPLACE(:v_table_name, CHR(39), CHR(39) || CHR(39)) || CHR(39)
+    );
+    v_table_fqn_literal := IFF(
+        :v_table_fqn IS NULL,
+        'NULL',
+        CHR(39) || REPLACE(:v_table_fqn, CHR(39), CHR(39) || CHR(39)) || CHR(39)
+    );
+
     v_info_schema_table := :v_database_name || '.INFORMATION_SCHEMA.TABLES';
     v_info_schema_columns := :v_database_name || '.INFORMATION_SCHEMA.COLUMNS';
 
-    EXECUTE IMMEDIATE
-        'SELECT COALESCE(ROW_COUNT, 0)
-           FROM IDENTIFIER(?)
-          WHERE TABLE_SCHEMA = ?
-            AND TABLE_NAME = ?'
-        INTO :v_row_count
-        USING (v_info_schema_table, v_schema_name, v_table_name);
+    v_rs := (EXECUTE IMMEDIATE
+                'SELECT COALESCE(ROW_COUNT, 0) row_count
+                 FROM IDENTIFIER(?)
+                WHERE TABLE_SCHEMA = ?
+                  AND TABLE_NAME = ?'
+             USING (v_info_schema_table, v_schema_name, v_table_name));
+
+    FOR cols IN v_rs DO
+        v_row_count := cols.row_count;
+    END FOR;
 
     IF (:v_row_count <= :v_max_sample_rows) THEN
         v_sample_mode := 'FULL';
@@ -76,7 +109,10 @@ BEGIN
         v_from_clause := :v_table_fqn || ' SAMPLE SYSTEM (' || :v_sample_percent || ')';
     END IF;
 
-    EXECUTE IMMEDIATE 'SELECT COUNT(*) FROM ' || :v_from_clause INTO :v_profiled_rows;
+    v_rs := (EXECUTE IMMEDIATE 'SELECT COUNT(*) row_count FROM ' || :v_from_clause);
+    FOR col IN v_rs DO
+        v_profiled_rows := col.row_count;
+    END FOR;
 
     INSERT INTO ZEUS_ANALYTICS_SIMU.DISCOVERY.DQ_PROFILE_RUN (
         DATABASE_NAME,
@@ -113,27 +149,36 @@ BEGIN
        AND STARTED_AT = :v_started_at;
 
     IF (:v_profile_run_id IS NULL) THEN
-        RAISE STATEMENT_ERROR WITH MESSAGE = 'Failed to capture PROFILE_RUN_ID';
+        RAISE e_no_profile_id;
     END IF;
 
-    FOR rec IN (
-        SELECT COLUMN_NAME, DATA_TYPE
-        FROM IDENTIFIER(:v_info_schema_columns)
-        WHERE TABLE_SCHEMA = :v_schema_name
-          AND TABLE_NAME = :v_table_name
-        ORDER BY ORDINAL_POSITION
-    ) DO
+    v_rs := (EXECUTE IMMEDIATE
+            'SELECT COLUMN_NAME, DATA_TYPE FROM identifier(?) where TABLE_SCHEMA = ? AND TABLE_NAME = ? ORDER BY ORDINAL_POSITION'
+            USING (v_info_schema_columns, v_schema_name, v_table_name));
+
+    FOR rec IN v_rs DO
         v_col_ident := '"' || REPLACE(rec.COLUMN_NAME, '"', '""') || '"';
         v_is_string := REGEXP_LIKE(UPPER(rec.DATA_TYPE), 'CHAR|TEXT|STRING');
 
+        v_col_literal := IFF(
+            rec.COLUMN_NAME IS NULL,
+            'NULL',
+            CHR(39) || REPLACE(rec.COLUMN_NAME, CHR(39), CHR(39) || CHR(39)) || CHR(39)
+        );
+        v_data_type_literal := IFF(
+            rec.DATA_TYPE IS NULL,
+            'NULL',
+            CHR(39) || REPLACE(rec.DATA_TYPE, CHR(39), CHR(39) || CHR(39)) || CHR(39)
+        );
+
         v_feature_sql := v_feature_sql || v_union_prefix || CHR(10) ||
             'SELECT ' || :v_profile_run_id || ' AS PROFILE_RUN_ID,' || CHR(10) ||
-            '       ' || QUOTE_LITERAL(:v_database_name) || ' AS DATABASE_NAME,' || CHR(10) ||
-            '       ' || QUOTE_LITERAL(:v_schema_name) || ' AS SCHEMA_NAME,' || CHR(10) ||
-            '       ' || QUOTE_LITERAL(:v_table_name) || ' AS TABLE_NAME,' || CHR(10) ||
-            '       ' || QUOTE_LITERAL(:v_table_fqn) || ' AS TABLE_FQN,' || CHR(10) ||
-            '       ' || QUOTE_LITERAL(rec.COLUMN_NAME) || ' AS COLUMN_NAME,' || CHR(10) ||
-            '       ' || QUOTE_LITERAL(rec.DATA_TYPE) || ' AS DATA_TYPE,' || CHR(10) ||
+            '       ' || :v_database_literal || ' AS DATABASE_NAME,' || CHR(10) ||
+            '       ' || :v_schema_literal || ' AS SCHEMA_NAME,' || CHR(10) ||
+            '       ' || :v_table_literal || ' AS TABLE_NAME,' || CHR(10) ||
+            '       ' || :v_table_fqn_literal || ' AS TABLE_FQN,' || CHR(10) ||
+            '       ' || v_col_literal || ' AS COLUMN_NAME,' || CHR(10) ||
+            '       ' || v_data_type_literal || ' AS DATA_TYPE,' || CHR(10) ||
             '       ' || :v_profiled_rows || ' AS ROW_COUNT,' || CHR(10) ||
             '       NULL_COUNT,' || CHR(10) ||
             '       NULL_COUNT / NULLIF(' || :v_profiled_rows || ', 0) AS NULL_RATIO,' || CHR(10) ||
@@ -192,7 +237,7 @@ BEGIN
 
     RETURN v_profile_run_id;
 EXCEPTION
-    WHEN STATEMENT_ERROR OR EXPRESSION_ERROR OR OTHER THEN
+    WHEN STATEMENT_ERROR OR EXPRESSION_ERROR THEN
         v_finished_at := CURRENT_TIMESTAMP();
         v_status := 'FAILED';
         v_details := SQLERRM;
