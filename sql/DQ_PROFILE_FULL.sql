@@ -191,8 +191,8 @@ BEGIN
             '  FROM (SELECT' || CHR(10) ||
             '                SUM(IFF(' || v_col_ident || ' IS NULL, 1, 0)) AS NULL_COUNT,' || CHR(10) ||
             '                COUNT(DISTINCT ' || v_col_ident || ') AS DISTINCT_COUNT,' || CHR(10) ||
-            '                MIN(' || v_col_ident || ') AS MIN_VALUE,' || CHR(10) ||
-            '                MAX(' || v_col_ident || ') AS MAX_VALUE,' || CHR(10) ||
+            '                TO_VARIANT(MIN(' || v_col_ident || ')) AS MIN_VALUE,' || CHR(10) ||
+            '                TO_VARIANT(MAX(' || v_col_ident || ')) AS MAX_VALUE,' || CHR(10) ||
             '                MIN(LENGTH(TO_VARCHAR(' || v_col_ident || '))) AS MIN_LENGTH_RAW,' || CHR(10) ||
             '                MAX(LENGTH(TO_VARCHAR(' || v_col_ident || '))) AS MAX_LENGTH_RAW,' || CHR(10) ||
             '                AVG(LENGTH(TO_VARCHAR(' || v_col_ident || '))) AS AVG_LENGTH_RAW' || CHR(10) ||
