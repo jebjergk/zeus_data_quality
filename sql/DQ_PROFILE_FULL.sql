@@ -165,8 +165,8 @@ BEGIN
     FOR rec in v_rs DO
         v_col_ident := '"' || REPLACE(rec.COLUMN_NAME, '"', '""') || '"';
         v_is_string := REGEXP_LIKE(UPPER(rec.DATA_TYPE), 'CHAR|TEXT|STRING');
-        v_col_literal := IFF(rec:"COLUMN_NAME" IS NULL, 'NULL', '\'' || REPLACE(rec:"COLUMN_NAME", '\'', '\'\'\'') || '\'');
-        v_data_type_literal := IFF(rec:"DATA_TYPE" IS NULL, 'NULL', '\'' || REPLACE(rec:"DATA_TYPE", '\'', '\'\'\'') || '\'');
+        v_col_literal := IFF(rec.COLUMN_NAME IS NULL, 'NULL', '\'' || REPLACE(rec.COLUMN_NAME, '\'', '\'\'\'') || '\'');
+        v_data_type_literal := IFF(rec.DATA_TYPE IS NULL, 'NULL', '\'' || REPLACE(rec.DATA_TYPE, '\'', '\'\'\'') || '\'');
 
         v_feature_sql := v_feature_sql || v_union_prefix || CHR(10) ||
             'SELECT ' || :v_profile_run_id || ' AS PROFILE_RUN_ID,' || CHR(10) ||
