@@ -780,6 +780,9 @@ def render_profile(
 ) -> None:
     """Render the Profiling v2 UI."""
 
+    st.session_state.setdefault("busy_profiling", False)
+    st.session_state.setdefault("freeze_view", False)
+
     helpers = _resolve_helpers(profiling_helpers)
     st.header(ui_strings.PROFILE_V2_HEADER_TITLE)
     st.caption(ui_strings.PROFILE_V2_HEADER_CAPTION)
@@ -830,7 +833,7 @@ def render_profile(
     classify_fn = getattr(helpers, "run_classification_only", None)
     suggestions_fn = getattr(helpers, "run_suggestions_only", None)
 
-    fqn = (st.session_state.get("editor_target_fqn") or "")
+    fqn = st.session_state.get("editor_target_fqn") or ""
     if not fqn:
         fqn = st.session_state.get("profile_target_fqn") or ""
 
