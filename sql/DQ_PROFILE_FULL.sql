@@ -1,6 +1,3 @@
--- DQ_PROFILE_FULL Stored Procedure
--- Captures profiling metadata with sampling awareness for Profiling v2.
-
 CREATE OR REPLACE PROCEDURE ZEUS_ANALYTICS_SIMU.DISCOVERY.DQ_PROFILE_FULL(
     IN_TABLE_FQN STRING,
     DATABASE_NAME STRING DEFAULT NULL,
@@ -36,9 +33,14 @@ DECLARE
     v_is_string BOOLEAN;
     v_col_ident STRING;
     v_union_prefix STRING := '';
+    v_tmpstr string;
+    v_rs resultset;
+    e_table_error exception (-20001,'Table identifier is required');
+    e_no_profile_id exception (-20002,'Failed to capture PROFILE_RUN_ID');
 BEGIN
     IF (:v_table_fqn = '' AND (v_database_name IS NULL OR v_schema_name IS NULL OR v_table_name IS NULL)) THEN
-        RAISE STATEMENT_ERROR WITH MESSAGE = 'Table identifier is required';
+--        RAISE STATEMENT_ERROR WITH MESSAGE = 'Table identifier is required';
+        RAISE e_table_error;
     END IF;
 
     IF (:v_table_fqn IS NOT NULL AND :v_table_fqn != '') THEN
@@ -52,14 +54,29 @@ BEGIN
     v_info_schema_table := :v_database_name || '.INFORMATION_SCHEMA.TABLES';
     v_info_schema_columns := :v_database_name || '.INFORMATION_SCHEMA.COLUMNS';
 
+    /*
     EXECUTE IMMEDIATE
         'SELECT COALESCE(ROW_COUNT, 0)
            FROM IDENTIFIER(?)
-          WHERE TABLE_SCHEMA = ?
+          WHERE DATABASE_NAME = ? 
+            AND TABLE_SCHEMA = ?
             AND TABLE_NAME = ?'
         INTO :v_row_count
-        USING (v_info_schema_table, v_schema_name, v_table_name);
+        USING (:v_info_schema_table, :v_database_name, :v_schema_name, :v_table_name);
+        */
+    
+    v_rs := (EXECUTE IMMEDIATE
+                'SELECT COALESCE(ROW_COUNT, 0) row_count
+                FROM IDENTIFIER(?)
+                WHERE TABLE_SCHEMA = ?
+                AND TABLE_NAME = ?'
+            USING (v_info_schema_table, v_schema_name, v_table_name));
 
+    for cols in v_rs
+    do
+        v_row_count := cols.row_count;
+    end for;
+    
     IF (:v_row_count <= :v_max_sample_rows) THEN
         v_sample_mode := 'FULL';
         v_sample_percent := NULL;
@@ -76,7 +93,12 @@ BEGIN
         v_from_clause := :v_table_fqn || ' SAMPLE SYSTEM (' || :v_sample_percent || ')';
     END IF;
 
-    EXECUTE IMMEDIATE 'SELECT COUNT(*) FROM ' || :v_from_clause INTO :v_profiled_rows;
+    --EXECUTE IMMEDIATE 'SELECT COUNT(*) FROM ' || :v_from_clause INTO :v_profiled_rows;
+    v_rs := (EXECUTE IMMEDIATE 'SELECT COUNT(*) row_count FROM ' || :v_from_clause);
+    for col in v_rs
+    do
+        v_profiled_rows := col.row_count;
+    end for;
 
     INSERT INTO ZEUS_ANALYTICS_SIMU.DISCOVERY.DQ_PROFILE_RUN (
         DATABASE_NAME,
@@ -113,16 +135,23 @@ BEGIN
        AND STARTED_AT = :v_started_at;
 
     IF (:v_profile_run_id IS NULL) THEN
-        RAISE STATEMENT_ERROR WITH MESSAGE = 'Failed to capture PROFILE_RUN_ID';
+        RAISE e_no_profile_id;
     END IF;
 
-    FOR rec IN (
+    
+    v_rs := (EXECUTE IMMEDIATE 
+            'SELECT COLUMN_NAME, DATA_TYPE FROM identifier(?) where TABLE_SCHEMA = ? AND TABLE_NAME = ? ORDER BY ORDINAL_POSITION'
+            USING (v_info_schema_columns, v_schema_name, v_table_name));
+
+   /* FOR rec IN (
         SELECT COLUMN_NAME, DATA_TYPE
         FROM IDENTIFIER(:v_info_schema_columns)
         WHERE TABLE_SCHEMA = :v_schema_name
           AND TABLE_NAME = :v_table_name
         ORDER BY ORDINAL_POSITION
-    ) DO
+    ) DO*/
+
+    FOR rec in v_rs DO
         v_col_ident := '"' || REPLACE(rec.COLUMN_NAME, '"', '""') || '"';
         v_is_string := REGEXP_LIKE(UPPER(rec.DATA_TYPE), 'CHAR|TEXT|STRING');
 
@@ -132,8 +161,8 @@ BEGIN
             '       ' || QUOTE_LITERAL(:v_schema_name) || ' AS SCHEMA_NAME,' || CHR(10) ||
             '       ' || QUOTE_LITERAL(:v_table_name) || ' AS TABLE_NAME,' || CHR(10) ||
             '       ' || QUOTE_LITERAL(:v_table_fqn) || ' AS TABLE_FQN,' || CHR(10) ||
-            '       ' || QUOTE_LITERAL(rec.COLUMN_NAME) || ' AS COLUMN_NAME,' || CHR(10) ||
-            '       ' || QUOTE_LITERAL(rec.DATA_TYPE) || ' AS DATA_TYPE,' || CHR(10) ||
+            '       ' || QUOTE_LITERAL(rec:"COLUMN_NAME") || ' AS COLUMN_NAME,' || CHR(10) ||
+            '       ' || QUOTE_LITERAL(rec:"DATA_TYPE") || ' AS DATA_TYPE,' || CHR(10) ||
             '       ' || :v_profiled_rows || ' AS ROW_COUNT,' || CHR(10) ||
             '       NULL_COUNT,' || CHR(10) ||
             '       NULL_COUNT / NULLIF(' || :v_profiled_rows || ', 0) AS NULL_RATIO,' || CHR(10) ||
@@ -157,7 +186,7 @@ BEGIN
             '          FROM ' || :v_from_clause || ')';
         v_union_prefix := CHR(10) || 'UNION ALL';
     END FOR;
-
+  
     EXECUTE IMMEDIATE 'INSERT INTO ZEUS_ANALYTICS_SIMU.DISCOVERY.DQ_COLUMN_FEATURES (
             PROFILE_RUN_ID,
             DATABASE_NAME,
@@ -192,7 +221,7 @@ BEGIN
 
     RETURN v_profile_run_id;
 EXCEPTION
-    WHEN STATEMENT_ERROR OR EXPRESSION_ERROR OR OTHER THEN
+    WHEN STATEMENT_ERROR OR EXPRESSION_ERROR THEN
         v_finished_at := CURRENT_TIMESTAMP();
         v_status := 'FAILED';
         v_details := SQLERRM;
