@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 from typing import Any, Dict, List, Optional
 import pandas as pd
 import streamlit as st, logging
@@ -23,31 +24,10 @@ class _ProfilingData:
     """Container for profiling metadata used by the UI."""
 
     overview_grid: pd.DataFrame
+    suggested_checks: pd.DataFrame
     column_classification: pd.DataFrame
     recent_runs: pd.DataFrame
     run_info: Dict[str, Any]
-
-
-OVERVIEW_GRID_DISPLAY_COLUMNS: List[str] = [
-    "include_in_dq_config",
-    "column_name",
-    "data_type",
-    "null_info",
-    "distinct_info",
-    "min_value",
-    "max_value",
-    "length_info",
-    "rule_id",
-    "check_type",
-    "severity",
-    "rationale",
-    "confidence",
-]
-_OVERVIEW_INTERNAL_COLUMNS: List[str] = [
-    *OVERVIEW_GRID_DISPLAY_COLUMNS,
-    "has_suggestion",
-]
-_OVERVIEW_BOOL_COLUMNS = {"has_suggestion", "include_in_dq_config"}
 
 
 def _format_timestamp(value: Any) -> str:
@@ -358,90 +338,182 @@ def _classification_source_badge(source: Any) -> str:
     return ui_strings.PROFILE_V2_COLUMNS_SOURCE_UNKNOWN
 
 
-def _prepare_overview_frame(overview: pd.DataFrame) -> pd.DataFrame:
-    if not isinstance(overview, pd.DataFrame):
-        return pd.DataFrame(columns=_OVERVIEW_INTERNAL_COLUMNS)
-    working = overview.copy()
-    extraneous_columns = [
-        column for column in working.columns if column not in _OVERVIEW_INTERNAL_COLUMNS
-    ]
-    if extraneous_columns:
-        working = working.drop(columns=extraneous_columns)
-    for column in _OVERVIEW_INTERNAL_COLUMNS:
+def _normalize_suggestions_frame(suggestions: pd.DataFrame) -> pd.DataFrame:
+    if not isinstance(suggestions, pd.DataFrame):
+        return pd.DataFrame()
+
+    working = suggestions.copy()
+    working.columns = [str(column).upper() for column in working.columns]
+    for column in (
+        "COLUMN_NAME",
+        "RULE_ID",
+        "CHECK_TYPE",
+        "SEVERITY",
+        "RATIONALE",
+        "SUGGESTED_BY",
+        "CONFIDENCE",
+        "PARAMS",
+        "PARAMETERS",
+    ):
         if column not in working.columns:
-            working[column] = False if column in _OVERVIEW_BOOL_COLUMNS else ""
-    working = working[_OVERVIEW_INTERNAL_COLUMNS]
-    working["column_name"] = working["column_name"].astype(str)
-    working.index = working["column_name"].astype(str)
+            working[column] = None
+
+    # Prefer PARAMS when both exist
+    working["PARAMS"] = working["PARAMS"].combine_first(working["PARAMETERS"])
+    working = working.dropna(subset=["COLUMN_NAME"])
+    working["COLUMN_NAME"] = working["COLUMN_NAME"].astype(str)
+
+    dedup_subset = [
+        "COLUMN_NAME",
+        "RULE_ID",
+        "CHECK_TYPE",
+        "SEVERITY",
+        "PARAMS",
+        "SUGGESTED_BY",
+    ]
+    working = working.drop_duplicates(subset=dedup_subset, keep="first")
     return working
 
 
-def _overview_grid_widget_key(table_fqn: str, nonce: Optional[int] = None) -> str:
-    """Return a deterministic key for the overview grid widget."""
+def _stringify_params(params: Any) -> str:
+    if params is None:
+        return ui_strings.PROFILE_V2_VALUE_UNKNOWN
+    if isinstance(params, str):
+        cleaned = params.strip()
+        return cleaned or ui_strings.PROFILE_V2_VALUE_UNKNOWN
+    try:
+        return json.dumps(params, default=str)
+    except Exception:
+        return str(params)
 
-    if nonce is None:
-        nonce = st.session_state.get("profile_data_nonce", 0)
-    sanitized = table_fqn.replace(".", "_") if table_fqn else "overview"
-    return f"profile_overview_grid_{sanitized}_{nonce or 0}"
 
-
-def _render_overview_grid(overview: pd.DataFrame, table_fqn: str) -> None:
-    st.subheader(ui_strings.PROFILE_V2_COLUMNS_SUBHEADER)
+def _overview_lookup(overview: pd.DataFrame) -> Dict[str, Dict[str, Any]]:
     if not isinstance(overview, pd.DataFrame) or overview.empty:
-        st.info(ui_strings.PROFILE_V2_COLUMNS_EMPTY)
+        return {}
+    lookup: Dict[str, Dict[str, Any]] = {}
+    for record in overview.to_dict("records"):
+        column = record.get("column_name") or record.get("COLUMN_NAME")
+        if not column:
+            continue
+        lookup[str(column)] = {
+            "data_type": record.get("data_type") or record.get("DATA_TYPE") or "",
+            "null_info": record.get("null_info") or record.get("NULL_INFO") or "",
+            "distinct_info": record.get("distinct_info")
+            or record.get("DISTINCT_INFO")
+            or "",
+            "min_value": record.get("min_value") or record.get("MIN_VALUE") or "",
+            "max_value": record.get("max_value") or record.get("MAX_VALUE") or "",
+            "length_info": record.get("length_info")
+            or record.get("LENGTH_INFO")
+            or "",
+        }
+    return lookup
+
+
+def _classification_confidence_lookup(
+    classification: pd.DataFrame,
+) -> Dict[str, str]:
+    latest = _latest_classifications(classification)
+    if not latest:
+        return {}
+    return {
+        column: _format_confidence(record.get("CONFIDENCE"))
+        for column, record in latest.items()
+    }
+
+
+def _suggestion_selection_key(
+    table_fqn: str, column_name: str, rule_id: Any, check_type: Any
+) -> str:
+    rule_part = str(rule_id) if rule_id is not None else "rule"
+    check_part = str(check_type) if check_type is not None else "check"
+    return "|".join([table_fqn or "table", column_name, rule_part, check_part])
+
+
+def _render_suggestion_sections(
+    overview: pd.DataFrame,
+    suggestions: pd.DataFrame,
+    classification: pd.DataFrame,
+    table_fqn: str,
+) -> None:
+    st.subheader(ui_strings.PROFILE_V2_SUGGESTIONS_SUBHEADER)
+    normalized_suggestions = _normalize_suggestions_frame(suggestions)
+
+    if normalized_suggestions.empty:
+        st.info(ui_strings.PROFILE_V2_SUGGESTIONS_EMPTY)
         return
 
-    working = _prepare_overview_frame(overview)
+    overview_lookup = _overview_lookup(overview)
+    confidence_lookup = _classification_confidence_lookup(classification)
 
     dq_selection = st.session_state.setdefault("dq_config_selection", {})
     table_selection: Dict[str, bool] = dq_selection.setdefault(table_fqn, {})
-    include_col_index = working.columns.get_loc("include_in_dq_config")
-    for idx, column_name in enumerate(working.index):
-        stored_value = table_selection.get(column_name)
-        if stored_value is None:
-            stored_value = bool(working.iat[idx, include_col_index])
-        working.iat[idx, include_col_index] = bool(stored_value)
 
-    highlight_mask = working["has_suggestion"].fillna(False).astype(bool)
-    working.loc[highlight_mask, "column_name"] = (
-        "💡 " + working.loc[highlight_mask, "column_name"].astype(str)
-    )
+    for column_name, group in normalized_suggestions.groupby("COLUMN_NAME"):
+        column_key = str(column_name)
+        metadata = overview_lookup.get(column_key, {})
+        confidence_default = confidence_lookup.get(column_key, ui_strings.PROFILE_V2_VALUE_UNKNOWN)
 
-    column_config = {
-        "include_in_dq_config": st.column_config.CheckboxColumn(
-            "include_in_dq_config",
-            help="Include this column when generating DQ configs.",
-            default=False,
-        )
-    }
-    read_only_columns = [
-        column
-        for column in OVERVIEW_GRID_DISPLAY_COLUMNS
-        if column != "include_in_dq_config"
-    ]
-    for column in read_only_columns:
-        column_config[column] = st.column_config.TextColumn(column, disabled=True)
+        with st.container(border=True):
+            dtype_label = metadata.get("data_type")
+            header = f"**{column_key}**"
+            if dtype_label:
+                header += f"  · `{dtype_label}`"
+            st.markdown(header)
+            details = []
+            for label, value in (
+                ("Nulls", metadata.get("null_info")),
+                ("Distinct", metadata.get("distinct_info")),
+                ("Min", metadata.get("min_value")),
+                ("Max", metadata.get("max_value")),
+                ("Length", metadata.get("length_info")),
+            ):
+                if value:
+                    details.append(f"**{label}:** {value}")
+            if details:
+                st.caption(" · ".join(details))
 
-    grid_key = _overview_grid_widget_key(table_fqn)
-    edited_df = st.data_editor(
-        working[OVERVIEW_GRID_DISPLAY_COLUMNS],
-        key=grid_key,
-        use_container_width=True,
-        hide_index=True,
-        num_rows="fixed",
-        column_config=column_config,
-    )
+            for _, suggestion in group.iterrows():
+                rule_id = suggestion.get("RULE_ID")
+                check_type = suggestion.get("CHECK_TYPE") or ui_strings.PROFILE_V2_VALUE_UNKNOWN
+                severity = suggestion.get("SEVERITY") or ui_strings.PROFILE_V2_VALUE_UNKNOWN
+                rationale = _truncate_details(
+                    suggestion.get("RATIONALE"), max_length=500
+                ) or ui_strings.PROFILE_V2_VALUE_UNKNOWN
+                suggested_by = suggestion.get("SUGGESTED_BY") or ui_strings.PROFILE_V2_VALUE_UNKNOWN
+                params = _stringify_params(suggestion.get("PARAMS"))
+                suggestion_confidence = suggestion.get("CONFIDENCE")
+                confidence_value = (
+                    _format_confidence(suggestion_confidence)
+                    if suggestion_confidence is not None
+                    else confidence_default
+                )
 
-    if isinstance(edited_df, pd.DataFrame) and "include_in_dq_config" in edited_df.columns:
-        dq_selection[table_fqn] = {
-            str(index): bool(value)
-            for index, value in edited_df["include_in_dq_config"].items()
-        }
+                selection_key = _suggestion_selection_key(
+                    table_fqn, column_key, rule_id, check_type
+                )
+                default_selection = table_selection.get(selection_key, True)
+                include_value = st.checkbox(
+                    "Include in DQ config",
+                    key=selection_key,
+                    value=default_selection,
+                )
+                table_selection[selection_key] = include_value
 
-    st.caption(
-        f"{ui_strings.PROFILE_V2_SUGGESTIONS_SUBHEADER}: "
-        f"{ui_strings.PROFILE_V2_COLUMNS_RULE_METADATA_NOTE}"
-    )
+                st.markdown(
+                    "  \n".join(
+                        [
+                            f"**Rule type:** `{check_type}`",
+                            f"**Check params:** `{params}`",
+                            f"**Severity:** `{severity}`",
+                            f"**Rationale:** {rationale}",
+                            f"**Suggested by:** `{suggested_by}`",
+                            f"**Confidence:** {confidence_value}",
+                        ]
+                    )
+                )
+
+    st.caption(ui_strings.PROFILE_V2_COLUMNS_RULE_METADATA_NOTE)
 
 
 def _normalize_classification_value(value: Any) -> str:
@@ -760,6 +832,7 @@ def _load_metadata(
     table_fqn: str,
 ) -> _ProfilingData:
     overview_grid: pd.DataFrame = pd.DataFrame()
+    suggested_checks: pd.DataFrame = pd.DataFrame()
     column_classification: pd.DataFrame = pd.DataFrame()
     recent_runs: pd.DataFrame = pd.DataFrame()
 
@@ -783,6 +856,16 @@ def _load_metadata(
             )
             column_classification = pd.DataFrame()
 
+    suggestions_fn = getattr(helpers, "get_suggested_checks", None)
+    if callable(suggestions_fn):
+        try:
+            suggested_checks = suggestions_fn(session, table_fqn)
+        except Exception:  # pragma: no cover - Snowflake/IO failures
+            logging.exception(
+                "profiling:suggestions_metadata_failed table=%s", table_fqn
+            )
+            suggested_checks = pd.DataFrame()
+
     run_history_fn = getattr(helpers, "fetch_recent_runs", None)
     if callable(run_history_fn):
         try:
@@ -797,10 +880,14 @@ def _load_metadata(
         if isinstance(column_classification, pd.DataFrame)
         else pd.DataFrame()
     )
+    suggested_checks = (
+        suggested_checks if isinstance(suggested_checks, pd.DataFrame) else pd.DataFrame()
+    )
     recent_runs = recent_runs if isinstance(recent_runs, pd.DataFrame) else pd.DataFrame()
 
     return _ProfilingData(
         overview_grid=overview_grid,
+        suggested_checks=suggested_checks,
         column_classification=column_classification,
         recent_runs=recent_runs,
         run_info=_extract_run_info(recent_runs),
@@ -980,6 +1067,7 @@ def render_profile(
             )
             data = _ProfilingData(
                 overview_grid=pd.DataFrame(),
+                suggested_checks=pd.DataFrame(),
                 column_classification=pd.DataFrame(),
                 recent_runs=pd.DataFrame(),
                 run_info={},
@@ -1011,7 +1099,12 @@ def render_profile(
     )
 
     with tab_overview:
-        _render_overview_grid(overview_grid, target_fqn)
+        _render_suggestion_sections(
+            overview_grid,
+            data.suggested_checks,
+            data.column_classification,
+            target_fqn,
+        )
 
     with tab_classification:
         _render_classification_grid(
