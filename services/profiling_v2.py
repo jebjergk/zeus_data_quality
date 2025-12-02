@@ -60,6 +60,15 @@ def _execute_sql(session: Any, sql: str, params: Optional[Iterable[Any]] = None)
     return stmt
 
 
+def _truncate_details(value: Any, max_length: int = 500) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    if len(text) <= max_length:
+        return text
+    return text[: max_length - 1].rstrip() + "\u2026"
+
+
 def _friendly_error_message(exc: Exception) -> str:
     message = str(exc).strip()
     if not message:
