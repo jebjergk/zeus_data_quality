@@ -573,33 +573,13 @@ def get_overview_grid(session: Session, table_fqn: str) -> pd.DataFrame:
             )
 
         for column, group in working_suggestions.groupby("COLUMN_NAME"):
-            # De-duplicate repeated suggestions (can happen after multiple runs)
-            dedupe_cols = [
-                col
-                for col in ("RULE_ID", "CHECK_TYPE", "SEVERITY", "RATIONALE")
-                if col in group.columns
-            ]
-            unique_group = (
-                group.drop_duplicates(subset=dedupe_cols, keep="first")
-                if dedupe_cols
-                else group
-            )
-
-            def _join(field: str, sep: str) -> Optional[str]:
-                if field not in unique_group.columns:
-                    return None
-                values = [
-                    value for value in unique_group[field].tolist() if pd.notna(value)
-                ]
-                if not values:
-                    return None
-                return sep.join(str(value) for value in values)
+            latest_row = group.iloc[0]
 
             suggestion_lookup[str(column)] = {
-                "rule_id": _join("RULE_ID", ", ") or "-",
-                "check_type": _join("CHECK_TYPE", "; ") or "-",
-                "severity": _join("SEVERITY", ", ") or "-",
-                "rationale": _join("RATIONALE", " | ") or "-",
+                "rule_id": _stringify(latest_row.get("RULE_ID")) or "-",
+                "check_type": _stringify(latest_row.get("CHECK_TYPE")) or "-",
+                "severity": _stringify(latest_row.get("SEVERITY")) or "-",
+                "rationale": _stringify(latest_row.get("RATIONALE")) or "-",
                 "has_suggestion": bool(len(group)),
             }
 
