@@ -91,6 +91,11 @@ def run_profiling_v2(session: Any, table_fqn: str) -> None:
         LOGGER.exception("profiling_v2:proc_failed target=%s", normalized)
         raise ProfilingError(f"Profiling run failed: {message}") from exc
 
+    # Ensure suggested checks are refreshed immediately after profiling so the
+    # overview grid can surface rule metadata without requiring a separate
+    # button click.
+    run_suggestions_only(session, normalized)
+
 
 # Backwards compatibility for earlier callers/tests.
 run_full_profile = run_profiling_v2
