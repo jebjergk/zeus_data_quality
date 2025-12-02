@@ -217,6 +217,19 @@ def _latest_classifications(class_df: pd.DataFrame) -> Dict[str, Dict[str, Any]]
     return result
 
 
+def _latest_column_features(features: pd.DataFrame) -> pd.DataFrame:
+    """Return the newest feature row for each column."""
+
+    latest = _latest_partition(
+        features,
+        partition_cols=("COLUMN_NAME",),
+        order_candidates=("PROFILED_AT", "UPDATED_AT", "RUN_TS", "PROFILE_RUN_ID"),
+    )
+    if "COLUMN_NAME" in latest.columns:
+        return latest.sort_values(by="COLUMN_NAME")
+    return latest
+
+
 def _format_count_ratio(count: Any, ratio: Any) -> str:
     def _format_value(value: Any) -> str:
         if pd.isna(value):
@@ -527,7 +540,9 @@ def get_overview_grid(session: Session, table_fqn: str) -> pd.DataFrame:
         except Exception:
             return str(value)
 
-    features = _normalize_dataframe_columns(get_column_features(session, normalized))
+    features = _latest_column_features(
+        _normalize_dataframe_columns(get_column_features(session, normalized))
+    )
     if features.empty:
         return pd.DataFrame(columns=overview_columns)
 
