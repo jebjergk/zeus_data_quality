@@ -178,6 +178,36 @@ def _latest_partition(
     return working.drop_duplicates(subset=subset, keep="first")
 
 
+def _latest_classifications(class_df: pd.DataFrame) -> Dict[str, Dict[str, Any]]:
+    if not isinstance(class_df, pd.DataFrame) or class_df.empty:
+        return {}
+
+    working = class_df.copy()
+    sort_by: List[str] = []
+    ascending: List[bool] = []
+    if "COLUMN_NAME" in working.columns:
+        sort_by.append("COLUMN_NAME")
+        ascending.append(True)
+    for column in ("SOURCE", "CLASSIFIED_AT"):
+        if column in working.columns:
+            sort_by.append(column)
+            ascending.append(False)
+
+    if sort_by:
+        working = working.sort_values(by=sort_by, ascending=ascending)
+
+    if "COLUMN_NAME" not in working.columns:
+        return {}
+
+    deduped = working.drop_duplicates(subset=["COLUMN_NAME"], keep="first")
+    result: Dict[str, Dict[str, Any]] = {}
+    for record in deduped.to_dict("records"):
+        column = record.get("COLUMN_NAME")
+        if column is not None:
+            result[str(column)] = record
+    return result
+
+
 def _format_count_ratio(count: Any, ratio: Any) -> str:
     def _format_value(value: Any) -> str:
         if pd.isna(value):
