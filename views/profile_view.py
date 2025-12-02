@@ -701,7 +701,7 @@ def _resolve_helpers(profiling_helpers: Optional[Any]):
 def _run_table_profile(helpers: Any, session: Any, table_fqn: str) -> Dict[str, Any]:
     run_fn = getattr(helpers, "run_profiling_v2", None)
     summary_fn = getattr(helpers, "fetch_table_summary", None)
-    column_fn = getattr(helpers, "get_column_features", None)
+    overview_fn = getattr(helpers, "get_overview_grid", None)
     if not callable(run_fn):
         return {
             "ok": False,
@@ -714,9 +714,9 @@ def _run_table_profile(helpers: Any, session: Any, table_fqn: str) -> Dict[str, 
         run_fn(session, table_fqn)
 
     summary = summary_fn(session, table_fqn) if callable(summary_fn) else None
-    columns = column_fn(session, table_fqn) if callable(column_fn) else pd.DataFrame()
+    overview = overview_fn(session, table_fqn) if callable(overview_fn) else pd.DataFrame()
     column_rows = (
-        columns.to_dict("records") if isinstance(columns, pd.DataFrame) else []
+        overview.to_dict("records") if isinstance(overview, pd.DataFrame) else []
     )
     return {
         "ok": True,
