@@ -746,28 +746,50 @@ def _load_metadata(
     session: Any,
     table_fqn: str,
 ) -> _ProfilingData:
+    overview_grid: pd.DataFrame = pd.DataFrame()
+    column_classification: pd.DataFrame = pd.DataFrame()
+    recent_runs: pd.DataFrame = pd.DataFrame()
+
     overview_fn = getattr(helpers, "get_overview_grid", None)
-    overview_grid = (
-        overview_fn(session, table_fqn)
-        if callable(overview_fn)
+    if callable(overview_fn):
+        try:
+            overview_grid = overview_fn(session, table_fqn)
+        except Exception:  # pragma: no cover - Snowflake/IO failures
+            logging.exception("profiling:overview_metadata_failed table=%s", table_fqn)
+            overview_grid = pd.DataFrame()
+
+    effective_class_fn = getattr(helpers, "get_effective_classification", None)
+    column_class_fn = getattr(helpers, "get_column_classification", None)
+    classification_fn = effective_class_fn if callable(effective_class_fn) else column_class_fn
+    if callable(classification_fn):
+        try:
+            column_classification = classification_fn(session, table_fqn)
+        except Exception:  # pragma: no cover - Snowflake/IO failures
+            logging.exception(
+                "profiling:classification_metadata_failed table=%s", table_fqn
+            )
+            column_classification = pd.DataFrame()
+
+    run_history_fn = getattr(helpers, "fetch_recent_runs", None)
+    if callable(run_history_fn):
+        try:
+            recent_runs = run_history_fn(session, table_fqn)
+        except Exception:  # pragma: no cover - Snowflake/IO failures
+            logging.exception("profiling:recent_runs_failed table=%s", table_fqn)
+            recent_runs = pd.DataFrame()
+
+    overview_grid = overview_grid if isinstance(overview_grid, pd.DataFrame) else pd.DataFrame()
+    column_classification = (
+        column_classification
+        if isinstance(column_classification, pd.DataFrame)
         else pd.DataFrame()
     )
-    effective_class_fn = getattr(helpers, "get_effective_classification", None)
-    if callable(effective_class_fn):
-        column_classification = effective_class_fn(session, table_fqn)
-    else:
-        column_class_fn = getattr(helpers, "get_column_classification", None)
-        column_classification = (
-            column_class_fn(session, table_fqn)
-            if callable(column_class_fn)
-            else pd.DataFrame()
-        )
-    run_history_fn = getattr(helpers, "fetch_recent_runs", None)
-    recent_runs = run_history_fn(session, table_fqn) if callable(run_history_fn) else pd.DataFrame()
+    recent_runs = recent_runs if isinstance(recent_runs, pd.DataFrame) else pd.DataFrame()
+
     return _ProfilingData(
-        overview_grid=overview_grid if isinstance(overview_grid, pd.DataFrame) else pd.DataFrame(),
-        column_classification=column_classification if isinstance(column_classification, pd.DataFrame) else pd.DataFrame(),
-        recent_runs=recent_runs if isinstance(recent_runs, pd.DataFrame) else pd.DataFrame(),
+        overview_grid=overview_grid,
+        column_classification=column_classification,
+        recent_runs=recent_runs,
         run_info=_extract_run_info(recent_runs),
     )
 
@@ -937,10 +959,18 @@ def render_profile(
         try:
             data = _load_metadata(helpers, session, target_fqn)
         except Exception as exc:
+            logging.exception(
+                "profiling:metadata_load_failed table=%s", target_fqn
+            )
             st.error(
                 ui_strings.PROFILE_V2_METADATA_ERROR.format(error=str(exc))
             )
-            return
+            data = _ProfilingData(
+                overview_grid=pd.DataFrame(),
+                column_classification=pd.DataFrame(),
+                recent_runs=pd.DataFrame(),
+                run_info={},
+            )
 
     st.session_state["profile_last_table"] = target_fqn
     st.session_state["profile_last_run_id"] = _extract_last_run_id(data.recent_runs)
