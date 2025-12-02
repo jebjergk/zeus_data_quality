@@ -832,198 +832,250 @@ def render_config_editor():
 
                 # UNIQUE
                 unique_key = _rule_key("UNIQUE")
-                unique_label = rule_label_lookup.get(unique_key, "UNIQUE")
-                ex = existing_by_coltype.get((col, unique_key), {})
-                checked = (col, unique_key) in existing_rule_keys
-                c_unique = st.checkbox(
-                    unique_label, value=checked, key=f"{sk}_chk_unique"
-                )
-                if c_unique and target_table:
-                    p_ignore_nulls = st.checkbox(
-                        "Ignore NULLs",
-                        value=ex.get("params", {}).get("ignore_nulls", True),
-                        key=f"{sk}_p_un_ignore"
+                if unique_key in rule_label_lookup:
+                    unique_label = rule_label_lookup.get(unique_key, "UNIQUE")
+                    ex = existing_by_coltype.get((col, unique_key), {})
+                    checked = (col, unique_key) in existing_rule_keys
+                    c_unique = st.checkbox(
+                        unique_label, value=checked, key=f"{sk}_chk_unique"
                     )
-                    severity_options = ["ERROR", "WARN"]
-                    existing_severity = ex.get("severity", "ERROR")
-                    severity_index = (
-                        severity_options.index(existing_severity)
-                        if existing_severity in severity_options
-                        else 0
-                    )
-                    sev = st.selectbox(
-                        f"Severity ({unique_label})",
-                        severity_options,
-                        index=severity_index,
-                        key=f"{sk}_sev_unique"
-                    )
-                    params = {"ignore_nulls": p_ignore_nulls}
-                    rule, is_agg = build_rule_for_column_check(
-                        target_table, col, _builder_key(unique_key, "UNIQUE"), params
-                    )
-                    check_rows.append(DQCheck(
-                        config_id=(cfg.config_id if cfg else "temp"),
-                        check_id=f"{col}_UNIQUE",
-                        table_fqn=target_table,
-                        column_name=col,
-                        rule_expr=(f"AGG: {rule}" if is_agg else rule),
-                        severity=sev,
-                        sample_rows=(0 if is_agg else int(sample_n)),
-                        check_type=unique_key,
-                        params_json=json.dumps(params)
-                    ))
+                    if c_unique and target_table:
+                        p_ignore_nulls = st.checkbox(
+                            "Ignore NULLs",
+                            value=ex.get("params", {}).get("ignore_nulls", True),
+                            key=f"{sk}_p_un_ignore"
+                        )
+                        severity_options = ["ERROR", "WARN"]
+                        existing_severity = ex.get("severity", "ERROR")
+                        severity_index = (
+                            severity_options.index(existing_severity)
+                            if existing_severity in severity_options
+                            else 0
+                        )
+                        sev = st.selectbox(
+                            f"Severity ({unique_label})",
+                            severity_options,
+                            index=severity_index,
+                            key=f"{sk}_sev_unique"
+                        )
+                        params = {"ignore_nulls": p_ignore_nulls}
+                        rule, is_agg = build_rule_for_column_check(
+                            target_table, col, _builder_key(unique_key, "UNIQUE"), params
+                        )
+                        check_rows.append(DQCheck(
+                            config_id=(cfg.config_id if cfg else "temp"),
+                            check_id=f"{col}_UNIQUE",
+                            table_fqn=target_table,
+                            column_name=col,
+                            rule_expr=(f"AGG: {rule}" if is_agg else rule),
+                            severity=sev,
+                            sample_rows=(0 if is_agg else int(sample_n)),
+                            check_type=unique_key,
+                            params_json=json.dumps(params)
+                        ))
 
                 # NULL_COUNT
                 null_key = _rule_key("NULL_COUNT")
-                null_label = rule_label_lookup.get(null_key, "NULL_COUNT")
-                ex = existing_by_coltype.get((col, null_key), {})
-                checked = (col, null_key) in existing_rule_keys
-                c_null = st.checkbox(null_label, value=checked, key=f"{sk}_chk_nullcount")
-                if c_null and target_table:
-                    max_nulls = st.number_input(
-                        "Max NULL rows",
-                        min_value=0,
-                        value=int(ex.get("params", {}).get("max_nulls", 0)),
-                        key=f"{sk}_p_nc_max",
-                    )
-                    sev = st.selectbox(
-                        f"Severity ({null_label})",
-                        ["ERROR", "WARN"],
-                        index=(0 if ex.get("severity", "ERROR") == "ERROR" else 1),
-                        key=f"{sk}_sev_null",
-                    )
-                    params = {"max_nulls": int(max_nulls)}
-                    rule, is_agg = build_rule_for_column_check(
-                        target_table, col, _builder_key(null_key, "NULL_COUNT"), params
-                    )
-                    check_rows.append(DQCheck(
-                        config_id=(cfg.config_id if cfg else "temp"),
-                        check_id=f"{col}_NULL_COUNT",
-                        table_fqn=target_table,
-                        column_name=col,
-                        rule_expr=(f"AGG: {rule}" if is_agg else rule),
-                        severity=sev,
-                        sample_rows=(0 if is_agg else int(sample_n)),
-                        check_type=null_key,
-                        params_json=json.dumps(params)
-                    ))
+                if null_key in rule_label_lookup:
+                    null_label = rule_label_lookup.get(null_key, "NULL_COUNT")
+                    ex = existing_by_coltype.get((col, null_key), {})
+                    checked = (col, null_key) in existing_rule_keys
+                    c_null = st.checkbox(null_label, value=checked, key=f"{sk}_chk_nullcount")
+                    if c_null and target_table:
+                        max_nulls = st.number_input(
+                            "Max NULL rows",
+                            min_value=0,
+                            value=int(ex.get("params", {}).get("max_nulls", 0)),
+                            key=f"{sk}_p_nc_max",
+                        )
+                        sev = st.selectbox(
+                            f"Severity ({null_label})",
+                            ["ERROR", "WARN"],
+                            index=(0 if ex.get("severity", "ERROR") == "ERROR" else 1),
+                            key=f"{sk}_sev_null",
+                        )
+                        params = {"max_nulls": int(max_nulls)}
+                        rule, is_agg = build_rule_for_column_check(
+                            target_table, col, _builder_key(null_key, "NULL_COUNT"), params
+                        )
+                        check_rows.append(DQCheck(
+                            config_id=(cfg.config_id if cfg else "temp"),
+                            check_id=f"{col}_NULL_COUNT",
+                            table_fqn=target_table,
+                            column_name=col,
+                            rule_expr=(f"AGG: {rule}" if is_agg else rule),
+                            severity=sev,
+                            sample_rows=(0 if is_agg else int(sample_n)),
+                            check_type=null_key,
+                            params_json=json.dumps(params)
+                        ))
 
                 # MIN_MAX
                 minmax_key = _rule_key("MIN_MAX")
-                minmax_label = rule_label_lookup.get(minmax_key, "MIN_MAX")
-                ex = existing_by_coltype.get((col, minmax_key), {})
-                checked = (col, minmax_key) in existing_rule_keys
-                c_minmax = st.checkbox(minmax_label, value=checked, key=f"{sk}_chk_minmax")
-                if c_minmax and target_table:
-                    min_v = st.text_input(
-                        "Min (inclusive)",
-                        value=str(ex.get("params", {}).get("min", "")),
-                        key=f"{sk}_p_mm_min",
-                    )
-                    max_v = st.text_input(
-                        "Max (inclusive)",
-                        value=str(ex.get("params", {}).get("max", "")),
-                        key=f"{sk}_p_mm_max",
-                    )
-                    sev = st.selectbox(
-                        f"Severity ({minmax_label})",
-                        ["ERROR", "WARN"],
-                        index=(0 if ex.get("severity", "ERROR") == "ERROR" else 1),
-                        key=f"{sk}_sev_mm",
-                    )
-                    params = {"min": min_v, "max": max_v}
-                    rule, is_agg = build_rule_for_column_check(
-                        target_table, col, _builder_key(minmax_key, "MIN_MAX"), params
-                    )
-                    check_rows.append(DQCheck(
-                        config_id=(cfg.config_id if cfg else "temp"),
-                        check_id=f"{col}_MIN_MAX",
-                        table_fqn=target_table,
-                        column_name=col,
-                        rule_expr=(f"AGG: {rule}" if is_agg else rule),
-                        severity=sev,
-                        sample_rows=(0 if is_agg else int(sample_n)),
-                        check_type=minmax_key,
-                        params_json=json.dumps(params)
-                    ))
+                if minmax_key in rule_label_lookup:
+                    minmax_label = rule_label_lookup.get(minmax_key, "MIN_MAX")
+                    ex = existing_by_coltype.get((col, minmax_key), {})
+                    checked = (col, minmax_key) in existing_rule_keys
+                    c_minmax = st.checkbox(minmax_label, value=checked, key=f"{sk}_chk_minmax")
+                    if c_minmax and target_table:
+                        min_v = st.text_input(
+                            "Min (inclusive)",
+                            value=str(ex.get("params", {}).get("min", "")),
+                            key=f"{sk}_p_mm_min",
+                        )
+                        max_v = st.text_input(
+                            "Max (inclusive)",
+                            value=str(ex.get("params", {}).get("max", "")),
+                            key=f"{sk}_p_mm_max",
+                        )
+                        sev = st.selectbox(
+                            f"Severity ({minmax_label})",
+                            ["ERROR", "WARN"],
+                            index=(0 if ex.get("severity", "ERROR") == "ERROR" else 1),
+                            key=f"{sk}_sev_mm",
+                        )
+                        params = {"min": min_v, "max": max_v}
+                        rule, is_agg = build_rule_for_column_check(
+                            target_table, col, _builder_key(minmax_key, "MIN_MAX"), params
+                        )
+                        check_rows.append(DQCheck(
+                            config_id=(cfg.config_id if cfg else "temp"),
+                            check_id=f"{col}_MIN_MAX",
+                            table_fqn=target_table,
+                            column_name=col,
+                            rule_expr=(f"AGG: {rule}" if is_agg else rule),
+                            severity=sev,
+                            sample_rows=(0 if is_agg else int(sample_n)),
+                            check_type=minmax_key,
+                            params_json=json.dumps(params)
+                        ))
 
                 # WHITESPACE
                 whitespace_key = _rule_key("WHITESPACE")
-                whitespace_label = rule_label_lookup.get(whitespace_key, "WHITESPACE")
-                ex = existing_by_coltype.get((col, whitespace_key), {})
-                checked = (col, whitespace_key) in existing_rule_keys
-                c_ws = st.checkbox(whitespace_label, value=checked, key=f"{sk}_chk_ws")
-                if c_ws and target_table:
-                    options = ["NO_LEADING_TRAILING","NO_INTERNAL_ONLY_WHITESPACE","NON_EMPTY_TRIMMED"]
-                    mode = st.selectbox("Mode", options, index=options.index(ex.get("params", {}).get("mode", options[0])), key=f"{sk}_p_ws_mode")
-                    sev = st.selectbox(f"Severity ({whitespace_label})", ["ERROR", "WARN"], index=(0 if ex.get("severity","ERROR")=="ERROR" else 1), key=f"{sk}_sev_ws")
-                    params = {"mode": mode}
-                    rule, is_agg = build_rule_for_column_check(
-                        target_table, col, _builder_key(whitespace_key, "WHITESPACE"), params
-                    )
-                    check_rows.append(DQCheck(
-                        config_id=(cfg.config_id if cfg else "temp"),
-                        check_id=f"{col}_WHITESPACE",
-                        table_fqn=target_table,
-                        column_name=col,
-                        rule_expr=(f"AGG: {rule}" if is_agg else rule),
-                        severity=sev,
-                        sample_rows=(0 if is_agg else int(sample_n)),
-                        check_type=whitespace_key,
-                        params_json=json.dumps(params)
-                    ))
+                if whitespace_key in rule_label_lookup:
+                    whitespace_label = rule_label_lookup.get(whitespace_key, "WHITESPACE")
+                    ex = existing_by_coltype.get((col, whitespace_key), {})
+                    checked = (col, whitespace_key) in existing_rule_keys
+                    c_ws = st.checkbox(whitespace_label, value=checked, key=f"{sk}_chk_ws")
+                    if c_ws and target_table:
+                        options = ["NO_LEADING_TRAILING", "NO_INTERNAL_ONLY_WHITESPACE", "NON_EMPTY_TRIMMED"]
+                        mode = st.selectbox(
+                            "Mode",
+                            options,
+                            index=(
+                                options.index(ex.get("params", {}).get("mode", options[0]))
+                                if ex.get("params", {}).get("mode") in options
+                                else 0
+                            ),
+                            key=f"{sk}_p_ws_mode",
+                        )
+                        sev = st.selectbox(
+                            f"Severity ({whitespace_label})",
+                            ["ERROR", "WARN"],
+                            index=(0 if ex.get("severity", "ERROR") == "ERROR" else 1),
+                            key=f"{sk}_sev_ws",
+                        )
+                        params = {"mode": mode}
+                        rule, is_agg = build_rule_for_column_check(
+                            target_table, col, _builder_key(whitespace_key, "WHITESPACE"), params
+                        )
+                        check_rows.append(DQCheck(
+                            config_id=(cfg.config_id if cfg else "temp"),
+                            check_id=f"{col}_WHITESPACE",
+                            table_fqn=target_table,
+                            column_name=col,
+                            rule_expr=(f"AGG: {rule}" if is_agg else rule),
+                            severity=sev,
+                            sample_rows=(0 if is_agg else int(sample_n)),
+                            check_type=whitespace_key,
+                            params_json=json.dumps(params)
+                        ))
 
                 # FORMAT_DISTRIBUTION
                 fmt_dist_key = _rule_key("FORMAT_DISTRIBUTION")
-                fmt_dist_label = rule_label_lookup.get(fmt_dist_key, "FORMAT_DISTRIBUTION")
-                ex = existing_by_coltype.get((col, fmt_dist_key), {})
-                checked = (col, fmt_dist_key) in existing_rule_keys
-                c_fmt = st.checkbox(fmt_dist_label, value=checked, key=f"{sk}_chk_fmt")
-                if c_fmt and target_table:
-                    regex = st.text_input("Regex (Snowflake RLIKE)", value=str(ex.get("params", {}).get("regex","")), key=f"{sk}_p_fmt_regex")
-                    ratio = st.number_input("Min match ratio (0-1)", min_value=0.0, max_value=1.0, value=float(ex.get("params", {}).get("min_match_ratio",1.0)), step=0.01, key=f"{sk}_p_fmt_ratio")
-                    sev = st.selectbox(f"Severity ({fmt_dist_label})", ["ERROR", "WARN"], index=(0 if ex.get("severity","ERROR")=="ERROR" else 1), key=f"{sk}_sev_fmt")
-                    params = {"regex": regex, "min_match_ratio": float(ratio)}
-                    rule, is_agg = build_rule_for_column_check(
-                        target_table, col, _builder_key(fmt_dist_key, "FORMAT_DISTRIBUTION"), params
-                    )
-                    check_rows.append(DQCheck(
-                        config_id=(cfg.config_id if cfg else "temp"),
-                        check_id=f"{col}_FORMAT_DIST",
-                        table_fqn=target_table,
-                        column_name=col,
-                        rule_expr=(f"AGG: {rule}" if is_agg else rule),
-                        severity=sev,
-                        sample_rows=(0 if is_agg else int(sample_n)),
-                        check_type=fmt_dist_key,
-                        params_json=json.dumps(params)
-                    ))
+                if fmt_dist_key in rule_label_lookup:
+                    fmt_dist_label = rule_label_lookup.get(fmt_dist_key, "FORMAT_DISTRIBUTION")
+                    ex = existing_by_coltype.get((col, fmt_dist_key), {})
+                    checked = (col, fmt_dist_key) in existing_rule_keys
+                    c_fmt = st.checkbox(fmt_dist_label, value=checked, key=f"{sk}_chk_fmt")
+                    if c_fmt and target_table:
+                        regex = st.text_input(
+                            "Regex (Snowflake RLIKE)",
+                            value=str(ex.get("params", {}).get("regex", "")),
+                            key=f"{sk}_p_fmt_regex",
+                        )
+                        ratio = st.number_input(
+                            "Min match ratio (0-1)",
+                            min_value=0.0,
+                            max_value=1.0,
+                            value=float(ex.get("params", {}).get("min_match_ratio", 1.0)),
+                            step=0.01,
+                            key=f"{sk}_p_fmt_ratio",
+                        )
+                        sev = st.selectbox(
+                            f"Severity ({fmt_dist_label})",
+                            ["ERROR", "WARN"],
+                            index=(0 if ex.get("severity", "ERROR") == "ERROR" else 1),
+                            key=f"{sk}_sev_fmt",
+                        )
+                        params = {"regex": regex, "min_match_ratio": float(ratio)}
+                        rule, is_agg = build_rule_for_column_check(
+                            target_table, col, _builder_key(fmt_dist_key, "FORMAT_DISTRIBUTION"), params
+                        )
+                        check_rows.append(DQCheck(
+                            config_id=(cfg.config_id if cfg else "temp"),
+                            check_id=f"{col}_FORMAT_DIST",
+                            table_fqn=target_table,
+                            column_name=col,
+                            rule_expr=(f"AGG: {rule}" if is_agg else rule),
+                            severity=sev,
+                            sample_rows=(0 if is_agg else int(sample_n)),
+                            check_type=fmt_dist_key,
+                            params_json=json.dumps(params)
+                        ))
 
                 # VALUE_DISTRIBUTION
                 value_dist_key = _rule_key("VALUE_DISTRIBUTION")
-                value_dist_label = rule_label_lookup.get(value_dist_key, "VALUE_DISTRIBUTION")
-                ex = existing_by_coltype.get((col, value_dist_key), {})
-                checked = (col, value_dist_key) in existing_rule_keys
-                c_val = st.checkbox(value_dist_label, value=checked, key=f"{sk}_chk_val")
-                if c_val and target_table:
-                    allowed_csv = st.text_input("Allowed values (CSV)", value=str(ex.get("params", {}).get("allowed_values_csv","")), key=f"{sk}_p_val_csv")
-                    ratio = st.number_input("Min in-set ratio (0-1)", min_value=0.0, max_value=1.0, value=float(ex.get("params", {}).get("min_match_ratio",1.0)), step=0.01, key=f"{sk}_p_val_ratio")
-                    sev = st.selectbox(f"Severity ({value_dist_label})", ["ERROR", "WARN"], index=(0 if ex.get("severity","ERROR")=="ERROR" else 1), key=f"{sk}_sev_val")
-                    params = {"allowed_values_csv": allowed_csv, "min_match_ratio": float(ratio)}
-                    rule, is_agg = build_rule_for_column_check(
-                        target_table, col, _builder_key(value_dist_key, "VALUE_DISTRIBUTION"), params
-                    )
-                    check_rows.append(DQCheck(
-                        config_id=(cfg.config_id if cfg else "temp"),
-                        check_id=f"{col}_VALUE_DIST",
-                        table_fqn=target_table,
-                        column_name=col,
-                        rule_expr=(f"AGG: {rule}" if is_agg else rule),
-                        severity=sev,
-                        sample_rows=(0 if is_agg else int(sample_n)),
-                        check_type=value_dist_key,
-                        params_json=json.dumps(params)
-                    ))
+                if value_dist_key in rule_label_lookup:
+                    value_dist_label = rule_label_lookup.get(value_dist_key, "VALUE_DISTRIBUTION")
+                    ex = existing_by_coltype.get((col, value_dist_key), {})
+                    checked = (col, value_dist_key) in existing_rule_keys
+                    c_val = st.checkbox(value_dist_label, value=checked, key=f"{sk}_chk_val")
+                    if c_val and target_table:
+                        allowed_csv = st.text_input(
+                            "Allowed values (CSV)",
+                            value=str(ex.get("params", {}).get("allowed_values_csv", "")),
+                            key=f"{sk}_p_val_csv",
+                        )
+                        ratio = st.number_input(
+                            "Min in-set ratio (0-1)",
+                            min_value=0.0,
+                            max_value=1.0,
+                            value=float(ex.get("params", {}).get("min_match_ratio", 1.0)),
+                            step=0.01,
+                            key=f"{sk}_p_val_ratio",
+                        )
+                        sev = st.selectbox(
+                            f"Severity ({value_dist_label})",
+                            ["ERROR", "WARN"],
+                            index=(0 if ex.get("severity", "ERROR") == "ERROR" else 1),
+                            key=f"{sk}_sev_val",
+                        )
+                        params = {"allowed_values_csv": allowed_csv, "min_match_ratio": float(ratio)}
+                        rule, is_agg = build_rule_for_column_check(
+                            target_table, col, _builder_key(value_dist_key, "VALUE_DISTRIBUTION"), params
+                        )
+                        check_rows.append(DQCheck(
+                            config_id=(cfg.config_id if cfg else "temp"),
+                            check_id=f"{col}_VALUE_DIST",
+                            table_fqn=target_table,
+                            column_name=col,
+                            rule_expr=(f"AGG: {rule}" if is_agg else rule),
+                            severity=sev,
+                            sample_rows=(0 if is_agg else int(sample_n)),
+                            check_type=value_dist_key,
+                            params_json=json.dumps(params)
+                        ))
 
         # Table-level (always)
         st.markdown("### Table-level checks (always included)")
