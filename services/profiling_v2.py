@@ -573,10 +573,24 @@ def get_overview_grid(session: Session, table_fqn: str) -> pd.DataFrame:
             )
 
         for column, group in working_suggestions.groupby("COLUMN_NAME"):
+            # De-duplicate repeated suggestions (can happen after multiple runs)
+            dedupe_cols = [
+                col
+                for col in ("RULE_ID", "CHECK_TYPE", "SEVERITY", "RATIONALE")
+                if col in group.columns
+            ]
+            unique_group = (
+                group.drop_duplicates(subset=dedupe_cols, keep="first")
+                if dedupe_cols
+                else group
+            )
+
             def _join(field: str, sep: str) -> Optional[str]:
-                if field not in group.columns:
+                if field not in unique_group.columns:
                     return None
-                values = [value for value in group[field].tolist() if pd.notna(value)]
+                values = [
+                    value for value in unique_group[field].tolist() if pd.notna(value)
+                ]
                 if not values:
                     return None
                 return sep.join(str(value) for value in values)
