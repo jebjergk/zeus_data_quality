@@ -141,11 +141,12 @@ CHECKS_TBL = f"{METADATA_DB}.{METADATA_SCHEMA}.DQ_CHECK"
 
 st.set_page_config(page_title="Zeus Data Quality", layout="wide")
 
-st.caption(
-    f"rerun #{st.session_state.get('_rerun_count')} "
-    f"view={st.session_state.get('active_view')} "
-    f"fqn={st.session_state.get('editor_target_fqn')}"
-)
+if DEBUG_PROFILING:
+    st.caption(
+        f"rerun #{st.session_state.get('_rerun_count')} "
+        f"view={st.session_state.get('active_view')} "
+        f"fqn={st.session_state.get('editor_target_fqn')}"
+    )
 
 # Hard override: if profiling is running, force Profile render and stop further dispatch
 if st.session_state.get("freeze_view"):
