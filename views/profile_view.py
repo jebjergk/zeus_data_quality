@@ -310,14 +310,19 @@ def _render_sampling_summary(run_info: Any) -> None:
     remainder_rows = max(total_rows - sampled_rows, 0)
 
     st.subheader("Sampling summary")
-    st.markdown(f"Table size: **{total_rows:,}** rows")
-    st.markdown(
-        f"Sample used: approx. **{sampled_rows:,}** rows (~{display_percent:.1f}%)"
-    )
-    st.markdown(f"Sampling mode: **{sampling_label}**")
 
-    if total_rows > 0:
-        _render_sampling_pie_chart(sampled_rows, remainder_rows)
+    summary_col, chart_col = st.columns([2, 1])
+
+    with summary_col:
+        st.markdown(f"Table size: **{total_rows:,}** rows")
+        st.markdown(
+            f"Sample used: approx. **{sampled_rows:,}** rows (~{display_percent:.1f}%)"
+        )
+        st.markdown(f"Sampling mode: **{sampling_label}**")
+
+    with chart_col:
+        if total_rows > 0:
+            _render_sampling_pie_chart(sampled_rows, remainder_rows)
 
 
 def _render_sampling_pie_chart(sample_rows: float, remainder_rows: float) -> None:
