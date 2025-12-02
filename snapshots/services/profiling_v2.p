@@ -108,8 +108,8 @@ def _run_single_stage(
 
     LOGGER.info("profiling_v2:call proc target=%s proc=%s", normalized, proc_name)
     try:
-        sql = f"CALL {proc_name}(:table_fqn)"
-        _execute_sql(session, sql, params={"table_fqn": normalized}).collect()
+        sql = f"CALL {proc_name}(?)"
+        _execute_sql(session, sql, params=[normalized]).collect()
     except Exception as exc:  # pragma: no cover - Snowflake specific failures
         message = _friendly_error_message(exc)
         LOGGER.exception(
