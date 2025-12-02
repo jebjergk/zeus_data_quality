@@ -144,3 +144,30 @@ def normalize_rule_key(
 
 def active_rule_map(rules: Iterable[RuleTemplate]) -> Dict[str, RuleTemplate]:
     return {r.rule_id.upper(): r for r in rules if r.active and r.rule_id}
+
+
+def load_active_rules_from_library(
+    session: Session,
+    metadata_db: Optional[str] = None,
+    metadata_schema: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """Load active rule entries from ``DQ_RULE_LIBRARY`` for UI dropdowns."""
+
+    templates = load_rule_library(
+        session,
+        metadata_db,
+        metadata_schema,
+        include_inactive=False,
+    )
+    rules: List[Dict[str, Any]] = []
+    for template in templates:
+        rules.append(
+            {
+                "rule_key": template.rule_id.upper(),
+                "label": template.rule_id,
+                "check_type": template.check_type,
+                "default_severity": template.default_severity,
+                "description": template.description,
+            }
+        )
+    return rules

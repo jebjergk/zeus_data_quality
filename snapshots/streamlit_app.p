@@ -121,7 +121,12 @@ from utils import schedules
 from services.configs import save_config_and_checks, delete_config_full
 from services.state import get_state, set_state
 from services import profiling_v2
-from services.rule_library import active_rule_map, load_rule_library, normalize_rule_key
+from services.rule_library import (
+    active_rule_map,
+    load_active_rules_from_library,
+    load_rule_library,
+    normalize_rule_key,
+)
 from utils.checkdefs import build_rule_for_column_check, build_rule_for_table_check
 from utils.configs import get_metadata_namespace, get_proc_name
 from utils.flags import DEBUG_PROFILING
@@ -573,16 +578,30 @@ def render_config_editor():
     cfg = get_config(session, sel_id) if sel_id else None
     existing_checks = get_checks(session, sel_id) if sel_id else []
 
-    rule_templates = load_rule_library(session, METADATA_DB, METADATA_SCHEMA)
+    rule_templates = load_rule_library(
+        session, METADATA_DB, METADATA_SCHEMA, include_inactive=True
+    )
+    rule_options = load_active_rules_from_library(session, METADATA_DB, METADATA_SCHEMA)
     active_rules = active_rule_map(rule_templates)
-    logging.info("dq_config: loaded %s rules from DQ_RULE_LIBRARY", len(active_rules))
+    all_rules_map = {t.rule_id.upper(): t for t in rule_templates if t.rule_id}
+    logging.info("dq_config: loaded %d rule options from DQ_RULE_LIBRARY", len(rule_options))
+
+    rule_label_lookup = {
+        str(rule.get("rule_key", "")).upper(): (rule.get("label") or "")
+        for rule in rule_options
+    }
 
     def _rule_key(raw_key: str) -> str:
         return normalize_rule_key(raw_key, active_rules)
 
     def _builder_key(rule_id: str, fallback: str) -> str:
-        template = active_rules.get(rule_id)
+        template = active_rules.get(rule_id) or all_rules_map.get(rule_id)
         return (template.check_type or template.rule_id) if template else fallback
+
+    for chk in existing_checks:
+        legacy_key = _rule_key(chk.check_type or "")
+        if legacy_key and legacy_key not in rule_label_lookup:
+            rule_label_lookup[legacy_key] = f"{legacy_key} (legacy)"
 
     suggestion_payload = st.session_state.pop("profile_suggestion", None)
     suggestion_summary = suggestion_payload.get("summary") if suggestion_payload else None
@@ -813,9 +832,12 @@ def render_config_editor():
 
                 # UNIQUE
                 unique_key = _rule_key("UNIQUE")
+                unique_label = rule_label_lookup.get(unique_key, "UNIQUE")
                 ex = existing_by_coltype.get((col, unique_key), {})
                 checked = (col, unique_key) in existing_rule_keys
-                c_unique = st.checkbox("UNIQUE", value=checked, key=f"{sk}_chk_unique")
+                c_unique = st.checkbox(
+                    unique_label, value=checked, key=f"{sk}_chk_unique"
+                )
                 if c_unique and target_table:
                     p_ignore_nulls = st.checkbox(
                         "Ignore NULLs",
@@ -830,7 +852,7 @@ def render_config_editor():
                         else 0
                     )
                     sev = st.selectbox(
-                        "Severity (UNIQUE)",
+                        f"Severity ({unique_label})",
                         severity_options,
                         index=severity_index,
                         key=f"{sk}_sev_unique"
@@ -853,9 +875,10 @@ def render_config_editor():
 
                 # NULL_COUNT
                 null_key = _rule_key("NULL_COUNT")
+                null_label = rule_label_lookup.get(null_key, "NULL_COUNT")
                 ex = existing_by_coltype.get((col, null_key), {})
                 checked = (col, null_key) in existing_rule_keys
-                c_null = st.checkbox("NULL_COUNT", value=checked, key=f"{sk}_chk_nullcount")
+                c_null = st.checkbox(null_label, value=checked, key=f"{sk}_chk_nullcount")
                 if c_null and target_table:
                     max_nulls = st.number_input(
                         "Max NULL rows",
@@ -864,7 +887,7 @@ def render_config_editor():
                         key=f"{sk}_p_nc_max",
                     )
                     sev = st.selectbox(
-                        "Severity (NULL_COUNT)",
+                        f"Severity ({null_label})",
                         ["ERROR", "WARN"],
                         index=(0 if ex.get("severity", "ERROR") == "ERROR" else 1),
                         key=f"{sk}_sev_null",
@@ -887,9 +910,10 @@ def render_config_editor():
 
                 # MIN_MAX
                 minmax_key = _rule_key("MIN_MAX")
+                minmax_label = rule_label_lookup.get(minmax_key, "MIN_MAX")
                 ex = existing_by_coltype.get((col, minmax_key), {})
                 checked = (col, minmax_key) in existing_rule_keys
-                c_minmax = st.checkbox("MIN_MAX", value=checked, key=f"{sk}_chk_minmax")
+                c_minmax = st.checkbox(minmax_label, value=checked, key=f"{sk}_chk_minmax")
                 if c_minmax and target_table:
                     min_v = st.text_input(
                         "Min (inclusive)",
@@ -902,7 +926,7 @@ def render_config_editor():
                         key=f"{sk}_p_mm_max",
                     )
                     sev = st.selectbox(
-                        "Severity (MIN_MAX)",
+                        f"Severity ({minmax_label})",
                         ["ERROR", "WARN"],
                         index=(0 if ex.get("severity", "ERROR") == "ERROR" else 1),
                         key=f"{sk}_sev_mm",
@@ -925,13 +949,14 @@ def render_config_editor():
 
                 # WHITESPACE
                 whitespace_key = _rule_key("WHITESPACE")
+                whitespace_label = rule_label_lookup.get(whitespace_key, "WHITESPACE")
                 ex = existing_by_coltype.get((col, whitespace_key), {})
                 checked = (col, whitespace_key) in existing_rule_keys
-                c_ws = st.checkbox("WHITESPACE", value=checked, key=f"{sk}_chk_ws")
+                c_ws = st.checkbox(whitespace_label, value=checked, key=f"{sk}_chk_ws")
                 if c_ws and target_table:
                     options = ["NO_LEADING_TRAILING","NO_INTERNAL_ONLY_WHITESPACE","NON_EMPTY_TRIMMED"]
                     mode = st.selectbox("Mode", options, index=options.index(ex.get("params", {}).get("mode", options[0])), key=f"{sk}_p_ws_mode")
-                    sev = st.selectbox("Severity (WHITESPACE)", ["ERROR", "WARN"], index=(0 if ex.get("severity","ERROR")=="ERROR" else 1), key=f"{sk}_sev_ws")
+                    sev = st.selectbox(f"Severity ({whitespace_label})", ["ERROR", "WARN"], index=(0 if ex.get("severity","ERROR")=="ERROR" else 1), key=f"{sk}_sev_ws")
                     params = {"mode": mode}
                     rule, is_agg = build_rule_for_column_check(
                         target_table, col, _builder_key(whitespace_key, "WHITESPACE"), params
@@ -950,13 +975,14 @@ def render_config_editor():
 
                 # FORMAT_DISTRIBUTION
                 fmt_dist_key = _rule_key("FORMAT_DISTRIBUTION")
+                fmt_dist_label = rule_label_lookup.get(fmt_dist_key, "FORMAT_DISTRIBUTION")
                 ex = existing_by_coltype.get((col, fmt_dist_key), {})
                 checked = (col, fmt_dist_key) in existing_rule_keys
-                c_fmt = st.checkbox("FORMAT_DISTRIBUTION", value=checked, key=f"{sk}_chk_fmt")
+                c_fmt = st.checkbox(fmt_dist_label, value=checked, key=f"{sk}_chk_fmt")
                 if c_fmt and target_table:
                     regex = st.text_input("Regex (Snowflake RLIKE)", value=str(ex.get("params", {}).get("regex","")), key=f"{sk}_p_fmt_regex")
                     ratio = st.number_input("Min match ratio (0-1)", min_value=0.0, max_value=1.0, value=float(ex.get("params", {}).get("min_match_ratio",1.0)), step=0.01, key=f"{sk}_p_fmt_ratio")
-                    sev = st.selectbox("Severity (FORMAT_DISTRIBUTION)", ["ERROR", "WARN"], index=(0 if ex.get("severity","ERROR")=="ERROR" else 1), key=f"{sk}_sev_fmt")
+                    sev = st.selectbox(f"Severity ({fmt_dist_label})", ["ERROR", "WARN"], index=(0 if ex.get("severity","ERROR")=="ERROR" else 1), key=f"{sk}_sev_fmt")
                     params = {"regex": regex, "min_match_ratio": float(ratio)}
                     rule, is_agg = build_rule_for_column_check(
                         target_table, col, _builder_key(fmt_dist_key, "FORMAT_DISTRIBUTION"), params
@@ -975,13 +1001,14 @@ def render_config_editor():
 
                 # VALUE_DISTRIBUTION
                 value_dist_key = _rule_key("VALUE_DISTRIBUTION")
+                value_dist_label = rule_label_lookup.get(value_dist_key, "VALUE_DISTRIBUTION")
                 ex = existing_by_coltype.get((col, value_dist_key), {})
                 checked = (col, value_dist_key) in existing_rule_keys
-                c_val = st.checkbox("VALUE_DISTRIBUTION", value=checked, key=f"{sk}_chk_val")
+                c_val = st.checkbox(value_dist_label, value=checked, key=f"{sk}_chk_val")
                 if c_val and target_table:
                     allowed_csv = st.text_input("Allowed values (CSV)", value=str(ex.get("params", {}).get("allowed_values_csv","")), key=f"{sk}_p_val_csv")
                     ratio = st.number_input("Min in-set ratio (0-1)", min_value=0.0, max_value=1.0, value=float(ex.get("params", {}).get("min_match_ratio",1.0)), step=0.01, key=f"{sk}_p_val_ratio")
-                    sev = st.selectbox("Severity (VALUE_DISTRIBUTION)", ["ERROR", "WARN"], index=(0 if ex.get("severity","ERROR")=="ERROR" else 1), key=f"{sk}_sev_val")
+                    sev = st.selectbox(f"Severity ({value_dist_label})", ["ERROR", "WARN"], index=(0 if ex.get("severity","ERROR")=="ERROR" else 1), key=f"{sk}_sev_val")
                     params = {"allowed_values_csv": allowed_csv, "min_match_ratio": float(ratio)}
                     rule, is_agg = build_rule_for_column_check(
                         target_table, col, _builder_key(value_dist_key, "VALUE_DISTRIBUTION"), params
