@@ -5,3 +5,4 @@ pytest
 pandas
 streamlit
 jinja2
+matplotlib
