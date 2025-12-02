@@ -322,18 +322,26 @@ def _render_sampling_summary(run_info: Any) -> None:
 
 def _render_sampling_pie_chart(sample_rows: float, remainder_rows: float) -> None:
     try:
-        import matplotlib.pyplot as plt
+        import altair as alt
     except ModuleNotFoundError:
-        st.info("Sampling pie chart is unavailable (matplotlib not found in this environment).")
+        st.info("Sampling pie chart is unavailable (charting library not found in this environment).")
         return
 
-    fig, ax = plt.subplots()
-    ax.pie(
-        [sample_rows, remainder_rows],
-        labels=["Sample", "Remainder"],
-        autopct="%1.1f%%",
+    data = pd.DataFrame(
+        {
+            "Category": ["Sample", "Remainder"],
+            "Rows": [sample_rows, remainder_rows],
+        }
     )
-    st.pyplot(fig)
+
+    chart = (
+        alt.Chart(data)
+        .mark_arc()
+        .encode(theta=alt.Theta(field="Rows", type="quantitative"), color="Category")
+        .properties(width=300, height=300)
+    )
+
+    st.altair_chart(chart, use_container_width=False)
 
 
 def _classification_source_badge(source: Any) -> str:
