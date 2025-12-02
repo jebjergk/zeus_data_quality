@@ -907,10 +907,6 @@ def render_profile(
 
     helpers = _resolve_helpers(profiling_helpers)
     st.header(ui_strings.PROFILE_V2_HEADER_TITLE)
-    st.caption(ui_strings.PROFILE_V2_HEADER_CAPTION)
-    namespace = getattr(helpers, "DISCOVERY_NAMESPACE", f"{metadata_db}.{metadata_schema}")
-    st.caption(ui_strings.PROFILE_V2_METADATA_NOTE.format(namespace=namespace))
-
     preselect_fqn = st.session_state.get("profile_target_fqn") or st.session_state.get(
         "editor_target_fqn"
     )

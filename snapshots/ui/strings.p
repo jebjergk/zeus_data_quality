@@ -4,10 +4,6 @@ from __future__ import annotations
 
 # Profiling v2 strings
 PROFILE_V2_HEADER_TITLE = "🧪 Profiling"
-PROFILE_V2_HEADER_CAPTION = (
-    "Run deterministic metadata-driven profiling backed by ZEUS_ANALYTICS_SIMU.DISCOVERY."
-)
-PROFILE_V2_METADATA_NOTE = "Profiling metadata source: {namespace}."
 PROFILE_V2_SESSION_WARNING = (
     "Connect to Snowflake to select a table and run profiling."
 )

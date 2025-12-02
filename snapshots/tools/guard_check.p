@@ -37,8 +37,6 @@ def run_guard_checks() -> None:
         PROFILE_VIEW_PATH,
         [
             "PROFILE_V2_HEADER_TITLE",
-            "PROFILE_V2_HEADER_CAPTION",
-            "PROFILE_V2_METADATA_NOTE",
             "PROFILE_V2_RUN_BUTTON",
             "PROFILE_V2_REFRESH_BUTTON",
             "PROFILE_V2_STATUS_SUBHEADER",
