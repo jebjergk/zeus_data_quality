@@ -121,6 +121,7 @@ from utils import schedules
 from services.configs import save_config_and_checks, delete_config_full
 from services.state import get_state, set_state
 from services import profiling_v2
+from services.rule_library import active_rule_map, load_rule_library, normalize_rule_key
 from utils.checkdefs import build_rule_for_column_check, build_rule_for_table_check
 from utils.configs import get_metadata_namespace, get_proc_name
 from utils.flags import DEBUG_PROFILING
@@ -572,6 +573,17 @@ def render_config_editor():
     cfg = get_config(session, sel_id) if sel_id else None
     existing_checks = get_checks(session, sel_id) if sel_id else []
 
+    rule_templates = load_rule_library(session, METADATA_DB, METADATA_SCHEMA)
+    active_rules = active_rule_map(rule_templates)
+    logging.info("dq_config: loaded %s rules from DQ_RULE_LIBRARY", len(active_rules))
+
+    def _rule_key(raw_key: str) -> str:
+        return normalize_rule_key(raw_key, active_rules)
+
+    def _builder_key(rule_id: str, fallback: str) -> str:
+        template = active_rules.get(rule_id)
+        return (template.check_type or template.rule_id) if template else fallback
+
     suggestion_payload = st.session_state.pop("profile_suggestion", None)
     suggestion_summary = suggestion_payload.get("summary") if suggestion_payload else None
     if suggestion_payload:
@@ -687,7 +699,7 @@ def render_config_editor():
     legacy_row_count_params: Dict[str, object] = {}
     for ec in existing_checks:
         if not ec.column_name and ec.params_json:
-            key = (ec.check_type or "").upper()
+            key = _rule_key(ec.check_type or "")
             try:
                 parsed_params = json.loads(ec.params_json)
             except Exception:
@@ -699,17 +711,20 @@ def render_config_editor():
 
             existing_table_params[key] = parsed_params or {}
 
+    freshness_key = _rule_key("FRESHNESS")
+    rowcount_anomaly_key = _rule_key("ROW_COUNT_ANOMALY")
+
     if "_dq_rowcount_params" in st.session_state:
         stored_params = st.session_state.get("_dq_rowcount_params") or {}
-        existing_table_params["ROW_COUNT_ANOMALY"] = {
-            **existing_table_params.get("ROW_COUNT_ANOMALY", {}),
+        existing_table_params[rowcount_anomaly_key] = {
+            **existing_table_params.get(rowcount_anomaly_key, {}),
             **stored_params,
         }
 
     session_ts_col = st.session_state.get("_dq_table_ts_col")
     session_max_age = st.session_state.get("_dq_table_max_age")
     if session_ts_col or session_max_age is not None:
-        freshness_entry = existing_table_params.setdefault("FRESHNESS", {})
+        freshness_entry = existing_table_params.setdefault(freshness_key, {})
         if session_ts_col and "timestamp_column" not in freshness_entry:
             freshness_entry["timestamp_column"] = session_ts_col
         if session_max_age is not None and "max_age_minutes" not in freshness_entry:
@@ -718,7 +733,7 @@ def render_config_editor():
             except (TypeError, ValueError):
                 pass
 
-    freshness_defaults = existing_table_params.get("FRESHNESS", {})
+    freshness_defaults = existing_table_params.get(freshness_key, {})
     ts_default = (
         (session_ts_col if isinstance(session_ts_col, str) and session_ts_col else None)
         or freshness_defaults.get("timestamp_column")
@@ -733,14 +748,14 @@ def render_config_editor():
     except (TypeError, ValueError):
         max_age_default = 1920
 
-    rowcount_defaults = existing_table_params.get("ROW_COUNT_ANOMALY") or {}
+    rowcount_defaults = existing_table_params.get(rowcount_anomaly_key) or {}
     if not rowcount_defaults:
         rowcount_defaults = {}
     rowcount_defaults.setdefault("timestamp_column", ts_default)
     rowcount_defaults.setdefault("lookback_days", 28)
     rowcount_defaults.setdefault("sensitivity", 3.0)
     rowcount_defaults.setdefault("min_history_days", 7)
-    existing_table_params["ROW_COUNT_ANOMALY"] = rowcount_defaults
+    existing_table_params[rowcount_anomaly_key] = rowcount_defaults
 
     current_cfg_id = getattr(cfg, "config_id", None)
     if st.session_state.get("_dq_table_cfg_id") != current_cfg_id:
@@ -777,12 +792,16 @@ def render_config_editor():
         # Restore per-column settings from existing checks
         existing_by_coltype = {}
         for ec in existing_checks:
-            key = (ec.column_name or "", (ec.check_type or "").upper())
+            key = (ec.column_name or "", _rule_key(ec.check_type or ""))
             try:
                 params = json.loads(ec.params_json) if ec.params_json else {}
             except Exception:
                 params = {}
             existing_by_coltype[key] = {"severity": ec.severity, "params": params}
+
+        existing_rule_keys = {
+            (ec.column_name or "", _rule_key(ec.check_type or "")) for ec in existing_checks
+        }
 
         for col in selected_cols:
             sk = _keyify(col)
@@ -793,8 +812,9 @@ def render_config_editor():
                 )
 
                 # UNIQUE
-                ex = existing_by_coltype.get((col, "UNIQUE"), {})
-                checked = ("UNIQUE" in [(ec.check_type or "").upper() for ec in existing_checks if ec.column_name == col])
+                unique_key = _rule_key("UNIQUE")
+                ex = existing_by_coltype.get((col, unique_key), {})
+                checked = (col, unique_key) in existing_rule_keys
                 c_unique = st.checkbox("UNIQUE", value=checked, key=f"{sk}_chk_unique")
                 if c_unique and target_table:
                     p_ignore_nulls = st.checkbox(
@@ -816,7 +836,9 @@ def render_config_editor():
                         key=f"{sk}_sev_unique"
                     )
                     params = {"ignore_nulls": p_ignore_nulls}
-                    rule, is_agg = build_rule_for_column_check(target_table, col, "UNIQUE", params)
+                    rule, is_agg = build_rule_for_column_check(
+                        target_table, col, _builder_key(unique_key, "UNIQUE"), params
+                    )
                     check_rows.append(DQCheck(
                         config_id=(cfg.config_id if cfg else "temp"),
                         check_id=f"{col}_UNIQUE",
@@ -825,13 +847,14 @@ def render_config_editor():
                         rule_expr=(f"AGG: {rule}" if is_agg else rule),
                         severity=sev,
                         sample_rows=(0 if is_agg else int(sample_n)),
-                        check_type="UNIQUE",
+                        check_type=unique_key,
                         params_json=json.dumps(params)
                     ))
 
                 # NULL_COUNT
-                ex = existing_by_coltype.get((col, "NULL_COUNT"), {})
-                checked = ("NULL_COUNT" in [(ec.check_type or "").upper() for ec in existing_checks if ec.column_name == col])
+                null_key = _rule_key("NULL_COUNT")
+                ex = existing_by_coltype.get((col, null_key), {})
+                checked = (col, null_key) in existing_rule_keys
                 c_null = st.checkbox("NULL_COUNT", value=checked, key=f"{sk}_chk_nullcount")
                 if c_null and target_table:
                     max_nulls = st.number_input(
@@ -847,7 +870,9 @@ def render_config_editor():
                         key=f"{sk}_sev_null",
                     )
                     params = {"max_nulls": int(max_nulls)}
-                    rule, is_agg = build_rule_for_column_check(target_table, col, "NULL_COUNT", params)
+                    rule, is_agg = build_rule_for_column_check(
+                        target_table, col, _builder_key(null_key, "NULL_COUNT"), params
+                    )
                     check_rows.append(DQCheck(
                         config_id=(cfg.config_id if cfg else "temp"),
                         check_id=f"{col}_NULL_COUNT",
@@ -856,13 +881,14 @@ def render_config_editor():
                         rule_expr=(f"AGG: {rule}" if is_agg else rule),
                         severity=sev,
                         sample_rows=(0 if is_agg else int(sample_n)),
-                        check_type="NULL_COUNT",
+                        check_type=null_key,
                         params_json=json.dumps(params)
                     ))
 
                 # MIN_MAX
-                ex = existing_by_coltype.get((col, "MIN_MAX"), {})
-                checked = ("MIN_MAX" in [(ec.check_type or "").upper() for ec in existing_checks if ec.column_name == col])
+                minmax_key = _rule_key("MIN_MAX")
+                ex = existing_by_coltype.get((col, minmax_key), {})
+                checked = (col, minmax_key) in existing_rule_keys
                 c_minmax = st.checkbox("MIN_MAX", value=checked, key=f"{sk}_chk_minmax")
                 if c_minmax and target_table:
                     min_v = st.text_input(
@@ -882,7 +908,9 @@ def render_config_editor():
                         key=f"{sk}_sev_mm",
                     )
                     params = {"min": min_v, "max": max_v}
-                    rule, is_agg = build_rule_for_column_check(target_table, col, "MIN_MAX", params)
+                    rule, is_agg = build_rule_for_column_check(
+                        target_table, col, _builder_key(minmax_key, "MIN_MAX"), params
+                    )
                     check_rows.append(DQCheck(
                         config_id=(cfg.config_id if cfg else "temp"),
                         check_id=f"{col}_MIN_MAX",
@@ -891,20 +919,23 @@ def render_config_editor():
                         rule_expr=(f"AGG: {rule}" if is_agg else rule),
                         severity=sev,
                         sample_rows=(0 if is_agg else int(sample_n)),
-                        check_type="MIN_MAX",
+                        check_type=minmax_key,
                         params_json=json.dumps(params)
                     ))
 
                 # WHITESPACE
-                ex = existing_by_coltype.get((col, "WHITESPACE"), {})
-                checked = ("WHITESPACE" in [(ec.check_type or "").upper() for ec in existing_checks if ec.column_name == col])
+                whitespace_key = _rule_key("WHITESPACE")
+                ex = existing_by_coltype.get((col, whitespace_key), {})
+                checked = (col, whitespace_key) in existing_rule_keys
                 c_ws = st.checkbox("WHITESPACE", value=checked, key=f"{sk}_chk_ws")
                 if c_ws and target_table:
                     options = ["NO_LEADING_TRAILING","NO_INTERNAL_ONLY_WHITESPACE","NON_EMPTY_TRIMMED"]
                     mode = st.selectbox("Mode", options, index=options.index(ex.get("params", {}).get("mode", options[0])), key=f"{sk}_p_ws_mode")
                     sev = st.selectbox("Severity (WHITESPACE)", ["ERROR", "WARN"], index=(0 if ex.get("severity","ERROR")=="ERROR" else 1), key=f"{sk}_sev_ws")
                     params = {"mode": mode}
-                    rule, is_agg = build_rule_for_column_check(target_table, col, "WHITESPACE", params)
+                    rule, is_agg = build_rule_for_column_check(
+                        target_table, col, _builder_key(whitespace_key, "WHITESPACE"), params
+                    )
                     check_rows.append(DQCheck(
                         config_id=(cfg.config_id if cfg else "temp"),
                         check_id=f"{col}_WHITESPACE",
@@ -913,20 +944,23 @@ def render_config_editor():
                         rule_expr=(f"AGG: {rule}" if is_agg else rule),
                         severity=sev,
                         sample_rows=(0 if is_agg else int(sample_n)),
-                        check_type="WHITESPACE",
+                        check_type=whitespace_key,
                         params_json=json.dumps(params)
                     ))
 
                 # FORMAT_DISTRIBUTION
-                ex = existing_by_coltype.get((col, "FORMAT_DISTRIBUTION"), {})
-                checked = ("FORMAT_DISTRIBUTION" in [(ec.check_type or "").upper() for ec in existing_checks if ec.column_name == col])
+                fmt_dist_key = _rule_key("FORMAT_DISTRIBUTION")
+                ex = existing_by_coltype.get((col, fmt_dist_key), {})
+                checked = (col, fmt_dist_key) in existing_rule_keys
                 c_fmt = st.checkbox("FORMAT_DISTRIBUTION", value=checked, key=f"{sk}_chk_fmt")
                 if c_fmt and target_table:
                     regex = st.text_input("Regex (Snowflake RLIKE)", value=str(ex.get("params", {}).get("regex","")), key=f"{sk}_p_fmt_regex")
                     ratio = st.number_input("Min match ratio (0-1)", min_value=0.0, max_value=1.0, value=float(ex.get("params", {}).get("min_match_ratio",1.0)), step=0.01, key=f"{sk}_p_fmt_ratio")
                     sev = st.selectbox("Severity (FORMAT_DISTRIBUTION)", ["ERROR", "WARN"], index=(0 if ex.get("severity","ERROR")=="ERROR" else 1), key=f"{sk}_sev_fmt")
                     params = {"regex": regex, "min_match_ratio": float(ratio)}
-                    rule, is_agg = build_rule_for_column_check(target_table, col, "FORMAT_DISTRIBUTION", params)
+                    rule, is_agg = build_rule_for_column_check(
+                        target_table, col, _builder_key(fmt_dist_key, "FORMAT_DISTRIBUTION"), params
+                    )
                     check_rows.append(DQCheck(
                         config_id=(cfg.config_id if cfg else "temp"),
                         check_id=f"{col}_FORMAT_DIST",
@@ -935,20 +969,23 @@ def render_config_editor():
                         rule_expr=(f"AGG: {rule}" if is_agg else rule),
                         severity=sev,
                         sample_rows=(0 if is_agg else int(sample_n)),
-                        check_type="FORMAT_DISTRIBUTION",
+                        check_type=fmt_dist_key,
                         params_json=json.dumps(params)
                     ))
 
                 # VALUE_DISTRIBUTION
-                ex = existing_by_coltype.get((col, "VALUE_DISTRIBUTION"), {})
-                checked = ("VALUE_DISTRIBUTION" in [(ec.check_type or "").upper() for ec in existing_checks if ec.column_name == col])
+                value_dist_key = _rule_key("VALUE_DISTRIBUTION")
+                ex = existing_by_coltype.get((col, value_dist_key), {})
+                checked = (col, value_dist_key) in existing_rule_keys
                 c_val = st.checkbox("VALUE_DISTRIBUTION", value=checked, key=f"{sk}_chk_val")
                 if c_val and target_table:
                     allowed_csv = st.text_input("Allowed values (CSV)", value=str(ex.get("params", {}).get("allowed_values_csv","")), key=f"{sk}_p_val_csv")
                     ratio = st.number_input("Min in-set ratio (0-1)", min_value=0.0, max_value=1.0, value=float(ex.get("params", {}).get("min_match_ratio",1.0)), step=0.01, key=f"{sk}_p_val_ratio")
                     sev = st.selectbox("Severity (VALUE_DISTRIBUTION)", ["ERROR", "WARN"], index=(0 if ex.get("severity","ERROR")=="ERROR" else 1), key=f"{sk}_sev_val")
                     params = {"allowed_values_csv": allowed_csv, "min_match_ratio": float(ratio)}
-                    rule, is_agg = build_rule_for_column_check(target_table, col, "VALUE_DISTRIBUTION", params)
+                    rule, is_agg = build_rule_for_column_check(
+                        target_table, col, _builder_key(value_dist_key, "VALUE_DISTRIBUTION"), params
+                    )
                     check_rows.append(DQCheck(
                         config_id=(cfg.config_id if cfg else "temp"),
                         check_id=f"{col}_VALUE_DIST",
@@ -957,7 +994,7 @@ def render_config_editor():
                         rule_expr=(f"AGG: {rule}" if is_agg else rule),
                         severity=sev,
                         sample_rows=(0 if is_agg else int(sample_n)),
-                        check_type="VALUE_DISTRIBUTION",
+                        check_type=value_dist_key,
                         params_json=json.dumps(params)
                     ))
 
@@ -988,7 +1025,9 @@ def render_config_editor():
         if target_table:
             fr_params = {"timestamp_column": ts_col, "max_age_minutes": int(fr_max_age)}
             try:
-                fr_rule, fr_is_agg = build_rule_for_table_check(target_table, "FRESHNESS", fr_params)
+                fr_rule, fr_is_agg = build_rule_for_table_check(
+                    target_table, _builder_key(freshness_key, "FRESHNESS"), fr_params
+                )
             except ValueError as exc:
                 table_check_error = f"Invalid freshness configuration: {exc}"
             else:
@@ -997,11 +1036,11 @@ def render_config_editor():
                     check_id="TABLE_FRESHNESS",
                     table_fqn=target_table, column_name=None,
                     rule_expr=(f"AGG: {fr_rule}" if fr_is_agg else fr_rule), severity="ERROR",
-                    sample_rows=0, check_type="FRESHNESS",
+                    sample_rows=0, check_type=freshness_key,
                     params_json=json.dumps(fr_params)
                 ))
 
-                row_defaults = existing_table_params.get("ROW_COUNT_ANOMALY", {}) or {}
+                row_defaults = existing_table_params.get(rowcount_anomaly_key, {}) or {}
                 try:
                     lookback_days = int(row_defaults.get("lookback_days", 28))
                 except (TypeError, ValueError):
@@ -1021,7 +1060,9 @@ def render_config_editor():
                     "min_history_days": min_history_days,
                 }
                 try:
-                    anomaly_rule, anomaly_is_agg = build_rule_for_table_check(target_table, "ROW_COUNT_ANOMALY", anomaly_params)
+                    anomaly_rule, anomaly_is_agg = build_rule_for_table_check(
+                        target_table, _builder_key(rowcount_anomaly_key, "ROW_COUNT_ANOMALY"), anomaly_params
+                    )
                 except ValueError as exc:
                     table_check_error = f"Invalid row count anomaly configuration: {exc}"
                 else:
@@ -1030,7 +1071,7 @@ def render_config_editor():
                         check_id="TABLE_ROW_COUNT_ANOMALY",
                         table_fqn=target_table, column_name=None,
                         rule_expr=(f"AGG: {anomaly_rule}" if anomaly_is_agg else anomaly_rule), severity="ERROR",
-                        sample_rows=0, check_type="ROW_COUNT_ANOMALY",
+                        sample_rows=0, check_type=rowcount_anomaly_key,
                         params_json=json.dumps(anomaly_params)
                     ))
 
