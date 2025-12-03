@@ -582,22 +582,15 @@ def render_config_editor():
     rule_templates = load_rule_library(
         session, METADATA_DB, METADATA_SCHEMA, include_inactive=True
     )
-    fallback_rules = [
-        {
-            "rule_key": key,
-            "label": key,
-            "check_type": key,
-            "default_severity": None,
-            "description": None,
-        }
-        for key in LEGACY_RULE_KEY_MAP
-    ]
     rule_options = load_active_rules_from_library(session, METADATA_DB, METADATA_SCHEMA)
-    if not rule_options:
-        rule_options = fallback_rules
     active_rules = active_rule_map(rule_templates)
     all_rules_map = {t.rule_id.upper(): t for t in rule_templates if t.rule_id}
     logging.info("dq_config: loaded %d rule options from DQ_RULE_LIBRARY", len(rule_options))
+
+    if not rule_options:
+        st.error(
+            "No active rules available from DQ_RULE_LIBRARY. Please verify the DQ library configuration.",
+        )
 
     rule_label_lookup = {
         str(rule.get("rule_key", "")).upper(): (rule.get("label") or "")
