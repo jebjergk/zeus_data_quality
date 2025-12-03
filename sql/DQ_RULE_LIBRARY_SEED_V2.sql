@@ -1,12 +1,27 @@
 -- Seeds core DSL-based rules into DQ_RULE_LIBRARY without impacting existing entries
 MERGE INTO ZEUS_ANALYTICS_SIMU.DISCOVERY.DQ_RULE_LIBRARY AS target
 USING (
-    SELECT * FROM VALUES
-        ('NOT_NULL', 'COLUMN', 'DSL', 'ASSERT NOT is_null(value)', PARSE_JSON('[]'), PARSE_JSON('{}'), PARSE_JSON('[]'), PARSE_JSON('[]'), 'Completeness', 'HIGH', TRUE, 1),
-        ('RANGE_CHECK', 'COLUMN', 'DSL', 'ASSERT value BETWEEN param("min_value") AND param("max_value")', PARSE_JSON('["min_value","max_value"]'), PARSE_JSON('{}'), PARSE_JSON('[]'), PARSE_JSON('[]'), 'Validity', 'MEDIUM', TRUE, 1),
-        ('REGEX_MATCH', 'COLUMN', 'DSL', 'ASSERT matches(value, param("pattern"))', PARSE_JSON('["pattern"]'), PARSE_JSON('{}'), PARSE_JSON('[]'), PARSE_JSON('[]'), 'Validity', 'MEDIUM', TRUE, 1),
-        ('IN_REFERENCE_TABLE', 'COLUMN', 'DSL', 'ASSERT (is_null(value) AND param("allow_nulls")) OR lookup_exists(param("ref_table"), param("ref_key_column"), value)', PARSE_JSON('["allow_nulls","ref_table","ref_key_column"]'), PARSE_JSON('{"allow_nulls": false}'), PARSE_JSON('[]'), PARSE_JSON('[]'), 'Consistency', 'HIGH', TRUE, 1)
-        AS v(RULE_CODE, SCOPE, ENGINE_TYPE, EXPRESSION, PARAM_SCHEMA, DEFAULT_PARAMS, ALLOWED_DATA_TYPES, ALLOWED_CLASSIFICATIONS, CATEGORY, SEVERITY, ENABLED, VERSION)
+    SELECT
+        RULE_CODE,
+        SCOPE,
+        ENGINE_TYPE,
+        EXPRESSION,
+        PARSE_JSON(PARAM_SCHEMA_JSON) AS PARAM_SCHEMA,
+        PARSE_JSON(DEFAULT_PARAMS_JSON) AS DEFAULT_PARAMS,
+        PARSE_JSON(ALLOWED_DATA_TYPES_JSON) AS ALLOWED_DATA_TYPES,
+        PARSE_JSON(ALLOWED_CLASSIFICATIONS_JSON) AS ALLOWED_CLASSIFICATIONS,
+        CATEGORY,
+        SEVERITY,
+        ENABLED,
+        VERSION
+    FROM (
+        SELECT * FROM VALUES
+            ('NOT_NULL', 'COLUMN', 'DSL', 'ASSERT NOT is_null(value)', '[]', '{}', '[]', '[]', 'Completeness', 'HIGH', TRUE, 1),
+            ('RANGE_CHECK', 'COLUMN', 'DSL', 'ASSERT value BETWEEN param("min_value") AND param("max_value")', '["min_value","max_value"]', '{}', '[]', '[]', 'Validity', 'MEDIUM', TRUE, 1),
+            ('REGEX_MATCH', 'COLUMN', 'DSL', 'ASSERT matches(value, param("pattern"))', '["pattern"]', '{}', '[]', '[]', 'Validity', 'MEDIUM', TRUE, 1),
+            ('IN_REFERENCE_TABLE', 'COLUMN', 'DSL', 'ASSERT (is_null(value) AND param("allow_nulls")) OR lookup_exists(param("ref_table"), param("ref_key_column"), value)', '["allow_nulls","ref_table","ref_key_column"]', '{"allow_nulls": false}', '[]', '[]', 'Consistency', 'HIGH', TRUE, 1)
+            AS v(RULE_CODE, SCOPE, ENGINE_TYPE, EXPRESSION, PARAM_SCHEMA_JSON, DEFAULT_PARAMS_JSON, ALLOWED_DATA_TYPES_JSON, ALLOWED_CLASSIFICATIONS_JSON, CATEGORY, SEVERITY, ENABLED, VERSION)
+    )
 ) AS source
 ON target.RULE_CODE = source.RULE_CODE
 WHEN MATCHED THEN UPDATE SET
