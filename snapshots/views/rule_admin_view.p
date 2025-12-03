@@ -478,8 +478,8 @@ def _render_rule_edit_page(session: Session, metadata_db: str, metadata_schema: 
         st.error("\n".join(errors))
         return
 
-    param_schema_value = parsed_param_schema
-    default_params_value = parsed_default_params
+    param_schema_value = json.dumps(parsed_param_schema)
+    default_params_value = json.dumps(parsed_default_params)
 
     if action == "test":
         _run_test_compile(
@@ -522,8 +522,8 @@ def _render_rule_edit_page(session: Session, metadata_db: str, metadata_schema: 
                     SCOPE = :4,
                     ENGINE_TYPE = :5,
                     EXPRESSION = :6,
-                    PARAM_SCHEMA = :7,
-                    DEFAULT_PARAMS = :8,
+                    PARAM_SCHEMA = PARSE_JSON(:7),
+                    DEFAULT_PARAMS = PARSE_JSON(:8),
                     ENABLED = :9,
                     VERSION = :10,
                     UPDATED_AT = CURRENT_TIMESTAMP()
@@ -560,9 +560,21 @@ def _render_rule_edit_page(session: Session, metadata_db: str, metadata_schema: 
                     VERSION,
                     CREATED_AT,
                     UPDATED_AT
-                ) VALUES (
-                    :1, :2, :3, :4, :5, :6, :7, :8, :9, :10, :11, CURRENT_TIMESTAMP(), CURRENT_TIMESTAMP()
                 )
+                SELECT
+                    :1,
+                    :2,
+                    :3,
+                    :4,
+                    :5,
+                    :6,
+                    PARSE_JSON(:7),
+                    PARSE_JSON(:8),
+                    :9,
+                    :10,
+                    :11,
+                    CURRENT_TIMESTAMP(),
+                    CURRENT_TIMESTAMP()
                 """,
                 params=[
                     rule_code_val,
