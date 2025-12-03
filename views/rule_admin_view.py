@@ -546,31 +546,6 @@ def _render_rule_list(
         st.info("No rules match the current search or filter. Adjust filters or create a new rule.")
         return
 
-    display_df = filtered_df[
-        [
-            "RULE_ID",
-            "RULE_CODE",
-            "SCOPE",
-            "CATEGORY",
-            "SEVERITY",
-            "ENGINE_TYPE",
-            "ENABLED",
-            "VERSION",
-        ]
-    ].rename(
-        columns={
-            "RULE_ID": "Rule ID",
-            "RULE_CODE": "Rule code",
-            "SCOPE": "Scope",
-            "CATEGORY": "Category",
-            "SEVERITY": "Severity",
-            "ENGINE_TYPE": "Engine",
-            "ENABLED": "Enabled",
-            "VERSION": "Version",
-        }
-    )
-    st.dataframe(display_df, use_container_width=True, hide_index=True)
-
     st.caption("Use the toggles below to enable/disable a rule or open it for editing.")
 
     for rule in filtered_df.to_dict("records"):
