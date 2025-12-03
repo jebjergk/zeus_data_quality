@@ -22,7 +22,8 @@ def quote_identifier(name: str) -> str:
     segments = [seg.strip() for seg in name.split(".") if seg.strip()]
     if not segments:
         raise ValueError("Identifier cannot be empty")
-    return ".".join(f'"{seg.replace("\"", "\"\"")}"' for seg in segments)
+    escaped_segments = [seg.replace('"', '""') for seg in segments]
+    return ".".join(f'"{seg}"' for seg in escaped_segments)
 
 
 def quote_fqn(fqn: str) -> str:
