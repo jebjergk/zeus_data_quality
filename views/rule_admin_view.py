@@ -59,7 +59,7 @@ def _load_rules(session: Session, table: str) -> pd.DataFrame:
         SELECT
             RULE_UID,
             RULE_CODE,
-            NAME,
+            RULE_ID,
             SCOPE,
             CATEGORY,
             SEVERITY,
@@ -112,7 +112,7 @@ def _severity_options(df: pd.DataFrame) -> List[str]:
 def _rule_defaults() -> dict[str, Any]:
     return {
         "RULE_CODE": "",
-        "NAME": "",
+        "RULE_ID": "",
         "CATEGORY": "",
         "SEVERITY": "",
         "SCOPE": "",
@@ -137,7 +137,7 @@ def _load_single_rule(session: Session, table_name: str, rule_uid: Any) -> Optio
             SELECT
                 RULE_UID,
                 RULE_CODE,
-                NAME,
+                RULE_ID,
                 SCOPE,
                 CATEGORY,
                 SEVERITY,
@@ -190,7 +190,7 @@ def _apply_filters(
     if search_text:
         needle = search_text.lower()
         mask = (
-            filtered["NAME"].astype(str).str.lower().str.contains(needle)
+            filtered["RULE_ID"].astype(str).str.lower().str.contains(needle)
             | filtered["RULE_CODE"].astype(str).str.lower().str.contains(needle)
             | filtered["SCOPE"].fillna("").astype(str).str.lower().str.contains(needle)
             | filtered["CATEGORY"].fillna("").astype(str).str.lower().str.contains(needle)
@@ -231,7 +231,7 @@ def _render_rule_edit_page(session: Session, metadata_db: str, metadata_schema: 
         rule_defaults.update(
             {
                 "RULE_CODE": record.get("RULE_CODE", ""),
-                "NAME": record.get("NAME", ""),
+                "RULE_ID": record.get("RULE_ID", ""),
                 "CATEGORY": record.get("CATEGORY", ""),
                 "SEVERITY": record.get("SEVERITY", ""),
                 "SCOPE": record.get("SCOPE", ""),
@@ -275,10 +275,10 @@ def _render_rule_edit_page(session: Session, metadata_db: str, metadata_schema: 
             help="Unique identifier for the rule template.",
             disabled=mode == "edit_existing",
         )
-        name = st.text_input(
-            "Display name",
-            value=rule_defaults["NAME"],
-            help="Human-friendly rule name shown in listings.",
+        rule_id = st.text_input(
+            "Rule ID",
+            value=rule_defaults["RULE_ID"],
+            help="Human-friendly rule identifier shown in listings.",
         )
 
         col_category, col_severity = st.columns(2)
@@ -347,7 +347,7 @@ def _render_rule_edit_page(session: Session, metadata_db: str, metadata_schema: 
 
     errors: List[str] = []
     rule_code_val = (rule_code or "").strip()
-    name_val = (name or "").strip()
+    rule_id_val = (rule_id or "").strip()
     category_val = (category or "").strip()
     severity_val = (severity or "").strip()
     scope_val = (scope_value or "").strip()
@@ -356,8 +356,8 @@ def _render_rule_edit_page(session: Session, metadata_db: str, metadata_schema: 
 
     if not rule_code_val:
         errors.append("Rule code is required.")
-    if not name_val:
-        errors.append("Display name is required.")
+    if not rule_id_val:
+        errors.append("Rule ID is required.")
     if engine_val.upper() == "DSL" and not expression_val:
         errors.append("Expression is required for DSL rules.")
     if mode == "create_new" and not scope_val:
@@ -415,7 +415,7 @@ def _render_rule_edit_page(session: Session, metadata_db: str, metadata_schema: 
                 f"""
                 UPDATE {table_name}
                 SET
-                    NAME = :1,
+                    RULE_ID = :1,
                     CATEGORY = :2,
                     SEVERITY = :3,
                     SCOPE = :4,
@@ -429,7 +429,7 @@ def _render_rule_edit_page(session: Session, metadata_db: str, metadata_schema: 
                 WHERE RULE_UID = :11
                 """,
                 params=[
-                    name_val,
+                    rule_id_val,
                     category_val or None,
                     severity_val or None,
                     scope_val,
@@ -447,7 +447,7 @@ def _render_rule_edit_page(session: Session, metadata_db: str, metadata_schema: 
                 f"""
                 INSERT INTO {table_name} (
                     RULE_CODE,
-                    NAME,
+                    RULE_ID,
                     CATEGORY,
                     SEVERITY,
                     SCOPE,
@@ -465,7 +465,7 @@ def _render_rule_edit_page(session: Session, metadata_db: str, metadata_schema: 
                 """,
                 params=[
                     rule_code_val,
-                    name_val,
+                    rule_id_val,
                     category_val or None,
                     severity_val or None,
                     scope_val,
@@ -548,7 +548,7 @@ def _render_rule_list(
 
     display_df = filtered_df[
         [
-            "NAME",
+            "RULE_ID",
             "RULE_CODE",
             "SCOPE",
             "CATEGORY",
@@ -559,7 +559,7 @@ def _render_rule_list(
         ]
     ].rename(
         columns={
-            "NAME": "Display name",
+            "RULE_ID": "Rule ID",
             "RULE_CODE": "Rule code",
             "SCOPE": "Scope",
             "CATEGORY": "Category",
@@ -576,7 +576,7 @@ def _render_rule_list(
     for rule in filtered_df.to_dict("records"):
         rule_uid = rule.get("RULE_UID")
         toggle_key = f"rule_enabled_{rule_uid}"
-        rule_name = rule.get("NAME", "")
+        rule_name = rule.get("RULE_ID", "")
         rule_code = rule.get("RULE_CODE", "")
         rule_scope = rule.get("SCOPE", "")
         rule_category = rule.get("CATEGORY", "")
