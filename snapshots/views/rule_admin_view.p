@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from typing import Any, Dict, List, Optional, TYPE_CHECKING
+from typing import Any, Dict, Iterable, List, Optional, TYPE_CHECKING
 
 import pandas as pd
 import streamlit as st
@@ -14,14 +14,11 @@ else:  # pragma: no cover - runtime fallback to avoid hard dependency
     Session = Any  # type: ignore
 
 from utils.meta import _q
+from services.dq_dsl_compiler import compile_expression
 
 
 def _fq_rule_table(database: str, schema: str) -> str:
     return f"{_q(database)}.{_q(schema)}.{_q('DQ_RULE_LIBRARY')}"
-
-
-def _fq_compile_proc(database: str, schema: str) -> str:
-    return f"{_q(database)}.{_q(schema)}.{_q('DQ_COMPILE_RULE_SQL')}"
 
 
 def _fq_test_table(database: str, schema: str) -> str:
@@ -60,6 +57,51 @@ def _parse_json_text(raw_text: str, *, expected_type: str) -> Any:
     if expected_type == "object" and not isinstance(parsed, dict):
         raise ValueError("Value must be a JSON object (e.g. {} or {\"key\": ...}).")
     return parsed
+
+
+def _normalize_param_schema(raw_schema: Any) -> List[Dict[str, Any]]:
+    if raw_schema is None:
+        return []
+    normalized: List[Dict[str, Any]] = []
+    if isinstance(raw_schema, list):
+        for item in raw_schema:
+            if isinstance(item, str):
+                normalized.append({"name": item, "type": "STRING", "required": True})
+            elif isinstance(item, dict):
+                name = item.get("name")
+                if not name:
+                    raise ValueError("PARAM_SCHEMA entries must include a name")
+                normalized.append(
+                    {
+                        "name": name,
+                        "type": item.get("type", "STRING"),
+                        "required": bool(item.get("required", True)),
+                    }
+                )
+            else:
+                raise ValueError("Unsupported PARAM_SCHEMA entry")
+    return normalized
+
+
+def _validate_param_value(value: Any, type_name: str, name: str) -> None:
+    type_upper = (type_name or "STRING").upper()
+    if type_upper == "STRING":
+        if not isinstance(value, str):
+            raise ValueError(f"Parameter '{name}' must be STRING")
+    elif type_upper == "NUMBER":
+        if not isinstance(value, (int, float)):
+            raise ValueError(f"Parameter '{name}' must be NUMBER")
+    elif type_upper == "BOOLEAN":
+        if not isinstance(value, bool):
+            raise ValueError(f"Parameter '{name}' must be BOOLEAN")
+    elif type_upper in {"FQN_TABLE", "COLUMN_NAME"}:
+        if not isinstance(value, str):
+            raise ValueError(f"Parameter '{name}' must be {type_upper}")
+    elif type_upper == "STRING_LIST":
+        if not isinstance(value, Iterable) or isinstance(value, (str, bytes)):
+            raise ValueError(f"Parameter '{name}' must be STRING_LIST")
+    else:
+        raise ValueError(f"Unsupported parameter type {type_name} for '{name}'")
 
 
 def _load_rules(session: Session, table: str) -> pd.DataFrame:
@@ -441,9 +483,11 @@ def _render_rule_edit_page(session: Session, metadata_db: str, metadata_schema: 
 
     if action == "test":
         _run_test_compile(
-            session=session,
             metadata_db=metadata_db,
             metadata_schema=metadata_schema,
+            expression=expression_val,
+            scope=scope_val,
+            param_schema=parsed_param_schema,
             rule_code=rule_code_val,
             default_params=parsed_default_params,
         )
@@ -545,38 +589,52 @@ def _render_rule_edit_page(session: Session, metadata_db: str, metadata_schema: 
 
 def _run_test_compile(
     *,
-    session: Session,
+    expression: str,
     metadata_db: str,
     metadata_schema: str,
+    scope: str,
+    param_schema: List[Dict[str, Any]],
     rule_code: str,
     default_params: Dict[str, Any],
 ) -> None:
-    compile_proc = _fq_compile_proc(metadata_db, metadata_schema)
     target_table = _fq_test_table(metadata_db, metadata_schema)
-    target_columns = ["DUMMY_COL"]
+    target_columns = ["DUMMY_COL"] if (scope or "").upper() == "COLUMN" else []
     params = default_params or {}
 
     try:
-        result = session.call(
-            compile_proc,
-            rule_code,
-            target_table,
-            target_columns,
-            params,
+        normalized_schema = _normalize_param_schema(param_schema)
+        param_types: Dict[str, str] = {}
+        for param_def in normalized_schema:
+            name = param_def.get("name")
+            type_name = param_def.get("type", "STRING")
+            param_types[name] = type_name
+            if param_def.get("required", True) and name not in params:
+                raise ValueError(f"Missing required parameter '{name}'")
+            if name in params:
+                _validate_param_value(params[name], type_name, name)
+
+        target_column = target_columns[0] if target_columns else "DUMMY_COL"
+        compiled_predicate = compile_expression(
+            expression, target_column, params, param_types
         )
-    except Exception as exc:  # pragma: no cover - surface Snowflake errors
+    except Exception as exc:  # pragma: no cover - surface errors to UI
         st.error(f"Test compile failed: {exc}")
         return
 
+    violation_query = (
+        f"SELECT * FROM {target_table} AS T WHERE NOT ({compiled_predicate})"
+    )
+
     st.success("✅ Rule compiled successfully.")
-    if isinstance(result, dict):
-        st.json(
-            {
-                "compiled_predicate": result.get("compiled_predicate"),
-                "violation_query": result.get("violation_query"),
-                "params": result.get("params"),
-            }
-        )
+    st.json(
+        {
+            "rule_code": rule_code,
+            "compiled_predicate": compiled_predicate,
+            "violation_query": violation_query,
+            "params": params,
+            "scope": scope,
+        }
+    )
 
 
 def _render_rule_list(
