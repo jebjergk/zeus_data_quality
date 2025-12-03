@@ -17,9 +17,9 @@ USING (
     FROM (
         SELECT * FROM VALUES
             ('NOT_NULL', 'COLUMN', 'DSL', 'ASSERT NOT is_null(value)', '[]', '{}', '[]', '[]', 'Completeness', 'HIGH', TRUE, 1),
-            ('RANGE_CHECK', 'COLUMN', 'DSL', 'ASSERT value BETWEEN param("min_value") AND param("max_value")', '["min_value","max_value"]', '{}', '[]', '[]', 'Validity', 'MEDIUM', TRUE, 1),
-            ('REGEX_MATCH', 'COLUMN', 'DSL', 'ASSERT matches(value, param("pattern"))', '["pattern"]', '{}', '[]', '[]', 'Validity', 'MEDIUM', TRUE, 1),
-            ('IN_REFERENCE_TABLE', 'COLUMN', 'DSL', 'ASSERT (is_null(value) AND param("allow_nulls")) OR lookup_exists(param("ref_table"), param("ref_key_column"), value)', '["allow_nulls","ref_table","ref_key_column"]', '{"allow_nulls": false}', '[]', '[]', 'Consistency', 'HIGH', TRUE, 1)
+            ('RANGE_CHECK', 'COLUMN', 'DSL', 'ASSERT value BETWEEN param("min_value") AND param("max_value")', '[{"name":"min_value","type":"NUMBER","required":true},{"name":"max_value","type":"NUMBER","required":true}]', '{}', '[]', '[]', 'Validity', 'MEDIUM', TRUE, 1),
+            ('REGEX_MATCH', 'COLUMN', 'DSL', 'ASSERT matches(value, param("pattern"))', '[{"name":"pattern","type":"STRING","required":true}]', '{}', '[]', '[]', 'Validity', 'MEDIUM', TRUE, 1),
+            ('IN_REFERENCE_TABLE', 'COLUMN', 'DSL', 'ASSERT (is_null(value) AND param("allow_nulls")) OR lookup_exists(param("ref_table"), param("ref_key_column"), value)', '[{"name":"allow_nulls","type":"BOOLEAN","required":false},{"name":"ref_table","type":"FQN_TABLE","required":true},{"name":"ref_key_column","type":"COLUMN_NAME","required":true}]', '{"allow_nulls": false}', '[]', '[]', 'Consistency', 'HIGH', TRUE, 1)
             AS v(RULE_CODE, SCOPE, ENGINE_TYPE, EXPRESSION, PARAM_SCHEMA_JSON, DEFAULT_PARAMS_JSON, ALLOWED_DATA_TYPES_JSON, ALLOWED_CLASSIFICATIONS_JSON, CATEGORY, SEVERITY, ENABLED, VERSION)
     )
 ) AS source
