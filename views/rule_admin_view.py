@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from typing import Any, List, Optional, TYPE_CHECKING
+from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
 import pandas as pd
 import streamlit as st
@@ -18,6 +18,14 @@ from utils.meta import _q
 
 def _fq_rule_table(database: str, schema: str) -> str:
     return f"{_q(database)}.{_q(schema)}.{_q('DQ_RULE_LIBRARY')}"
+
+
+def _fq_compile_proc(database: str, schema: str) -> str:
+    return f"{_q(database)}.{_q(schema)}.{_q('DQ_COMPILE_RULE_SQL')}"
+
+
+def _fq_test_table(database: str, schema: str) -> str:
+    return f"{_q(database)}.{_q(schema)}.{_q('DQ_RULE_TEST_TARGET')}"
 
 
 def _normalize_json_field(value: Any, *, empty_default: str) -> str:
@@ -314,10 +322,39 @@ def _render_rule_edit_page(session: Session, metadata_db: str, metadata_schema: 
             height=200,
             help="Provide the DSL expression for this rule (e.g. ASSERT ...).",
         )
+        with st.expander("DSL reference (quick guide)"):
+            st.markdown(
+                """
+                **DQ DSL v1 – Cheat Sheet**
+
+                * Basic rule shape: `ASSERT <predicate>`
+                * Operators: `AND`, `OR`, `NOT`, `IN`, `BETWEEN`, comparison operators (`=`, `!=`, `<`, `<=`, `>`, `>=`)
+                * Null checks: `IS NULL`, `IS NOT NULL`
+                * String helpers: `LEN(x)`, `LOWER(x)`, `UPPER(x)`, `CONTAINS(x, substring)`, `LIKE(pattern)`
+                * Number helpers: `ABS(x)`, `ROUND(x, decimals)`, `BETWEEN low AND high`
+                * Column/param references: use column names directly (quoted if needed) and parameters as `${param_name}`
+                * Implication: `A -> B` expands to `NOT (A) OR (B)`
+                * Lists: `IN (${list_param})` where `list_param` is `STRING_LIST`
+                * Table/column params: `FQN_TABLE` for fully-qualified tables, `COLUMN_NAME` for single column names
+                * Examples:
+                    * `ASSERT NOT (price IS NULL) AND price > 0`
+                    * `ASSERT amount BETWEEN ${min_amt} AND ${max_amt}`
+                    * `ASSERT LOWER(email) LIKE '%@example.com'`
+                """
+            )
+
         param_schema_text = st.text_area(
             "Parameter schema (JSON array)",
             value=rule_defaults["PARAM_SCHEMA"],
             height=140,
+        )
+        st.caption(
+            """
+            Define parameters as a JSON array of objects. Each definition supports
+            `name`, `type` (STRING, NUMBER, BOOLEAN, FQN_TABLE, COLUMN_NAME, STRING_LIST),
+            `required` (defaults to true), and `default` (used when not provided).
+            Example: `[{"name": "min_amt", "type": "NUMBER", "required": true, "default": 0}]`.
+            """
         )
         default_params_text = st.text_area(
             "Default parameters (JSON object)",
@@ -331,18 +368,28 @@ def _render_rule_edit_page(session: Session, metadata_db: str, metadata_schema: 
             help="Optional version number for the rule template.",
         )
 
-        action_col1, action_col2 = st.columns(2)
+        action_col1, action_col2, action_col3 = st.columns(3)
         with action_col1:
             save_clicked = st.form_submit_button("Save", type="primary")
         with action_col2:
             cancel_clicked = st.form_submit_button("Cancel", type="secondary")
+        with action_col3:
+            test_compile_clicked = st.form_submit_button("Test Compile")
 
     if cancel_clicked:
         _reset_rule_state()
         st.info("Edit cancelled")
         st.rerun()
 
-    if not save_clicked:
+    action: Optional[str]
+    if save_clicked:
+        action = "save"
+    elif test_compile_clicked:
+        action = "test"
+    else:
+        action = None
+
+    if action is None:
         return
 
     errors: List[str] = []
@@ -391,6 +438,16 @@ def _render_rule_edit_page(session: Session, metadata_db: str, metadata_schema: 
 
     param_schema_json = json.dumps(parsed_param_schema, default=str)
     default_params_json = json.dumps(parsed_default_params, default=str)
+
+    if action == "test":
+        _run_test_compile(
+            session=session,
+            metadata_db=metadata_db,
+            metadata_schema=metadata_schema,
+            rule_code=rule_code_val,
+            default_params=parsed_default_params,
+        )
+        return
 
     if mode == "create_new":
         try:
@@ -484,6 +541,42 @@ def _render_rule_edit_page(session: Session, metadata_db: str, metadata_schema: 
     _reset_rule_state()
     st.success("Rule saved")
     st.rerun()
+
+
+def _run_test_compile(
+    *,
+    session: Session,
+    metadata_db: str,
+    metadata_schema: str,
+    rule_code: str,
+    default_params: Dict[str, Any],
+) -> None:
+    compile_proc = _fq_compile_proc(metadata_db, metadata_schema)
+    target_table = _fq_test_table(metadata_db, metadata_schema)
+    target_columns = ["DUMMY_COL"]
+    params = default_params or {}
+
+    try:
+        result = session.call(
+            compile_proc,
+            rule_code,
+            target_table,
+            target_columns,
+            params,
+        )
+    except Exception as exc:  # pragma: no cover - surface Snowflake errors
+        st.error(f"Test compile failed: {exc}")
+        return
+
+    st.success("✅ Rule compiled successfully.")
+    if isinstance(result, dict):
+        st.json(
+            {
+                "compiled_predicate": result.get("compiled_predicate"),
+                "violation_query": result.get("violation_query"),
+                "params": result.get("params"),
+            }
+        )
 
 
 def _render_rule_list(
