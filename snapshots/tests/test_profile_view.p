@@ -1,3 +1,6 @@
+import time
+from concurrent.futures import TimeoutError
+
 import pytest
 
 pd = pytest.importorskip("pandas")
@@ -43,5 +46,22 @@ def test_overview_grid_widget_key_changes_with_nonce():
 
     assert key_first != key_second
     assert "DB_SCHEMA_TABLE" in key_first
+
+
+def test_call_with_timeout_completes():
+    result, error = profile_view._call_with_timeout(lambda x: x + 1, 1, 2)
+
+    assert result == 3
+    assert error is None
+
+
+def test_call_with_timeout_handles_timeout():
+    def slow_call():
+        time.sleep(0.05)
+
+    result, error = profile_view._call_with_timeout(slow_call, 0.01)
+
+    assert result is None
+    assert isinstance(error, TimeoutError)
 
 

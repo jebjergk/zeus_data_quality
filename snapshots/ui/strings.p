@@ -28,6 +28,9 @@ PROFILE_V2_SUGGESTIONS_SPINNER = "Re-running suggestions for {table}..."
 PROFILE_V2_SUGGESTIONS_ERROR = "Suggestions run failed: {error}"
 PROFILE_V2_SUGGESTIONS_SUCCESS = "Suggestions refreshed for {table}."
 PROFILE_V2_SUGGESTIONS_UNAVAILABLE = "Suggestions rerun is unavailable in this environment."
+PROFILE_V2_SUGGESTIONS_TIMEOUT = (
+    "Suggestions run did not finish within {timeout} seconds for {table}."
+)
 PROFILE_V2_SUGGEST_CONFIG_BUTTON = "Suggest DQ Config"
 PROFILE_V2_SUGGEST_CONFIG_SPINNER = (
     "Suggesting DQ config from latest profiling run for {table}..."

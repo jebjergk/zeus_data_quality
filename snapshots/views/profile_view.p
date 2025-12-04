@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, TimeoutError
 from dataclasses import dataclass
 from datetime import datetime
 import json
@@ -18,6 +19,28 @@ st.session_state.setdefault("freeze_view", False)
 st.session_state.setdefault("last_profile_summary", None)
 st.session_state.setdefault("last_profile_rows", [])
 st.session_state.setdefault("last_profile_err", None)
+
+SUGGESTIONS_TIMEOUT_SECONDS = 60
+
+
+def _call_with_timeout(func, timeout_seconds: float, *args, **kwargs):
+    """Execute *func* with a timeout.
+
+    Returns a tuple ``(result, error)`` where *error* is ``None`` when the call
+    finished successfully, ``TimeoutError`` when the timeout elapsed, or the
+    caught exception instance for other failures.
+    """
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(func, *args, **kwargs)
+        try:
+            return future.result(timeout=timeout_seconds), None
+        except TimeoutError as exc:
+            future.cancel()
+            return None, exc
+        except Exception as exc:  # pragma: no cover - passthrough for UI feedback
+            future.cancel()
+            return None, exc
 
 
 @dataclass
@@ -1185,21 +1208,33 @@ def render_profile(
             with st.spinner(
                 ui_strings.PROFILE_V2_SUGGESTIONS_SPINNER.format(table=target_fqn)
             ):
-                try:
-                    suggestions_fn(session, target_fqn)
-                except Exception as exc:
-                    status_placeholder.error(
-                        ui_strings.PROFILE_V2_SUGGESTIONS_ERROR.format(
-                            error=str(exc)
-                        )
+                _, error = _call_with_timeout(
+                    suggestions_fn,
+                    SUGGESTIONS_TIMEOUT_SECONDS,
+                    session,
+                    target_fqn,
+                )
+
+            if isinstance(error, TimeoutError):
+                status_placeholder.error(
+                    ui_strings.PROFILE_V2_SUGGESTIONS_TIMEOUT.format(
+                        table=target_fqn,
+                        timeout=SUGGESTIONS_TIMEOUT_SECONDS,
                     )
-                else:
-                    st.session_state["profile_data_nonce"] += 1
-                    status_placeholder.success(
-                        ui_strings.PROFILE_V2_SUGGESTIONS_SUCCESS.format(
-                            table=target_fqn
-                        )
+                )
+            elif isinstance(error, Exception):
+                status_placeholder.error(
+                    ui_strings.PROFILE_V2_SUGGESTIONS_ERROR.format(
+                        error=str(error)
                     )
+                )
+            else:
+                st.session_state["profile_data_nonce"] += 1
+                status_placeholder.success(
+                    ui_strings.PROFILE_V2_SUGGESTIONS_SUCCESS.format(
+                        table=target_fqn
+                    )
+                )
 
     last_profile_err = st.session_state.get("last_profile_err")
     if last_profile_err:
