@@ -17,6 +17,7 @@ DISCOVERY_NAMESPACE = f"{DISCOVERY_DB}.{DISCOVERY_SCHEMA}"
 PROFILE_PROC = f"{DISCOVERY_NAMESPACE}.DQ_PROFILE_FULL"
 CLASSIFY_PROC = f"{DISCOVERY_NAMESPACE}.DQ_CLASSIFY_COLUMNS_HEURISTIC"
 SUGGESTIONS_PROC = f"{DISCOVERY_NAMESPACE}.DQ_APPLY_RULES"
+SUGGEST_CONFIG_PROC = f"{DISCOVERY_NAMESPACE}.DQ_SUGGEST_CONFIG_FROM_PROFILE"
 TABLE_SUMMARY_VIEW = f"{DISCOVERY_NAMESPACE}.DQ_TABLE_PROFILE_SUMMARY"
 COLUMN_FEATURES_TABLE = f"{DISCOVERY_NAMESPACE}.DQ_COLUMN_FEATURES"
 COLUMN_CLASSIFICATION_TABLE = f"{DISCOVERY_NAMESPACE}.DQ_COLUMN_CLASSIFICATION"
@@ -150,6 +151,68 @@ def run_suggestions_only(session: Any, table_fqn: str) -> None:
         message = _friendly_error_message(exc)
         LOGGER.exception("profiling_v2:apply_rules_failed target=%s", normalized)
         raise ProfilingError(f"Suggestions run failed: {message}") from exc
+
+
+def suggest_config_from_profile(
+    session: Any,
+    table_fqn: str,
+    profile_run_id: Any,
+    included_columns: Iterable[str],
+    config_name: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Call ``DQ_SUGGEST_CONFIG_FROM_PROFILE`` using current profiling context."""
+
+    normalized = _normalize_table_fqn(table_fqn)
+    if not normalized:
+        raise ProfilingError("Fully-qualified table name is required")
+
+    if profile_run_id is None:
+        raise ProfilingError("Profile run ID is required")
+
+    columns = [str(col).strip() for col in (included_columns or []) if str(col).strip()]
+    if not columns:
+        raise ProfilingError("At least one included column is required")
+
+    params = [normalized, profile_run_id, columns, config_name]
+    LOGGER.info(
+        "profiling_v2:suggest_config target=%s profile_run_id=%s columns=%s",
+        normalized,
+        profile_run_id,
+        ",".join(columns),
+    )
+    try:
+        rows = _execute_sql(
+            session,
+            f"CALL {SUGGEST_CONFIG_PROC}(?, ?, ?, ?)",
+            params=params,
+        ).collect()
+    except Exception as exc:  # pragma: no cover - Snowflake specific failures
+        message = _friendly_error_message(exc)
+        LOGGER.exception(
+            "profiling_v2:suggest_config_failed target=%s profile_run_id=%s",
+            normalized,
+            profile_run_id,
+        )
+        raise ProfilingError(f"Suggest DQ config failed: {message}") from exc
+
+    if not rows:
+        return {}
+
+    first_row = rows[0]
+    if hasattr(first_row, "as_dict"):
+        payload = list(first_row.as_dict().values())[0]
+    elif hasattr(first_row, "__iter__"):
+        payload = list(first_row)[0]
+    else:
+        payload = getattr(first_row, "_x", first_row)
+
+    if isinstance(payload, dict):
+        return payload
+
+    try:
+        return json.loads(payload)
+    except Exception:
+        return {"result": payload}
 
 
 def _fetch_dataframe(session: Any, sql: str, params: Optional[Iterable[Any]] = None) -> pd.DataFrame:

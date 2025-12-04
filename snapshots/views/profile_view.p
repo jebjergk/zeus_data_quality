@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 import json
 from typing import Any, Dict, List, Optional
 import pandas as pd
@@ -420,6 +421,171 @@ def _classification_confidence_lookup(
         column: _format_confidence(record.get("CONFIDENCE"))
         for column, record in latest.items()
     }
+
+
+def _included_overview_columns(overview: pd.DataFrame) -> List[str]:
+    if not isinstance(overview, pd.DataFrame) or overview.empty:
+        return []
+
+    lower_lookup = {col.lower(): col for col in overview.columns}
+    include_column = lower_lookup.get("include_in_dq_config")
+    name_column = lower_lookup.get("column_name")
+    if not include_column or not name_column:
+        return []
+
+    included: List[str] = []
+    for _, row in overview.iterrows():
+        try:
+            include_value = bool(row.get(include_column))
+        except Exception:
+            include_value = False
+        if not include_value:
+            continue
+        name_value = row.get(name_column)
+        if name_value is None:
+            continue
+        included.append(str(name_value))
+
+    seen = set()
+    unique_columns: List[str] = []
+    for column in included:
+        normalized = column.strip()
+        if not normalized:
+            continue
+        folded = normalized.casefold()
+        if folded in seen:
+            continue
+        seen.add(folded)
+        unique_columns.append(normalized)
+    return unique_columns
+
+
+def _selected_suggestion_columns(table_fqn: str) -> List[str]:
+    selection = st.session_state.get("dq_config_selection", {}).get(table_fqn, {})
+    included: List[str] = []
+    for key, value in selection.items():
+        if not value:
+            continue
+        parts = key.split("|")
+        if len(parts) < 2:
+            continue
+        included.append(parts[1])
+    seen = set()
+    result: List[str] = []
+    for column in included:
+        folded = column.casefold()
+        if folded in seen:
+            continue
+        seen.add(folded)
+        result.append(column)
+    return result
+
+
+def _resolve_included_columns(table_fqn: str, overview: pd.DataFrame) -> List[str]:
+    included = _included_overview_columns(overview)
+    if included:
+        return included
+    return _selected_suggestion_columns(table_fqn)
+
+
+def _default_config_name(table_fqn: str) -> str:
+    parts = (table_fqn or "").split(".")
+    table_name = parts[-1] if parts else "TABLE"
+    timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+    return f"PROFILE_{table_name}_{timestamp}"
+
+
+def _render_suggest_config_summary(
+    summary: Dict[str, Any], table_fqn: str, config_name: str
+) -> None:
+    rules_created = summary.get("rules_created") or []
+    rules_skipped = summary.get("rules_skipped") or []
+    created_count = len(rules_created)
+    skipped_count = len(rules_skipped)
+
+    st.success(
+        ui_strings.PROFILE_V2_SUGGEST_CONFIG_SUCCESS.format(
+            table=table_fqn,
+            config=config_name,
+            created=created_count,
+            skipped=skipped_count,
+        )
+    )
+
+    combined_rows: List[Dict[str, Any]] = []
+    for entry in rules_created:
+        combined_rows.append(
+            {
+                "Column": entry.get("column"),
+                "Rule": entry.get("rule_code"),
+                "Status": "Created",
+            }
+        )
+    for entry in rules_skipped:
+        combined_rows.append(
+            {
+                "Column": entry.get("column"),
+                "Rule": entry.get("rule_code"),
+                "Status": "Skipped",
+            }
+        )
+
+    if not combined_rows:
+        return
+
+    with st.expander(ui_strings.PROFILE_V2_SUGGEST_CONFIG_SUMMARY_TITLE):
+        st.dataframe(pd.DataFrame(combined_rows))
+
+
+def _render_suggest_config_action(
+    overview: pd.DataFrame,
+    table_fqn: str,
+    helpers: Any,
+    session: Any,
+    profile_run_id: Optional[str],
+):
+    suggest_fn = getattr(helpers, "suggest_config_from_profile", None)
+    if not callable(suggest_fn):
+        st.info(ui_strings.PROFILE_V2_SUGGEST_CONFIG_UNAVAILABLE)
+        return
+
+    suggest_button = st.button(
+        ui_strings.PROFILE_V2_SUGGEST_CONFIG_BUTTON,
+        use_container_width=False,
+    )
+    if not suggest_button:
+        return
+
+    included_columns = _resolve_included_columns(table_fqn, overview)
+    if not included_columns:
+        st.warning(ui_strings.PROFILE_V2_SUGGEST_CONFIG_NO_COLUMNS)
+        return
+
+    if not profile_run_id:
+        st.warning(ui_strings.PROFILE_V2_SUGGEST_CONFIG_NO_RUN_ID)
+        return
+
+    config_name = _default_config_name(table_fqn)
+    with st.spinner(
+        ui_strings.PROFILE_V2_SUGGEST_CONFIG_SPINNER.format(table=table_fqn)
+    ):
+        try:
+            summary = suggest_fn(
+                session,
+                table_fqn,
+                profile_run_id,
+                included_columns,
+                config_name,
+            )
+        except Exception as exc:  # pragma: no cover - UI feedback only
+            st.error(
+                ui_strings.PROFILE_V2_SUGGEST_CONFIG_ERROR.format(error=str(exc))
+            )
+            return
+
+    if isinstance(summary, dict):
+        st.session_state["last_suggest_config_summary"] = summary
+    _render_suggest_config_summary(summary or {}, table_fqn, config_name)
 
 
 def _suggestion_selection_key(
@@ -1095,6 +1261,13 @@ def render_profile(
     )
 
     with tab_overview:
+        _render_suggest_config_action(
+            overview_grid,
+            target_fqn,
+            helpers,
+            session,
+            st.session_state.get("profile_last_run_id"),
+        )
         _render_suggestion_sections(
             overview_grid,
             data.suggested_checks,
