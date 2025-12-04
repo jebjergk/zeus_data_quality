@@ -117,18 +117,34 @@ def _existing_rules(session: Session, table_fqn: str, dq_check_cols: List[str]) 
 
 
 def _rule_library(session: Session) -> Dict[str, Dict[str, Any]]:
-    rows = session.sql(
-        """
-        SELECT RULE_CODE, DEFAULT_SEVERITY, DEFAULT_CATEGORY, RULE_VERSION
-        FROM DQ_RULE_LIBRARY
-        """
-    ).collect()
+    dq_rl_cols = _load_table_columns(session, 'DQ_RULE_LIBRARY')
+    select_exprs = ['RULE_CODE']
+
+    severity_expr = None
+    if 'SEVERITY' in dq_rl_cols:
+        severity_expr = 'SEVERITY AS SEVERITY'
+    elif 'DEFAULT_SEVERITY' in dq_rl_cols:
+        severity_expr = 'DEFAULT_SEVERITY AS SEVERITY'
+    if severity_expr:
+        select_exprs.append(severity_expr)
+
+    if 'CATEGORY' in dq_rl_cols:
+        select_exprs.append('CATEGORY AS CATEGORY')
+
+    if 'VERSION' in dq_rl_cols:
+        select_exprs.append('VERSION AS RULE_VERSION')
+    elif 'RULE_VERSION' in dq_rl_cols:
+        select_exprs.append('RULE_VERSION AS RULE_VERSION')
+
+    sql = f"SELECT {', '.join(select_exprs)} FROM DQ_RULE_LIBRARY"
+    rows = session.sql(sql).collect()
+
     out: Dict[str, Dict[str, Any]] = {}
     for r in rows:
         d = r.as_dict()
         out[_normalize_name(d.get('RULE_CODE')).upper()] = {
-            'severity': d.get('DEFAULT_SEVERITY'),
-            'category': d.get('DEFAULT_CATEGORY'),
+            'severity': d.get('SEVERITY'),
+            'category': d.get('CATEGORY'),
             'rule_version': d.get('RULE_VERSION'),
         }
     return out
