@@ -28,6 +28,25 @@ PROFILE_V2_SUGGESTIONS_SPINNER = "Re-running suggestions for {table}..."
 PROFILE_V2_SUGGESTIONS_ERROR = "Suggestions run failed: {error}"
 PROFILE_V2_SUGGESTIONS_SUCCESS = "Suggestions refreshed for {table}."
 PROFILE_V2_SUGGESTIONS_UNAVAILABLE = "Suggestions rerun is unavailable in this environment."
+PROFILE_V2_SUGGEST_CONFIG_BUTTON = "Suggest DQ Config"
+PROFILE_V2_SUGGEST_CONFIG_SPINNER = (
+    "Suggesting DQ config from latest profiling run for {table}..."
+)
+PROFILE_V2_SUGGEST_CONFIG_NO_COLUMNS = (
+    "Please select at least one column with Include = True."
+)
+PROFILE_V2_SUGGEST_CONFIG_NO_RUN_ID = (
+    "Run profiling first to record a profiling run ID before suggesting a config."
+)
+PROFILE_V2_SUGGEST_CONFIG_ERROR = "Failed to suggest DQ config: {error}"
+PROFILE_V2_SUGGEST_CONFIG_SUCCESS = (
+    "✅ DQ Config suggested successfully for {table}. Created/updated config: {config}. "
+    "Rules created: {created}, skipped: {skipped}."
+)
+PROFILE_V2_SUGGEST_CONFIG_SUMMARY_TITLE = "Config suggestion details"
+PROFILE_V2_SUGGEST_CONFIG_UNAVAILABLE = (
+    "Suggest DQ Config is unavailable in this environment."
+)
 PROFILE_V2_METADATA_ERROR = "Failed to load profiling metadata: {error}"
 PROFILE_V2_STATUS_SUBHEADER = "Last profiling run"
 PROFILE_V2_STATUS_EMPTY = "No profiling runs recorded for {table}. Run profiling to populate results."
