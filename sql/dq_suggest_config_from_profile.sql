@@ -1,0 +1,389 @@
+-- Stored procedure: DQ_SUGGEST_CONFIG_FROM_PROFILE
+-- Suggests rule instances based on profiling metadata and writes them to DQ_CONFIG / DQ_CHECK.
+create or replace procedure DQ_SUGGEST_CONFIG_FROM_PROFILE(
+    PROFILE_RUN_ID STRING,
+    TARGET_TABLE_FQN STRING,
+    INCLUDED_COLUMNS ARRAY,
+    CONFIG_NAME STRING
+)
+returns VARIANT
+language PYTHON
+RUNTIME_VERSION = '3.10'
+PACKAGES = ('snowflake-snowpark-python')
+HANDLER = 'suggest_from_profile'
+EXECUTE AS CALLER
+AS
+$$
+import json
+import uuid
+from datetime import datetime
+from typing import Any, Dict, List, Optional, Sequence, Tuple
+
+from snowflake.snowpark import Session
+
+
+def _normalize_name(value: Any) -> str:
+    if value is None:
+        return ''
+    return str(value).strip()
+
+
+def _load_table_columns(session: Session, table_name: str) -> List[str]:
+    cols = session.sql(
+        """
+        SELECT UPPER(COLUMN_NAME) AS COLUMN_NAME
+        FROM INFORMATION_SCHEMA.COLUMNS
+        WHERE TABLE_NAME = UPPER(?) AND TABLE_SCHEMA = CURRENT_SCHEMA()
+        """,
+        params=[table_name],
+    ).collect()
+    return [r[0] for r in cols]
+
+
+def _to_float(value: Any) -> Optional[float]:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except Exception:
+        return None
+
+
+def _parse_top_values(raw_value: Any) -> List[Any]:
+    """Accepts variant/JSON array of objects or primitives; returns list of values."""
+    if raw_value is None:
+        return []
+    parsed = raw_value
+    if isinstance(raw_value, str):
+        try:
+            parsed = json.loads(raw_value)
+        except Exception:
+            return []
+    if isinstance(parsed, dict) and 'values' in parsed:
+        parsed = parsed.get('values')
+    if not isinstance(parsed, (list, tuple)):
+        return []
+    out: List[Any] = []
+    for entry in parsed:
+        if isinstance(entry, dict):
+            for key in ('VALUE', 'value', 'VAL'):
+                if key in entry:
+                    out.append(entry[key])
+                    break
+        else:
+            out.append(entry)
+    return out
+
+
+def _is_numeric(data_type: str) -> bool:
+    dt = (data_type or '').upper()
+    return any(token in dt for token in ['NUMBER', 'INT', 'DECIMAL', 'FLOAT', 'DOUBLE', 'REAL'])
+
+
+def _default_rule_entry(rule_code: str, params: Dict[str, Any], column_name: str) -> Dict[str, Any]:
+    return {
+        'rule_code': rule_code,
+        'column': column_name,
+        'params': params or {},
+    }
+
+
+def _existing_rules(session: Session, table_fqn: str, dq_check_cols: List[str]) -> Dict[Tuple[str, str], List[Dict[str, Any]]]:
+    columns = []
+    selectors = []
+    if 'RULE_CODE' in dq_check_cols:
+        columns.append('RULE_CODE')
+    if 'RULE_PARAMS' in dq_check_cols:
+        columns.append('RULE_PARAMS')
+    elif 'PARAMS_JSON' in dq_check_cols:
+        columns.append('PARAMS_JSON')
+    if 'COLUMN_NAME' in dq_check_cols:
+        selectors.append('COLUMN_NAME')
+    base_cols = ', '.join(['TABLE_FQN'] + selectors + columns) if columns else 'TABLE_FQN, COLUMN_NAME'
+    rows = session.sql(
+        f"SELECT {base_cols} FROM DQ_CHECK WHERE TABLE_FQN = ?",
+        params=[table_fqn],
+    ).collect()
+    out: Dict[Tuple[str, str], List[Dict[str, Any]]] = {}
+    for r in rows:
+        data = r.as_dict()
+        col = _normalize_name(data.get('COLUMN_NAME'))
+        rule_code = _normalize_name(data.get('RULE_CODE'))
+        params_raw = data.get('RULE_PARAMS')
+        if params_raw is None:
+            params_raw = data.get('PARAMS_JSON')
+        out.setdefault((col.upper(), rule_code.upper()), []).append({'params_raw': params_raw})
+    return out
+
+
+def _rule_library(session: Session) -> Dict[str, Dict[str, Any]]:
+    rows = session.sql(
+        """
+        SELECT RULE_CODE, DEFAULT_SEVERITY, DEFAULT_CATEGORY, RULE_VERSION
+        FROM DQ_RULE_LIBRARY
+        """
+    ).collect()
+    out: Dict[str, Dict[str, Any]] = {}
+    for r in rows:
+        d = r.as_dict()
+        out[_normalize_name(d.get('RULE_CODE')).upper()] = {
+            'severity': d.get('DEFAULT_SEVERITY'),
+            'category': d.get('DEFAULT_CATEGORY'),
+            'rule_version': d.get('RULE_VERSION'),
+        }
+    return out
+
+
+def _load_column_features(session: Session, profile_run_id: str, column_name: str) -> Dict[str, Any]:
+    rows = session.sql(
+        """
+        SELECT *
+        FROM DQ_COLUMN_FEATURES
+        WHERE PROFILE_RUN_ID = ? AND UPPER(COLUMN_NAME) = UPPER(?)
+        ORDER BY UPDATED_AT DESC
+        LIMIT 1
+        """,
+        params=[profile_run_id, column_name],
+    ).collect()
+    return rows[0].as_dict() if rows else {}
+
+
+def _load_column_classification(session: Session, profile_run_id: str, column_name: str) -> Optional[str]:
+    rows = session.sql(
+        """
+        SELECT CLASSIFICATION
+        FROM DQ_CLASSIFICATION
+        WHERE PROFILE_RUN_ID = ? AND UPPER(COLUMN_NAME) = UPPER(?)
+        ORDER BY UPDATED_AT DESC
+        LIMIT 1
+        """,
+        params=[profile_run_id, column_name],
+    ).collect()
+    if not rows:
+        return None
+    return _normalize_name(rows[0][0]).upper()
+
+
+def _extract_null_ratio(features: Dict[str, Any]) -> Optional[float]:
+    for key in ('NULL_RATIO', 'NULL_FRACTION'):
+        if key in features and features[key] is not None:
+            return _to_float(features.get(key))
+    for key in ('NULL_PERCENT', 'NULL_PCT'):
+        if key in features and features[key] is not None:
+            val = _to_float(features.get(key))
+            if val is not None:
+                return val / 100.0
+    nulls = _to_float(features.get('NULL_COUNT'))
+    total = _to_float(features.get('ROW_COUNT'))
+    if nulls is not None and total not in (None, 0):
+        return nulls / total
+    return None
+
+
+def _extract_min_max(features: Dict[str, Any]) -> Tuple[Optional[Any], Optional[Any]]:
+    min_value = features.get('MIN_VALUE')
+    max_value = features.get('MAX_VALUE')
+    return min_value, max_value
+
+
+def _extract_counts(features: Dict[str, Any]) -> Tuple[Optional[float], Optional[float]]:
+    distinct_count = _to_float(features.get('DISTINCT_COUNT') or features.get('UNIQUE_VALUES'))
+    row_count = _to_float(features.get('ROW_COUNT') or features.get('TOTAL_COUNT'))
+    return distinct_count, row_count
+
+
+def _allowed_values(features: Dict[str, Any]) -> List[Any]:
+    top_values = _parse_top_values(features.get('TOP_VALUES') or features.get('TOP_VALUES_JSON'))
+    return top_values[:20]
+
+
+def _select_rules_for_column(column_name: str, features: Dict[str, Any], classification: Optional[str]) -> List[Dict[str, Any]]:
+    suggestions: List[Dict[str, Any]] = []
+    data_type = _normalize_name(features.get('DATA_TYPE'))
+    null_ratio = _extract_null_ratio(features)
+    if null_ratio is not None and null_ratio < 0.05:
+        suggestions.append(_default_rule_entry('NOT_NULL_GENERIC', {}, column_name))
+
+    if _is_numeric(data_type):
+        min_val, max_val = _extract_min_max(features)
+        if min_val is not None and max_val is not None:
+            suggestions.append(_default_rule_entry('RANGE_CHECK_GENERIC', {
+                'min_value': min_val,
+                'max_value': max_val,
+            }, column_name))
+
+    if classification == 'COUNTRY_CODE':
+        suggestions.append(_default_rule_entry('COUNTRY_CODE_ISO2_PATTERN', {}, column_name))
+        suggestions.append(_default_rule_entry('IN_REFERENCE_TABLE_GENERIC', {
+            'reference_table': 'REF.COUNTRY',
+            'reference_column': 'COUNTRY_CODE',
+        }, column_name))
+    elif classification == 'CURRENCY_CODE':
+        suggestions.append(_default_rule_entry('CURRENCY_CODE_ISO3_PATTERN', {}, column_name))
+        suggestions.append(_default_rule_entry('IN_REFERENCE_TABLE_GENERIC', {
+            'reference_table': 'REF.CURRENCY',
+            'reference_column': 'CURRENCY_CODE',
+        }, column_name))
+    elif classification == 'ISIN':
+        suggestions.append(_default_rule_entry('ISIN_PATTERN_BASIC', {}, column_name))
+    elif classification == 'IBAN':
+        suggestions.append(_default_rule_entry('IBAN_PATTERN_BASIC', {}, column_name))
+
+    distinct_count, row_count = _extract_counts(features)
+    allowed_values = _allowed_values(features)
+    if row_count and distinct_count and row_count > 0:
+        if distinct_count <= 20 or (distinct_count / row_count) < 0.2:
+            if allowed_values:
+                suggestions.append(_default_rule_entry('ALLOWED_VALUES_GENERIC', {
+                    'allowed_values': allowed_values,
+                }, column_name))
+    return suggestions
+
+
+def _as_param_json(params: Dict[str, Any]) -> str:
+    try:
+        return json.dumps(params, default=str)
+    except Exception:
+        return '{}'
+
+
+def _compile_rule(session: Session, rule_code: str, target_table_fqn: str, column_name: str, params: Dict[str, Any]) -> Optional[str]:
+    try:
+        compiled = session.call('DQ_COMPILE_RULE_SQL', rule_code, target_table_fqn, [column_name], params)
+        return compiled
+    except Exception:
+        return None
+
+
+def _insert_config(session: Session, config_id: str, config_name: str, target_table_fqn: str, dq_config_cols: List[str]):
+    values = {
+        'CONFIG_ID': config_id,
+        'NAME': config_name,
+        'TARGET_TABLE_FQN': target_table_fqn,
+        'STATUS': 'DRAFT',
+        'CREATED_AT': datetime.utcnow(),
+        'UPDATED_AT': datetime.utcnow(),
+    }
+    cols = [c for c in values.keys() if c in dq_config_cols]
+    placeholders = ', '.join(['?'] * len(cols))
+    columns_sql = ', '.join(cols)
+    params = [values[c] for c in cols]
+    session.sql(
+        f"INSERT INTO DQ_CONFIG ({columns_sql}) VALUES ({placeholders})",
+        params=params,
+    ).collect()
+
+
+def suggest_from_profile(session: Session, PROFILE_RUN_ID: str, TARGET_TABLE_FQN: str, INCLUDED_COLUMNS: Sequence[str], CONFIG_NAME: Optional[str] = None):
+    included = [c for c in (INCLUDED_COLUMNS or []) if _normalize_name(c)]
+    dq_config_cols = _load_table_columns(session, 'DQ_CONFIG')
+    dq_check_cols = _load_table_columns(session, 'DQ_CHECK')
+    rule_library = _rule_library(session)
+
+    config_name = _normalize_name(CONFIG_NAME) or f"AUTO_FROM_PROFILE_{datetime.utcnow().date()}"
+    existing_cfg = session.sql(
+        """
+        SELECT CONFIG_ID
+        FROM DQ_CONFIG
+        WHERE TARGET_TABLE_FQN = ? AND NAME = ?
+        ORDER BY UPDATED_AT DESC
+        LIMIT 1
+        """,
+        params=[TARGET_TABLE_FQN, config_name],
+    ).collect()
+
+    if existing_cfg:
+        config_id = existing_cfg[0][0]
+        created_new = False
+    else:
+        config_id = str(uuid.uuid4())
+        created_new = True
+        _insert_config(session, config_id, config_name, TARGET_TABLE_FQN, dq_config_cols)
+
+    existing = _existing_rules(session, TARGET_TABLE_FQN, dq_check_cols)
+
+    rules_created: List[Dict[str, Any]] = []
+    rules_skipped: List[Dict[str, Any]] = []
+
+    next_index_rows = session.sql(
+        """
+        SELECT COALESCE(MAX(TRY_TO_NUMBER(CHECK_ID)), 0) AS MAX_ID
+        FROM DQ_CHECK
+        WHERE CONFIG_ID = ?
+        """,
+        params=[config_id],
+    ).collect()
+    check_counter = int(next_index_rows[0][0]) if next_index_rows else 0
+
+    for col in included:
+        features = _load_column_features(session, PROFILE_RUN_ID, col)
+        classification = _load_column_classification(session, PROFILE_RUN_ID, col)
+        suggestions = _select_rules_for_column(col, features, classification)
+        for suggestion in suggestions:
+            rule_code = suggestion['rule_code']
+            params = suggestion.get('params') or {}
+            dup_key = (col.upper(), rule_code.upper())
+            is_duplicate = False
+            if dup_key in existing:
+                params_json = _as_param_json(params)
+                for prior in existing[dup_key]:
+                    prior_params_raw = prior.get('params_raw')
+                    if prior_params_raw:
+                        try:
+                            prior_obj = json.loads(prior_params_raw)
+                        except Exception:
+                            prior_obj = prior_params_raw
+                        if prior_obj == params or prior_params_raw == params_json:
+                            is_duplicate = True
+                            break
+            if is_duplicate:
+                rules_skipped.append({'column': col, 'rule_code': rule_code, 'reason': 'already_exists'})
+                continue
+
+            compiled_rule = _compile_rule(session, rule_code, TARGET_TABLE_FQN, col, params)
+            if compiled_rule is None:
+                rules_skipped.append({'column': col, 'rule_code': rule_code, 'reason': 'compile_failed'})
+                continue
+
+            check_counter += 1
+            check_id = str(check_counter)
+            meta = rule_library.get(rule_code.upper(), {})
+            severity = meta.get('severity')
+            category = meta.get('category')
+            rule_version = meta.get('rule_version')
+            param_json = _as_param_json(params)
+            insert_values = {
+                'CONFIG_ID': config_id,
+                'CHECK_ID': check_id,
+                'TABLE_FQN': TARGET_TABLE_FQN,
+                'COLUMN_NAME': col,
+                'RULE_CODE': rule_code,
+                'RULE_VERSION': rule_version,
+                'RULE_PARAMS': param_json,
+                'PARAMS_JSON': param_json,
+                'COMPILED_RULE': compiled_rule,
+                'RULE_EXPR': compiled_rule,
+                'SEVERITY': severity,
+                'CATEGORY': category,
+                'STATUS': 'SUGGESTED',
+                'CREATED_AT': datetime.utcnow(),
+            }
+            cols = [c for c in insert_values.keys() if c in dq_check_cols]
+            placeholders = ', '.join(['?'] * len(cols))
+            column_sql = ', '.join(cols)
+            params_list = [insert_values[c] for c in cols]
+            session.sql(
+                f"INSERT INTO DQ_CHECK ({column_sql}) VALUES ({placeholders})",
+                params=params_list,
+            ).collect()
+            rules_created.append({'column': col, 'rule_code': rule_code})
+
+    summary = {
+        'config_id': config_id,
+        'config_name': config_name,
+        'created_new_config': created_new,
+        'rules_created': rules_created,
+        'rules_skipped': rules_skipped,
+    }
+    return summary
+$$;
