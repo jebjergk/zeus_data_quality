@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from typing import Any, Dict, Iterable, List, Optional
 
@@ -173,7 +174,7 @@ def suggest_config_from_profile(
     if not columns:
         raise ProfilingError("At least one included column is required")
 
-    params = [normalized, profile_run_id, columns, config_name]
+    params = [profile_run_id, normalized, columns, config_name]
     LOGGER.info(
         "profiling_v2:suggest_config target=%s profile_run_id=%s columns=%s",
         normalized,
