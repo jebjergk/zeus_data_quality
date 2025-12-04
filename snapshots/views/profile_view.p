@@ -542,6 +542,7 @@ def _render_suggest_config_summary(
                 "Column": entry.get("column"),
                 "Rule": entry.get("rule_code"),
                 "Status": "Created",
+                "Reason": "",
             }
         )
     for entry in rules_skipped:
@@ -550,6 +551,7 @@ def _render_suggest_config_summary(
                 "Column": entry.get("column"),
                 "Rule": entry.get("rule_code"),
                 "Status": "Skipped",
+                "Reason": entry.get("reason", ""),
             }
         )
 
