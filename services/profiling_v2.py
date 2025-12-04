@@ -174,7 +174,7 @@ def suggest_config_from_profile(
     if not columns:
         raise ProfilingError("At least one included column is required")
 
-    params = [profile_run_id, normalized, columns, config_name]
+    params = [profile_run_id, normalized, json.dumps(columns), config_name]
     LOGGER.info(
         "profiling_v2:suggest_config target=%s profile_run_id=%s columns=%s",
         normalized,
@@ -184,7 +184,7 @@ def suggest_config_from_profile(
     try:
         rows = _execute_sql(
             session,
-            f"CALL {SUGGEST_CONFIG_PROC}(?, ?, ?, ?)",
+            f"CALL {SUGGEST_CONFIG_PROC}(?, ?, PARSE_JSON(?), ?)",
             params=params,
         ).collect()
     except Exception as exc:  # pragma: no cover - Snowflake specific failures
