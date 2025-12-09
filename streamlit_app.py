@@ -816,6 +816,7 @@ def render_config_editor():
 
         # Restore per-column settings from existing checks
         existing_by_coltype = {}
+        library_checks_by_column: Dict[str, List[DQCheck]] = {}
         for ec in existing_checks:
             key = (ec.column_name or "", _rule_key(ec.check_type or ""))
             try:
@@ -824,6 +825,9 @@ def render_config_editor():
                 params = {}
             existing_by_coltype[key] = {"severity": ec.severity, "params": params}
 
+            if ec.rule_code and ec.column_name:
+                library_checks_by_column.setdefault(ec.column_name, []).append(ec)
+
         existing_rule_keys = {
             (ec.column_name or "", _rule_key(ec.check_type or "")) for ec in existing_checks
         }
@@ -831,6 +835,41 @@ def render_config_editor():
         for col in selected_cols:
             sk = _keyify(col)
             with st.expander(f"Column: {col}", expanded=False):
+                existing_library = library_checks_by_column.get(col, [])
+                if existing_library:
+                    st.caption("Applied rules from library")
+                    for rule in existing_library:
+                        template = active_rules.get((rule.rule_code or "").upper()) or all_rules_map.get((rule.rule_code or "").upper())
+                        label = (template.rule_id if template else (rule.rule_code or "")).upper()
+                        severity_label = rule.severity or (template.default_severity if template else "")
+                        summary_parts = [label]
+                        if severity_label:
+                            summary_parts.append(f"({severity_label})")
+                        params_text = None
+                        if isinstance(rule.rule_params, (dict, list)):
+                            parsed_params = rule.rule_params
+                        else:
+                            try:
+                                parsed_params = json.loads(rule.rule_params) if rule.rule_params else {}
+                            except Exception:
+                                parsed_params = {}
+                        if isinstance(parsed_params, dict) and parsed_params:
+                            if "min_value" in parsed_params or "max_value" in parsed_params:
+                                summary_parts.append(
+                                    f"[{parsed_params.get('min_value', '—')}–{parsed_params.get('max_value', '—')}]"
+                                )
+                            elif "allowed_values" in parsed_params:
+                                allowed_values = parsed_params.get("allowed_values") or []
+                                if isinstance(allowed_values, list):
+                                    preview = ", ".join(map(str, allowed_values[:5]))
+                                    if len(allowed_values) > 5:
+                                        preview += ", …"
+                                    params_text = f"[{preview}]"
+                            elif "ref_table" in parsed_params and "key_column" in parsed_params:
+                                params_text = f"→ {parsed_params.get('ref_table')}.{parsed_params.get('key_column')}"
+                        if params_text:
+                            summary_parts.append(params_text)
+                        st.markdown(" ".join(summary_parts))
                 sample_n = st.number_input(
                     f"Sample failing rows for {col}",
                     min_value=0, max_value=1000, value=10, key=f"samp_{sk}"
@@ -1082,6 +1121,15 @@ def render_config_editor():
                             check_type=value_dist_key,
                             params_json=json.dumps(params)
                         ))
+
+        # Preserve existing library-based checks that are not covered by the legacy widgets
+        legacy_ids = {cr.check_id for cr in check_rows}
+        for ec in existing_checks:
+            if not ec.rule_code:
+                continue
+            if ec.check_id in legacy_ids:
+                continue
+            check_rows.append(ec)
 
         # Table-level (always)
         st.markdown("### Table-level checks (always included)")
