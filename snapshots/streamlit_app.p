@@ -115,6 +115,7 @@ from utils.meta import (
     DQConfig, DQCheck,
     _q, _parse_relation_name,
     list_configs, get_config, get_checks,
+    get_library_checks, update_library_check, insert_library_check, delete_check_by_id,
     list_columns,
 )
 from utils import schedules
@@ -122,6 +123,7 @@ from services.configs import save_config_and_checks, delete_config_full
 from services.state import get_state, set_state
 from services import profiling_v2
 from services.rule_library import (
+    RuleTemplate,
     LEGACY_RULE_KEY_MAP,
     active_rule_map,
     load_active_rules_from_library,
@@ -233,6 +235,110 @@ def _format_timestamp(value: Any) -> str:
         formatted = value.strftime(fmt).strip()
         return formatted or value.strftime("%Y-%m-%d %H:%M")
     return str(value)
+
+
+def _parse_params(raw_value: Any) -> Dict[str, Any]:
+    if isinstance(raw_value, dict):
+        return raw_value
+    if isinstance(raw_value, list):
+        return {}
+    try:
+        return json.loads(raw_value) if raw_value else {}
+    except Exception:
+        return {}
+
+
+def _normalize_param_schema(raw_schema: Any) -> List[Dict[str, Any]]:
+    if raw_schema is None:
+        return []
+    normalized: List[Dict[str, Any]] = []
+    if isinstance(raw_schema, list):
+        for item in raw_schema:
+            if isinstance(item, str):
+                normalized.append({"name": item, "type": "STRING", "required": True})
+            elif isinstance(item, dict):
+                name = item.get("name")
+                if not name:
+                    continue
+                normalized.append(
+                    {
+                        "name": name,
+                        "type": item.get("type", "STRING"),
+                        "required": bool(item.get("required", True)),
+                    }
+                )
+    return normalized
+
+
+def _render_param_inputs(
+    *,
+    key_prefix: str,
+    param_schema: List[Dict[str, Any]],
+    current_values: Dict[str, Any],
+    column_options: List[str],
+) -> Tuple[Dict[str, Any], Optional[str]]:
+    values: Dict[str, Any] = {}
+    error: Optional[str] = None
+
+    for field in param_schema:
+        name = field.get("name")
+        if not name:
+            continue
+        param_type = (field.get("type") or "STRING").upper()
+        required = bool(field.get("required", True))
+        default_value = current_values.get(name)
+
+        input_key = f"{key_prefix}_{_keyify(name)}"
+        if param_type == "STRING":
+            val = st.text_input(name, value=str(default_value or ""), key=input_key)
+            if required and not val.strip():
+                error = error or f"Parameter '{name}' is required."
+            values[name] = val
+        elif param_type == "NUMBER":
+            try:
+                numeric_default = float(default_value) if default_value is not None else 0.0
+            except Exception:
+                numeric_default = 0.0
+            val = st.number_input(name, value=numeric_default, key=input_key)
+            values[name] = val
+        elif param_type == "BOOLEAN":
+            val = st.checkbox(name, value=bool(default_value), key=input_key)
+            values[name] = val
+        elif param_type == "FQN_TABLE":
+            val = st.text_input(name, value=str(default_value or ""), key=input_key)
+            if required and not val.strip():
+                error = error or f"Parameter '{name}' is required."
+            values[name] = val
+        elif param_type == "COLUMN_NAME":
+            options = column_options or [""]
+            default_index = options.index(default_value) if default_value in options else 0
+            val = st.selectbox(name, options=options, index=default_index, key=input_key)
+            values[name] = val
+        elif param_type == "STRING_LIST":
+            default_list: List[str] = []
+            if isinstance(default_value, list):
+                default_list = [str(v) for v in default_value]
+            elif isinstance(default_value, str):
+                default_list = [v.strip() for v in default_value.split(",") if v.strip()]
+            joined_default = ", ".join(default_list)
+            val = st.text_input(name, value=joined_default, key=input_key)
+            values[name] = [v.strip() for v in val.split(",") if v.strip()]
+            if required and not values[name]:
+                error = error or f"Parameter '{name}' is required."
+        else:
+            st.write(f"Unsupported parameter type: {param_type}")
+    return values, error
+
+
+def _compile_library_rule(
+    session: Any,
+    rule_code: str,
+    target_table_fqn: str,
+    column_name: str,
+    params: Dict[str, Any],
+) -> Any:
+    proc_name = f"{METADATA_DB}.{METADATA_SCHEMA}.DQ_COMPILE_RULE_SQL"
+    return session.call(proc_name, rule_code, target_table_fqn, [column_name], params)
 
 
 def _get_page_from_query_params() -> Optional[str]:
@@ -578,13 +684,20 @@ def render_config_editor():
     sel_id: Optional[str] = st.session_state.get("selected_config_id")
     cfg = get_config(session, sel_id) if sel_id else None
     existing_checks = get_checks(session, sel_id) if sel_id else []
+    library_checks = get_library_checks(session, sel_id) if sel_id else []
 
     rule_templates = load_rule_library(
         session, METADATA_DB, METADATA_SCHEMA, include_inactive=True
     )
     rule_options = load_active_rules_from_library(session, METADATA_DB, METADATA_SCHEMA)
     active_rules = active_rule_map(rule_templates)
-    all_rules_map = {t.rule_id.upper(): t for t in rule_templates if t.rule_id}
+    active_rules_by_code = {t.rule_code.upper(): t for t in rule_templates if t.enabled and t.rule_code}
+    all_rules_map: Dict[str, RuleTemplate] = {}
+    for t in rule_templates:
+        if t.rule_id:
+            all_rules_map[t.rule_id.upper()] = t
+        if t.rule_code:
+            all_rules_map[t.rule_code.upper()] = t
     logging.info("dq_config: loaded %d rule options from DQ_RULE_LIBRARY", len(rule_options))
 
     if not rule_options:
@@ -816,7 +929,7 @@ def render_config_editor():
 
         # Restore per-column settings from existing checks
         existing_by_coltype = {}
-        library_checks_by_column: Dict[str, List[DQCheck]] = {}
+        library_checks_by_column: Dict[str, List[Dict[str, Any]]] = {}
         for ec in existing_checks:
             key = (ec.column_name or "", _rule_key(ec.check_type or ""))
             try:
@@ -825,8 +938,10 @@ def render_config_editor():
                 params = {}
             existing_by_coltype[key] = {"severity": ec.severity, "params": params}
 
-            if ec.rule_code and ec.column_name:
-                library_checks_by_column.setdefault(ec.column_name, []).append(ec)
+        for lib_row in library_checks:
+            col_name = lib_row.get("column_name")
+            if col_name:
+                library_checks_by_column.setdefault(col_name, []).append(lib_row)
 
         existing_rule_keys = {
             (ec.column_name or "", _rule_key(ec.check_type or "")) for ec in existing_checks
@@ -836,23 +951,24 @@ def render_config_editor():
             sk = _keyify(col)
             with st.expander(f"Column: {col}", expanded=False):
                 existing_library = library_checks_by_column.get(col, [])
+                edit_target = st.session_state.get("dq_edit_target")
+                add_target = st.session_state.get("dq_add_target")
                 if existing_library:
                     st.caption("Applied rules from library")
                     for rule in existing_library:
-                        template = active_rules.get((rule.rule_code or "").upper()) or all_rules_map.get((rule.rule_code or "").upper())
-                        label = (template.rule_id if template else (rule.rule_code or "")).upper()
-                        severity_label = rule.severity or (template.default_severity if template else "")
+                        rule_code_key = (rule.get("rule_code") or "").upper()
+                        template = (
+                            active_rules_by_code.get(rule_code_key)
+                            or all_rules_map.get(rule_code_key)
+                            or all_rules_map.get((rule.get("rule_id") or "").upper())
+                        )
+                        label = (template.rule_id if template else (rule.get("rule_id") or rule.get("rule_code") or "")).upper()
+                        severity_label = rule.get("severity") or (template.severity if template else rule.get("rule_severity"))
                         summary_parts = [label]
                         if severity_label:
                             summary_parts.append(f"({severity_label})")
                         params_text = None
-                        if isinstance(rule.rule_params, (dict, list)):
-                            parsed_params = rule.rule_params
-                        else:
-                            try:
-                                parsed_params = json.loads(rule.rule_params) if rule.rule_params else {}
-                            except Exception:
-                                parsed_params = {}
+                        parsed_params = _parse_params(rule.get("rule_params") or rule.get("params_json"))
                         if isinstance(parsed_params, dict) and parsed_params:
                             if "min_value" in parsed_params or "max_value" in parsed_params:
                                 summary_parts.append(
@@ -869,7 +985,155 @@ def render_config_editor():
                                 params_text = f"→ {parsed_params.get('ref_table')}.{parsed_params.get('key_column')}"
                         if params_text:
                             summary_parts.append(params_text)
-                        st.markdown(" ".join(summary_parts))
+
+                        summary_col, action_col = st.columns([6, 2])
+                        with summary_col:
+                            st.markdown(" ".join(summary_parts))
+                        with action_col:
+                            if st.button("Edit", key=f"edit_lib_{rule.get('check_id')}"):
+                                st.session_state["dq_edit_target"] = rule.get("check_id")
+                                st.session_state.pop("dq_add_target", None)
+                                st.rerun()
+                            if st.button("Delete", key=f"del_lib_{rule.get('check_id')}"):
+                                delete_check_by_id(session, str(rule.get("check_id")))
+                                st.success("Rule removed.")
+                                st.rerun()
+
+                        if edit_target == rule.get("check_id"):
+                            param_schema = _normalize_param_schema(
+                                template.param_schema if template else rule.get("param_schema")
+                            )
+                            default_params_raw = template.default_params if template else _parse_params(rule.get("default_params"))
+                            default_params = default_params_raw if isinstance(default_params_raw, dict) else {}
+                            start_values = {**default_params, **(parsed_params if isinstance(parsed_params, dict) else {})}
+                            with st.form(f"edit_form_{rule.get('check_id')}"):
+                                st.markdown(f"**Edit {label}**")
+                                rendered_params, error = _render_param_inputs(
+                                    key_prefix=f"edit_{rule.get('check_id')}",
+                                    param_schema=param_schema,
+                                    current_values=start_values,
+                                    column_options=available_cols,
+                                )
+                                save_btn = st.form_submit_button("Save")
+                                cancel_btn = st.form_submit_button("Cancel")
+                                if cancel_btn:
+                                    st.session_state.pop("dq_edit_target", None)
+                                    st.rerun()
+                                if save_btn:
+                                    if error:
+                                        st.error(error)
+                                    elif not target_table:
+                                        st.error("Select a target table before editing rules.")
+                                    else:
+                                        try:
+                                            compiled_rule = _compile_library_rule(
+                                                session,
+                                                rule.get("rule_code"),
+                                                target_table,
+                                                col,
+                                                rendered_params,
+                                            )
+                                        except Exception as exc:
+                                            st.error(f"Rule compile failed: {exc}")
+                                        else:
+                                            update_library_check(
+                                                session,
+                                                check_id=str(rule.get("check_id")),
+                                                rule_params=rendered_params,
+                                                rule_version=(template.version if template else rule.get("version")),
+                                                compiled_rule=compiled_rule,
+                                                rule_expr=compiled_rule,
+                                                severity=template.severity if template else severity_label,
+                                            )
+                                            st.success("Rule updated.")
+                                            st.session_state.pop("dq_edit_target", None)
+                                            st.rerun()
+
+                add_clicked = st.button("➕ Add rule", key=f"add_rule_btn_{sk}")
+                if add_clicked:
+                    st.session_state["dq_add_target"] = col
+                    st.session_state.pop("dq_edit_target", None)
+                if add_target == col:
+                    available_templates = [
+                        t for t in rule_templates if t.enabled and (t.scope or "").upper() == "COLUMN"
+                    ]
+                    template_labels = {
+                        t.rule_code: f"{t.rule_id} ({t.category or ''})".strip()
+                        for t in available_templates
+                    }
+                    selected_code = st.selectbox(
+                        "Rule template",
+                        options=list(template_labels.keys()) or [""],
+                        format_func=lambda code: template_labels.get(code, code),
+                        key=f"add_rule_sel_{sk}",
+                    )
+                    selected_template = next((t for t in available_templates if t.rule_code == selected_code), None)
+                    param_schema = _normalize_param_schema(selected_template.param_schema if selected_template else [])
+                    defaults_raw = selected_template.default_params if selected_template else {}
+                    defaults = defaults_raw if isinstance(defaults_raw, dict) else {}
+                    with st.form(f"add_rule_form_{sk}"):
+                        st.markdown("**Add library rule**")
+                        rendered_params, error = _render_param_inputs(
+                            key_prefix=f"add_{sk}",
+                            param_schema=param_schema,
+                            current_values=defaults,
+                            column_options=available_cols,
+                        )
+                        save_new = st.form_submit_button("Save")
+                        cancel_new = st.form_submit_button("Cancel")
+                        if cancel_new:
+                            st.session_state.pop("dq_add_target", None)
+                            st.rerun()
+                        if save_new:
+                            if error:
+                                st.error(error)
+                            elif not target_table:
+                                st.error("Select a target table before adding rules.")
+                            elif not selected_template:
+                                st.error("Select a rule to add.")
+                            elif not cfg or not getattr(cfg, "config_id", None):
+                                st.error("Save the configuration before adding rules.")
+                            else:
+                                duplicate = False
+                                for existing in existing_library:
+                                    existing_params = _parse_params(existing.get("rule_params") or existing.get("params_json"))
+                                    if (
+                                        (existing.get("rule_code") or "").upper()
+                                        == (selected_template.rule_code or "").upper()
+                                        and existing_params == rendered_params
+                                    ):
+                                        duplicate = True
+                                        break
+                                if duplicate:
+                                    st.warning("This rule already exists for this column.")
+                                else:
+                                    try:
+                                        compiled_rule = _compile_library_rule(
+                                            session,
+                                            selected_template.rule_code,
+                                            target_table,
+                                            col,
+                                            rendered_params,
+                                        )
+                                    except Exception as exc:
+                                        st.error(f"Rule compile failed: {exc}")
+                                    else:
+                                        insert_library_check(
+                                            session,
+                                            config_id=(cfg.config_id if cfg else ""),
+                                            table_fqn=target_table,
+                                            column_name=col,
+                                            rule_code=selected_template.rule_code,
+                                            rule_id=selected_template.rule_id,
+                                            rule_params=rendered_params,
+                                            rule_version=selected_template.version,
+                                            compiled_rule=compiled_rule,
+                                            severity=selected_template.severity or "ERROR",
+                                            sample_rows=0,
+                                        )
+                                        st.success("Rule added.")
+                                        st.session_state.pop("dq_add_target", None)
+                                        st.rerun()
                 sample_n = st.number_input(
                     f"Sample failing rows for {col}",
                     min_value=0, max_value=1000, value=10, key=f"samp_{sk}"

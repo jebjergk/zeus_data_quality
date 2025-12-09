@@ -7,9 +7,11 @@ client is not installed.  Snowflake objects are loaded lazily via duck typing.
 
 from __future__ import annotations
 import importlib
+import json
 from dataclasses import dataclass
 import math
 from typing import Any, Dict, List, Optional, Tuple
+from uuid import uuid4
 
 try:
     from snowflake.snowpark import Session
@@ -77,6 +79,10 @@ __all__ = [
     "list_configs",
     "get_config",
     "delete_config",
+    "get_library_checks",
+    "update_library_check",
+    "insert_library_check",
+    "delete_check_by_id",
     "upsert_checks",
     "get_checks",
     "list_databases",
@@ -385,6 +391,135 @@ def delete_config(session: Session, config_id: str):
     if not session: return
     session.sql(f"DELETE FROM {_q(DQ_CHECK_TBL)} WHERE CONFIG_ID = ?", params=[config_id]).collect()
     session.sql(f"DELETE FROM {_q(DQ_CONFIG_TBL)} WHERE CONFIG_ID = ?", params=[config_id]).collect()
+
+
+def get_library_checks(session: Session, config_id: str) -> List[Dict[str, Any]]:
+    """Load DQ_CHECK rows joined to the rule library for a config."""
+
+    if not session or not config_id:
+        return []
+
+    rule_table = _q(f"{METADATA_DB}.{METADATA_SCHEMA}.DQ_RULE_LIBRARY")
+    df = session.sql(
+        f"""
+        SELECT
+          c.CONFIG_ID,
+          c.CHECK_ID,
+          c.TABLE_FQN,
+          c.COLUMN_NAME,
+          c.RULE_EXPR,
+          c.SEVERITY,
+          c.SAMPLE_ROWS,
+          c.CHECK_TYPE,
+          c.PARAMS_JSON,
+          c.RULE_CODE,
+          c.RULE_PARAMS,
+          c.RULE_VERSION,
+          c.COMPILED_RULE,
+          r.RULE_ID,
+          r.NAME,
+          r.CATEGORY,
+          r.SEVERITY AS RULE_SEVERITY,
+          r.PARAM_SCHEMA,
+          r.DEFAULT_PARAMS,
+          r.VERSION,
+          r.SCOPE
+        FROM {_q(DQ_CHECK_TBL)} c
+        JOIN {rule_table} r
+          ON c.RULE_CODE = r.RULE_CODE
+        WHERE c.CONFIG_ID = ?
+        """,
+        params=[config_id],
+    )
+    out: List[Dict[str, Any]] = []
+    for row in df.collect():
+        out.append(_normalize_row(row))
+    return out
+
+
+def update_library_check(
+    session: Session,
+    *,
+    check_id: str,
+    rule_params: Dict[str, Any],
+    rule_version: Optional[str],
+    compiled_rule: Optional[str],
+    rule_expr: Optional[str],
+    severity: Optional[str] = None,
+):
+    if not session or not check_id:
+        return
+    serialized_params = json.dumps(rule_params, default=str) if rule_params is not None else None
+    session.sql(
+        f"""
+        UPDATE {_q(DQ_CHECK_TBL)}
+        SET RULE_PARAMS = :1,
+            RULE_VERSION = :2,
+            COMPILED_RULE = :3,
+            RULE_EXPR = :4,
+            SEVERITY = COALESCE(:5, SEVERITY),
+            UPDATED_AT = CURRENT_TIMESTAMP()
+        WHERE CHECK_ID = :6
+        """,
+        params=[serialized_params, rule_version, compiled_rule, rule_expr, severity, check_id],
+    ).collect()
+
+
+def insert_library_check(
+    session: Session,
+    *,
+    config_id: str,
+    table_fqn: str,
+    column_name: str,
+    rule_code: str,
+    rule_id: str,
+    rule_params: Dict[str, Any],
+    rule_version: Optional[str],
+    compiled_rule: Optional[str],
+    severity: Optional[str],
+    sample_rows: int = 0,
+) -> str:
+    if not session:
+        return ""
+
+    ensure_meta_tables(session)
+    check_id = str(uuid4())
+    serialized_params = json.dumps(rule_params, default=str) if rule_params is not None else None
+    session.sql(
+        f"""
+        INSERT INTO {_q(DQ_CHECK_TBL)} (
+          CONFIG_ID, CHECK_ID, TABLE_FQN, COLUMN_NAME, RULE_EXPR, SEVERITY,
+          SAMPLE_ROWS, CHECK_TYPE, PARAMS_JSON, RULE_CODE, RULE_PARAMS,
+          RULE_VERSION, COMPILED_RULE, UPDATED_AT
+        )
+        SELECT :1, :2, :3, :4, :5, :6, :7, :8, :9, :10, :11, :12, :13, CURRENT_TIMESTAMP()
+        """,
+        params=[
+            config_id,
+            check_id,
+            table_fqn,
+            column_name,
+            compiled_rule,
+            severity,
+            int(sample_rows),
+            rule_id,
+            serialized_params,
+            rule_code,
+            serialized_params,
+            rule_version,
+            compiled_rule,
+        ],
+    ).collect()
+    return check_id
+
+
+def delete_check_by_id(session: Session, check_id: str):
+    if not session or not check_id:
+        return
+    session.sql(
+        f"DELETE FROM {_q(DQ_CHECK_TBL)} WHERE CHECK_ID = :1",
+        params=[check_id],
+    ).collect()
 
 def upsert_checks(session: Session, checks: List[DQCheck]):
     if not session or not checks: return

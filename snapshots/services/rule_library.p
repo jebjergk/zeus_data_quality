@@ -17,13 +17,19 @@ from utils.meta import _q
 @dataclass(frozen=True)
 class RuleTemplate:
     rule_uid: str
+    rule_code: str
     rule_id: str
-    check_type: Optional[str]
-    expression_template: Optional[str]
+    scope: Optional[str]
+    category: Optional[str]
+    severity: Optional[str]
+    engine_type: Optional[str]
+    expression: Optional[str]
     param_schema: Any
-    default_severity: Optional[str]
+    default_params: Any
+    enabled: bool
+    version: Optional[str]
+    check_type: Optional[str]
     description: Optional[str]
-    active: bool
 
 
 # Compatibility shim: map legacy check_type values stored in DQ_CHECK to
@@ -62,13 +68,19 @@ def _row_to_dict(row: Any) -> Dict[str, Any]:
     try:
         return {
             "RULE_UID": row[0],
-            "RULE_ID": row[1],
-            "CHECK_TYPE": row[2],
-            "EXPRESSION_TEMPLATE": row[3],
-            "PARAM_SCHEMA": row[4],
-            "DEFAULT_SEVERITY": row[5],
-            "DESCRIPTION": row[6],
-            "ACTIVE": row[7],
+            "RULE_CODE": row[1],
+            "RULE_ID": row[2],
+            "SCOPE": row[3],
+            "CATEGORY": row[4],
+            "SEVERITY": row[5],
+            "ENGINE_TYPE": row[6],
+            "EXPRESSION": row[7],
+            "PARAM_SCHEMA": row[8],
+            "DEFAULT_PARAMS": row[9],
+            "ENABLED": row[10],
+            "VERSION": row[11],
+            "CHECK_TYPE": row[12],
+            "DESCRIPTION": row[13],
         }
     except Exception:
         return {}
@@ -88,17 +100,23 @@ def load_rule_library(
         if metadata_db and metadata_schema
         else "DQ_RULE_LIBRARY"
     )
-    where_clause = "" if include_inactive else "WHERE ACTIVE"
+    where_clause = "" if include_inactive else "WHERE ENABLED"
     sql = f"""
         SELECT
             RULE_UID,
+            RULE_CODE,
             RULE_ID,
-            CHECK_TYPE,
-            EXPRESSION_TEMPLATE,
+            SCOPE,
+            CATEGORY,
+            SEVERITY,
+            ENGINE_TYPE,
+            EXPRESSION,
             PARAM_SCHEMA,
-            DEFAULT_SEVERITY,
-            DESCRIPTION,
-            ACTIVE
+            DEFAULT_PARAMS,
+            ENABLED,
+            VERSION,
+            CHECK_TYPE,
+            DESCRIPTION
         FROM {table}
         {where_clause}
     """
@@ -114,13 +132,19 @@ def load_rule_library(
         templates.append(
             RuleTemplate(
                 rule_uid=str(data.get("RULE_UID", "")),
+                rule_code=str(data.get("RULE_CODE", "")),
                 rule_id=str(data.get("RULE_ID", "")),
-                check_type=(data.get("CHECK_TYPE") or None),
-                expression_template=(data.get("EXPRESSION_TEMPLATE") or None),
+                scope=(data.get("SCOPE") or None),
+                category=(data.get("CATEGORY") or None),
+                severity=(data.get("SEVERITY") or None),
+                engine_type=(data.get("ENGINE_TYPE") or None),
+                expression=(data.get("EXPRESSION") or None),
                 param_schema=_parse_param_schema(data.get("PARAM_SCHEMA")),
-                default_severity=(data.get("DEFAULT_SEVERITY") or None),
+                default_params=_parse_param_schema(data.get("DEFAULT_PARAMS")),
+                enabled=bool(data.get("ENABLED", True)),
+                version=(data.get("VERSION") or None),
+                check_type=(data.get("CHECK_TYPE") or None),
                 description=(data.get("DESCRIPTION") or None),
-                active=bool(data.get("ACTIVE", True)),
             )
         )
     return templates
@@ -143,7 +167,7 @@ def normalize_rule_key(
 
 
 def active_rule_map(rules: Iterable[RuleTemplate]) -> Dict[str, RuleTemplate]:
-    return {r.rule_id.upper(): r for r in rules if r.active and r.rule_id}
+    return {r.rule_id.upper(): r for r in rules if r.enabled and r.rule_id}
 
 
 def load_active_rules_from_library(
@@ -166,7 +190,7 @@ def load_active_rules_from_library(
                 "rule_key": template.rule_id.upper(),
                 "label": template.rule_id,
                 "check_type": template.check_type,
-                "default_severity": template.default_severity,
+                "default_severity": template.severity,
                 "description": template.description,
             }
         )
