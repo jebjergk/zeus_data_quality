@@ -116,7 +116,7 @@ from utils.meta import (
     _q, _parse_relation_name,
     list_configs, get_config, get_checks,
     get_library_checks, update_library_check, insert_library_check, delete_check_by_id,
-    list_columns,
+    list_columns, list_tables,
 )
 from utils import schedules
 from services.configs import save_config_and_checks, delete_config_full
@@ -251,6 +251,12 @@ def _parse_params(raw_value: Any) -> Dict[str, Any]:
 def _normalize_param_schema(raw_schema: Any) -> List[Dict[str, Any]]:
     if raw_schema is None:
         return []
+    if isinstance(raw_schema, str):
+        try:
+            raw_schema = json.loads(raw_schema)
+        except Exception:
+            return []
+
     normalized: List[Dict[str, Any]] = []
     if isinstance(raw_schema, list):
         for item in raw_schema:
@@ -276,6 +282,8 @@ def _render_param_inputs(
     param_schema: List[Dict[str, Any]],
     current_values: Dict[str, Any],
     column_options: List[str],
+    table_options: Optional[List[str]] = None,
+    column_lookup: Optional[Any] = None,
 ) -> Tuple[Dict[str, Any], Optional[str]]:
     values: Dict[str, Any] = {}
     error: Optional[str] = None
@@ -305,12 +313,33 @@ def _render_param_inputs(
             val = st.checkbox(name, value=bool(default_value), key=input_key)
             values[name] = val
         elif param_type == "FQN_TABLE":
-            val = st.text_input(name, value=str(default_value or ""), key=input_key)
+            options = table_options or []
+            default_text = str(default_value or "")
+            if default_text and default_text not in options:
+                options = [default_text] + options
+            val = (
+                st.selectbox(
+                    name,
+                    options=options or [default_text],
+                    index=(options or [default_text]).index(default_text)
+                    if default_text in (options or [default_text])
+                    else 0,
+                    key=input_key,
+                )
+                if options
+                else st.text_input(name, value=default_text, key=input_key)
+            )
             if required and not val.strip():
                 error = error or f"Parameter '{name}' is required."
             values[name] = val
         elif param_type == "COLUMN_NAME":
-            options = column_options or [""]
+            ref_table = values.get("ref_table") or current_values.get("ref_table")
+            options = (
+                column_lookup(ref_table)
+                if column_lookup and ref_table
+                else column_options or [""]
+            )
+            options = options or [""]
             default_index = options.index(default_value) if default_value in options else 0
             val = st.selectbox(name, options=options, index=default_index, key=input_key)
             values[name] = val
@@ -339,6 +368,37 @@ def _compile_library_rule(
 ) -> Any:
     proc_name = f"{METADATA_DB}.{METADATA_SCHEMA}.DQ_COMPILE_RULE_SQL"
     return session.call(proc_name, rule_code, target_table_fqn, [column_name], params)
+
+
+def _related_table_options(session_obj: Any, target_table_fqn: str) -> List[str]:
+    db, schema, _ = _parse_relation_name(target_table_fqn or "")
+    if not session_obj or not db or not schema:
+        return []
+    try:
+        return list_tables(
+            session_obj,
+            database=db,
+            schema=schema,
+            editor_target_fqn=target_table_fqn,
+        )
+    except Exception:
+        return []
+
+
+def _columns_for_table(session_obj: Any, table_fqn: str) -> List[str]:
+    db, schema, table = _parse_relation_name(table_fqn or "")
+    if not session_obj or not db or not schema or not table:
+        return []
+    try:
+        return list_columns(
+            session_obj,
+            database=db,
+            schema=schema,
+            table=table,
+            editor_target_fqn=table_fqn,
+        )
+    except Exception:
+        return []
 
 
 def _get_page_from_query_params() -> Optional[str]:
@@ -947,6 +1007,9 @@ def render_config_editor():
             (ec.column_name or "", _rule_key(ec.check_type or "")) for ec in existing_checks
         }
 
+        table_suggestions = _related_table_options(session, target_table)
+        column_lookup = lambda tbl: _columns_for_table(session, tbl)
+
         for col in selected_cols:
             sk = _keyify(col)
             with st.expander(f"Column: {col}", expanded=False):
@@ -1017,6 +1080,8 @@ def render_config_editor():
                                     param_schema=param_schema,
                                     current_values=start_values,
                                     column_options=available_cols,
+                                    table_options=table_suggestions,
+                                    column_lookup=column_lookup,
                                 )
                                 save_btn = st.form_submit_button("Save", key=f"edit_save_{rule.get('check_id')}")
                                 cancel_btn = st.form_submit_button("Cancel", key=f"edit_cancel_{rule.get('check_id')}")
@@ -1057,6 +1122,7 @@ def render_config_editor():
                 if add_clicked:
                     st.session_state["dq_add_target"] = col
                     st.session_state.pop("dq_edit_target", None)
+                    st.rerun()
                 if add_target == col:
                     available_templates = [
                         t for t in rule_templates if t.enabled and (t.scope or "").upper() == "COLUMN"
@@ -1071,17 +1137,22 @@ def render_config_editor():
                         format_func=lambda code: template_labels.get(code, code),
                         key=f"add_rule_sel_{sk}",
                     )
+                    st.session_state[f"_last_template_sel_{sk}"] = selected_code
                     selected_template = next((t for t in available_templates if t.rule_code == selected_code), None)
                     param_schema = _normalize_param_schema(selected_template.param_schema if selected_template else [])
                     defaults_raw = selected_template.default_params if selected_template else {}
                     defaults = defaults_raw if isinstance(defaults_raw, dict) else {}
                     with st.container():
                         st.markdown("**Add library rule**")
+                        if selected_template and selected_template.description:
+                            st.caption(selected_template.description)
                         rendered_params, error = _render_param_inputs(
-                            key_prefix=f"add_{sk}",
+                            key_prefix=f"add_{sk}_{selected_code or 'none'}",
                             param_schema=param_schema,
                             current_values=defaults,
                             column_options=available_cols,
+                            table_options=table_suggestions,
+                            column_lookup=column_lookup,
                         )
                         save_new = st.form_submit_button("Save", key=f"add_save_{sk}")
                         cancel_new = st.form_submit_button("Cancel", key=f"add_cancel_{sk}")
