@@ -42,6 +42,10 @@ PROFILE_V2_SUGGEST_CONFIG_NO_RUN_ID = (
     "Run profiling first to record a profiling run ID before suggesting a config."
 )
 PROFILE_V2_SUGGEST_CONFIG_ERROR = "Failed to suggest DQ config: {error}"
+PROFILE_V2_SUGGEST_CONFIG_ERROR_HINT = (
+    "If this is a DSL compilation error, check the Rule Library or parameters "
+    "for the generated rules."
+)
 PROFILE_V2_SUGGEST_CONFIG_SUCCESS = (
     "✅ DQ Config suggested successfully for {table}. Created/updated config: {config}. "
     "Rules created: {created}, skipped: {skipped}."
