@@ -122,7 +122,7 @@ def _existing_rules(session: Session, table_fqn: str, dq_check_cols: List[str]) 
     base_cols = ', '.join(['TABLE_FQN'] + selectors + columns) if columns else 'TABLE_FQN, COLUMN_NAME'
     rows = session.sql(
         f"SELECT {base_cols} FROM {DQ_CHECK_TABLE} WHERE TABLE_FQN = :table_fqn",
-        params=[table_fqn],
+        params={'table_fqn': table_fqn},
     ).collect()
     out: Dict[Tuple[str, str], List[Dict[str, Any]]] = {}
     for r in rows:
@@ -179,7 +179,7 @@ def _load_column_features(session: Session, profile_run_id: str, column_name: st
         ORDER BY UPDATED_AT DESC
         LIMIT 1
         """,
-        params=[profile_run_id, column_name],
+        params={'profile_run_id': profile_run_id, 'column_name': column_name},
     ).collect()
     return rows[0].as_dict() if rows else {}
 
@@ -193,7 +193,7 @@ def _load_column_classification(session: Session, table_fqn: str, column_name: s
         ORDER BY CLASSIFIED_AT DESC
         LIMIT 1
         """,
-        params=[table_fqn, column_name],
+        params={'table_fqn': table_fqn, 'column_name': column_name},
     ).collect()
     if not rows:
         return None
@@ -328,7 +328,7 @@ def suggest_from_profile(session: Session, PROFILE_RUN_ID: str, TARGET_TABLE_FQN
         ORDER BY UPDATED_AT DESC
         LIMIT 1
         """,
-        params=[TARGET_TABLE_FQN, config_name],
+        params={'target_table_fqn': TARGET_TABLE_FQN, 'config_name': config_name},
     ).collect()
 
     if existing_cfg:
@@ -350,7 +350,7 @@ def suggest_from_profile(session: Session, PROFILE_RUN_ID: str, TARGET_TABLE_FQN
         FROM {DQ_CHECK_TABLE}
         WHERE CONFIG_ID = :config_id
         """,
-        params=[config_id],
+        params={'config_id': config_id},
     ).collect()
     check_counter = int(next_index_rows[0][0]) if next_index_rows else 0
 
