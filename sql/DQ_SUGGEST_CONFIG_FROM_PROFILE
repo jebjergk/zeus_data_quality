@@ -52,10 +52,10 @@ def _load_table_columns(session: Session, table_name: str) -> List[str]:
         """
         SELECT UPPER(COLUMN_NAME) AS COLUMN_NAME
         FROM INFORMATION_SCHEMA.COLUMNS
-        WHERE TABLE_NAME = UPPER(:table_name)
-          AND TABLE_SCHEMA = UPPER(:schema_name)
+        WHERE TABLE_NAME = UPPER(?)
+          AND TABLE_SCHEMA = UPPER(?)
         """,
-        params={'table_name': table_only, 'schema_name': schema_name},
+        params=[table_only, schema_name],
     ).collect()
     return [r[0] for r in cols]
 
