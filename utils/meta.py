@@ -417,7 +417,6 @@ def get_library_checks(session: Session, config_id: str) -> List[Dict[str, Any]]
           c.RULE_VERSION,
           c.COMPILED_RULE,
           r.RULE_ID,
-          r.NAME,
           r.CATEGORY,
           r.SEVERITY AS RULE_SEVERITY,
           r.PARAM_SCHEMA,
