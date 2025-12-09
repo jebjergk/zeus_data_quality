@@ -113,6 +113,10 @@ class DQCheck:
     sample_rows: int = 0
     check_type: Optional[str] = None
     params_json: Optional[str] = None
+    rule_code: Optional[str] = None
+    rule_params: Optional[str] = None
+    rule_version: Optional[str] = None
+    compiled_rule: Optional[str] = None
 
 # ---------- Helpers ----------
 def _q(ident: str) -> str:
@@ -277,9 +281,17 @@ def ensure_meta_tables(session: Session):
           SAMPLE_ROWS NUMBER DEFAULT 0,
           CHECK_TYPE STRING,
           PARAMS_JSON STRING,
+          RULE_CODE STRING,
+          RULE_PARAMS STRING,
+          RULE_VERSION STRING,
+          COMPILED_RULE STRING,
           PRIMARY KEY (CONFIG_ID, CHECK_ID)
         )
     """).collect()
+    session.sql(f"ALTER TABLE {_q(DQ_CHECK_TBL)} ADD COLUMN IF NOT EXISTS RULE_CODE STRING").collect()
+    session.sql(f"ALTER TABLE {_q(DQ_CHECK_TBL)} ADD COLUMN IF NOT EXISTS RULE_PARAMS STRING").collect()
+    session.sql(f"ALTER TABLE {_q(DQ_CHECK_TBL)} ADD COLUMN IF NOT EXISTS RULE_VERSION STRING").collect()
+    session.sql(f"ALTER TABLE {_q(DQ_CHECK_TBL)} ADD COLUMN IF NOT EXISTS COMPILED_RULE STRING").collect()
 
 # ---------- CRUD ----------
 def upsert_config(session: Session, cfg: DQConfig):
@@ -381,20 +393,51 @@ def upsert_checks(session: Session, checks: List[DQCheck]):
     session.sql(f"DELETE FROM {_q(DQ_CHECK_TBL)} WHERE CONFIG_ID = ?", params=[cfg_id]).collect()
     for c in checks:
         session.sql(f"""
-            INSERT INTO {_q(DQ_CHECK_TBL)} (CONFIG_ID, CHECK_ID, TABLE_FQN, COLUMN_NAME, RULE_EXPR, SEVERITY, SAMPLE_ROWS, CHECK_TYPE, PARAMS_JSON)
-            SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?
-        """, params=[c.config_id, c.check_id, c.table_fqn, c.column_name, c.rule_expr, c.severity, int(c.sample_rows), c.check_type, c.params_json]).collect()
+            INSERT INTO {_q(DQ_CHECK_TBL)} (
+              CONFIG_ID, CHECK_ID, TABLE_FQN, COLUMN_NAME, RULE_EXPR, SEVERITY,
+              SAMPLE_ROWS, CHECK_TYPE, PARAMS_JSON, RULE_CODE, RULE_PARAMS,
+              RULE_VERSION, COMPILED_RULE
+            )
+            SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+        """, params=[
+            c.config_id, c.check_id, c.table_fqn, c.column_name, c.rule_expr,
+            c.severity, int(c.sample_rows), c.check_type, c.params_json,
+            c.rule_code, c.rule_params, c.rule_version, c.compiled_rule
+        ]).collect()
 
 def get_checks(session: Session, config_id: str) -> List[DQCheck]:
     if not session: return []
-    df = session.sql(f"SELECT CONFIG_ID, CHECK_ID, TABLE_FQN, COLUMN_NAME, RULE_EXPR, SEVERITY, SAMPLE_ROWS, CHECK_TYPE, PARAMS_JSON FROM {_q(DQ_CHECK_TBL)} WHERE CONFIG_ID = ? ORDER BY CHECK_ID", params=[config_id])
+    df = session.sql(
+        f"""
+        SELECT
+          CONFIG_ID,
+          CHECK_ID,
+          TABLE_FQN,
+          COLUMN_NAME,
+          RULE_EXPR,
+          SEVERITY,
+          SAMPLE_ROWS,
+          CHECK_TYPE,
+          PARAMS_JSON,
+          RULE_CODE,
+          RULE_PARAMS,
+          RULE_VERSION,
+          COMPILED_RULE
+        FROM {_q(DQ_CHECK_TBL)}
+        WHERE CONFIG_ID = ?
+        ORDER BY CHECK_ID
+        """,
+        params=[config_id],
+    )
     out: List[DQCheck] = []
     for r in df.collect():
         d = _normalize_row(r)
         out.append(DQCheck(
             config_id=d["config_id"], check_id=d["check_id"], table_fqn=d["table_fqn"],
             column_name=d.get("column_name"), rule_expr=d["rule_expr"], severity=d.get("severity") or "ERROR",
-            sample_rows=int(d.get("sample_rows") or 0), check_type=d.get("check_type"), params_json=d.get("params_json")
+            sample_rows=int(d.get("sample_rows") or 0), check_type=d.get("check_type"), params_json=d.get("params_json"),
+            rule_code=d.get("rule_code"), rule_params=d.get("rule_params"),
+            rule_version=d.get("rule_version"), compiled_rule=d.get("compiled_rule")
         ))
     return out
 
