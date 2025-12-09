@@ -990,11 +990,15 @@ def render_config_editor():
                         with summary_col:
                             st.markdown(" ".join(summary_parts))
                         with action_col:
-                            if st.button("Edit", key=f"edit_lib_{rule.get('check_id')}"):
+                            if st.form_submit_button(
+                                "Edit", key=f"edit_lib_{rule.get('check_id')}"
+                            ):
                                 st.session_state["dq_edit_target"] = rule.get("check_id")
                                 st.session_state.pop("dq_add_target", None)
                                 st.rerun()
-                            if st.button("Delete", key=f"del_lib_{rule.get('check_id')}"):
+                            if st.form_submit_button(
+                                "Delete", key=f"del_lib_{rule.get('check_id')}"
+                            ):
                                 delete_check_by_id(session, str(rule.get("check_id")))
                                 st.success("Rule removed.")
                                 st.rerun()
@@ -1049,7 +1053,7 @@ def render_config_editor():
                                             st.session_state.pop("dq_edit_target", None)
                                             st.rerun()
 
-                add_clicked = st.button("➕ Add rule", key=f"add_rule_btn_{sk}")
+                add_clicked = st.form_submit_button("➕ Add rule", key=f"add_rule_btn_{sk}")
                 if add_clicked:
                     st.session_state["dq_add_target"] = col
                     st.session_state.pop("dq_edit_target", None)
