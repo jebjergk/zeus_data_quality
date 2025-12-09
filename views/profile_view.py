@@ -578,7 +578,23 @@ def _render_suggest_config_action(
         ui_strings.PROFILE_V2_SUGGEST_CONFIG_BUTTON,
         use_container_width=False,
     )
+
+    stored_result = st.session_state.get("last_suggest_config_result", {})
+    stored_summary: Dict[str, Any] = {}
+    stored_config_name: Optional[str] = None
+    if isinstance(stored_result, dict) and stored_result.get("table_fqn") == table_fqn:
+        summary_candidate = stored_result.get("summary")
+        if isinstance(summary_candidate, dict):
+            stored_summary = summary_candidate
+        stored_config_name = stored_result.get("config_name")
+
     if not suggest_button:
+        if stored_summary:
+            _render_suggest_config_summary(
+                stored_summary,
+                table_fqn,
+                stored_config_name or _default_config_name(table_fqn),
+            )
         return
 
     included_columns = _resolve_included_columns(table_fqn, overview)
@@ -606,10 +622,18 @@ def _render_suggest_config_action(
             st.error(
                 ui_strings.PROFILE_V2_SUGGEST_CONFIG_ERROR.format(error=str(exc))
             )
+            st.caption(ui_strings.PROFILE_V2_SUGGEST_CONFIG_ERROR_HINT)
             return
 
     if isinstance(summary, dict):
-        st.session_state["last_suggest_config_summary"] = summary
+        st.session_state["last_suggest_config_result"] = {
+            "table_fqn": table_fqn,
+            "config_name": config_name,
+            "summary": summary,
+        }
+    else:
+        st.session_state.pop("last_suggest_config_result", None)
+
     _render_suggest_config_summary(summary or {}, table_fqn, config_name)
 
 
