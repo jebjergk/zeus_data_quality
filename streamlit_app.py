@@ -1010,7 +1010,7 @@ def render_config_editor():
                             default_params_raw = template.default_params if template else _parse_params(rule.get("default_params"))
                             default_params = default_params_raw if isinstance(default_params_raw, dict) else {}
                             start_values = {**default_params, **(parsed_params if isinstance(parsed_params, dict) else {})}
-                            with st.form(f"edit_form_{rule.get('check_id')}"):
+                            with st.container():
                                 st.markdown(f"**Edit {label}**")
                                 rendered_params, error = _render_param_inputs(
                                     key_prefix=f"edit_{rule.get('check_id')}",
@@ -1018,8 +1018,8 @@ def render_config_editor():
                                     current_values=start_values,
                                     column_options=available_cols,
                                 )
-                                save_btn = st.form_submit_button("Save")
-                                cancel_btn = st.form_submit_button("Cancel")
+                                save_btn = st.form_submit_button("Save", key=f"edit_save_{rule.get('check_id')}")
+                                cancel_btn = st.form_submit_button("Cancel", key=f"edit_cancel_{rule.get('check_id')}")
                                 if cancel_btn:
                                     st.session_state.pop("dq_edit_target", None)
                                     st.rerun()
@@ -1075,7 +1075,7 @@ def render_config_editor():
                     param_schema = _normalize_param_schema(selected_template.param_schema if selected_template else [])
                     defaults_raw = selected_template.default_params if selected_template else {}
                     defaults = defaults_raw if isinstance(defaults_raw, dict) else {}
-                    with st.form(f"add_rule_form_{sk}"):
+                    with st.container():
                         st.markdown("**Add library rule**")
                         rendered_params, error = _render_param_inputs(
                             key_prefix=f"add_{sk}",
@@ -1083,8 +1083,8 @@ def render_config_editor():
                             current_values=defaults,
                             column_options=available_cols,
                         )
-                        save_new = st.form_submit_button("Save")
-                        cancel_new = st.form_submit_button("Cancel")
+                        save_new = st.form_submit_button("Save", key=f"add_save_{sk}")
+                        cancel_new = st.form_submit_button("Cancel", key=f"add_cancel_{sk}")
                         if cancel_new:
                             st.session_state.pop("dq_add_target", None)
                             st.rerun()
