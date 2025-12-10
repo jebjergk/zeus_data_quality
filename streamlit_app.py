@@ -1496,6 +1496,8 @@ def render_config_editor():
         )
         st.session_state["_dq_table_max_age"] = int(fr_max_age)
 
+        timestamp_missing = not (ts_col and ts_col.strip())
+
         preview_counts = st.form_submit_button(
             "Preview last 60 days row counts",
             type="secondary",
@@ -1503,57 +1505,58 @@ def render_config_editor():
         )
 
         if target_table:
-            fr_params = {"timestamp_column": ts_col, "max_age_minutes": int(fr_max_age)}
-            try:
-                fr_rule, fr_is_agg = build_rule_for_table_check(
-                    target_table, _builder_key(freshness_key, "FRESHNESS"), fr_params
-                )
-            except ValueError as exc:
-                table_check_error = f"Invalid freshness configuration: {exc}"
-            else:
-                check_rows.append(DQCheck(
-                    config_id=(cfg.config_id if cfg else "temp"),
-                    check_id="TABLE_FRESHNESS",
-                    table_fqn=target_table, column_name=None,
-                    rule_expr=(f"AGG: {fr_rule}" if fr_is_agg else fr_rule), severity="ERROR",
-                    sample_rows=0, check_type=freshness_key,
-                    params_json=json.dumps(fr_params)
-                ))
-
-                row_defaults = existing_table_params.get(rowcount_anomaly_key, {}) or {}
+            if not timestamp_missing:
+                fr_params = {"timestamp_column": ts_col, "max_age_minutes": int(fr_max_age)}
                 try:
-                    lookback_days = int(row_defaults.get("lookback_days", 28))
-                except (TypeError, ValueError):
-                    lookback_days = 28
-                try:
-                    sensitivity = float(row_defaults.get("sensitivity", 3.0))
-                except (TypeError, ValueError):
-                    sensitivity = 3.0
-                try:
-                    min_history_days = int(row_defaults.get("min_history_days", 7))
-                except (TypeError, ValueError):
-                    min_history_days = 7
-                anomaly_params = {
-                    "timestamp_column": ts_col or row_defaults.get("timestamp_column") or ts_default,
-                    "lookback_days": lookback_days,
-                    "sensitivity": sensitivity,
-                    "min_history_days": min_history_days,
-                }
-                try:
-                    anomaly_rule, anomaly_is_agg = build_rule_for_table_check(
-                        target_table, _builder_key(rowcount_anomaly_key, "ROW_COUNT_ANOMALY"), anomaly_params
+                    fr_rule, fr_is_agg = build_rule_for_table_check(
+                        target_table, _builder_key(freshness_key, "FRESHNESS"), fr_params
                     )
                 except ValueError as exc:
-                    table_check_error = f"Invalid row count anomaly configuration: {exc}"
+                    table_check_error = f"Invalid freshness configuration: {exc}"
                 else:
                     check_rows.append(DQCheck(
                         config_id=(cfg.config_id if cfg else "temp"),
-                        check_id="TABLE_ROW_COUNT_ANOMALY",
+                        check_id="TABLE_FRESHNESS",
                         table_fqn=target_table, column_name=None,
-                        rule_expr=(f"AGG: {anomaly_rule}" if anomaly_is_agg else anomaly_rule), severity="ERROR",
-                        sample_rows=0, check_type=rowcount_anomaly_key,
-                        params_json=json.dumps(anomaly_params)
+                        rule_expr=(f"AGG: {fr_rule}" if fr_is_agg else fr_rule), severity="ERROR",
+                        sample_rows=0, check_type=freshness_key,
+                        params_json=json.dumps(fr_params)
                     ))
+
+                    row_defaults = existing_table_params.get(rowcount_anomaly_key, {}) or {}
+                    try:
+                        lookback_days = int(row_defaults.get("lookback_days", 28))
+                    except (TypeError, ValueError):
+                        lookback_days = 28
+                    try:
+                        sensitivity = float(row_defaults.get("sensitivity", 3.0))
+                    except (TypeError, ValueError):
+                        sensitivity = 3.0
+                    try:
+                        min_history_days = int(row_defaults.get("min_history_days", 7))
+                    except (TypeError, ValueError):
+                        min_history_days = 7
+                    anomaly_params = {
+                        "timestamp_column": ts_col or row_defaults.get("timestamp_column") or ts_default,
+                        "lookback_days": lookback_days,
+                        "sensitivity": sensitivity,
+                        "min_history_days": min_history_days,
+                    }
+                    try:
+                        anomaly_rule, anomaly_is_agg = build_rule_for_table_check(
+                            target_table, _builder_key(rowcount_anomaly_key, "ROW_COUNT_ANOMALY"), anomaly_params
+                        )
+                    except ValueError as exc:
+                        table_check_error = f"Invalid row count anomaly configuration: {exc}"
+                    else:
+                        check_rows.append(DQCheck(
+                            config_id=(cfg.config_id if cfg else "temp"),
+                            check_id="TABLE_ROW_COUNT_ANOMALY",
+                            table_fqn=target_table, column_name=None,
+                            rule_expr=(f"AGG: {anomaly_rule}" if anomaly_is_agg else anomaly_rule), severity="ERROR",
+                            sample_rows=0, check_type=rowcount_anomaly_key,
+                            params_json=json.dumps(anomaly_params)
+                        ))
 
         st.markdown("### Schedule")
         existing_cron = getattr(cfg, "schedule_cron", None) if cfg else None
@@ -1587,6 +1590,10 @@ def render_config_editor():
         with c2: save_draft = st.form_submit_button("Save as Draft")
         with c3: run_now_btn = st.form_submit_button("Run Now")
         with c4: delete_btn = st.form_submit_button("Delete", type="secondary")
+
+    submit_triggered = apply_now or save_draft or run_now_btn or preview_counts
+    if target_table and timestamp_missing and submit_triggered and not table_check_error:
+        table_check_error = "Enter a timestamp column to configure table-level checks."
 
     if table_check_error:
         st.error(table_check_error)
