@@ -1789,12 +1789,46 @@ def render_config_editor():
                     st.error(err_msg)
                     remember("error", err_msg)
                     return
+            # Preserve existing column-level rules and rebind to the active config
+            existing_column_checks: List[DQCheck] = []
+            for rule in library_checks:
+                column_name = rule.get("column_name")
+                if not column_name:
+                    continue
+
+                serialized_params = rule.get("params_json") or rule.get("rule_params")
+                if isinstance(serialized_params, dict):
+                    serialized_params = json.dumps(serialized_params, default=str)
+
+                existing_column_checks.append(
+                    DQCheck(
+                        config_id=new_id,
+                        check_id=str(rule.get("check_id")),
+                        table_fqn=target_table or (rule.get("table_fqn") or ""),
+                        column_name=column_name,
+                        rule_expr=(rule.get("compiled_rule") or rule.get("rule_expr") or ""),
+                        severity=(rule.get("severity") or rule.get("rule_severity") or "ERROR"),
+                        sample_rows=int(rule.get("sample_rows") or 0),
+                        check_type=_rule_key(
+                            rule.get("check_type")
+                            or rule.get("rule_id")
+                            or rule.get("rule_code")
+                            or ""
+                        ),
+                        params_json=serialized_params,
+                        rule_code=rule.get("rule_code"),
+                        rule_params=serialized_params,
+                        rule_version=(rule.get("rule_version") or rule.get("version")),
+                        compiled_rule=(rule.get("compiled_rule") or rule.get("rule_expr")),
+                    )
+                )
+
             # rebind ids
-            checks_rebound: List[DQCheck] = []
+            checks_rebound: List[DQCheck] = existing_column_checks.copy()
             for cr in check_rows:
                 cr.config_id = new_id; cr.table_fqn = target_table
                 checks_rebound.append(cr)
-    
+
             out = save_config_and_checks(session, dq_cfg, checks_rebound, apply_now=apply_now)
             base_msg = f"Saved config {new_id} ({status})."
             st.success(base_msg)
