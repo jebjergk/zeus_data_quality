@@ -1,7 +1,8 @@
 import json
 
 from services.runner import _normalize_rule_expression
-from utils.meta import DQCheck
+from services import runner
+from utils.meta import DQCheck, DQConfig
 
 
 def _make_check(**overrides):
@@ -59,3 +60,28 @@ def test_normalize_rule_expression_handles_wrapped_predicate_string():
     check = _make_check(rule_expr=wrapped)
 
     assert _normalize_rule_expression(check) == compiled
+
+
+def test_run_now_aliases_table_for_compiled_rules():
+    sql_calls = []
+
+    class DummyDF:
+        def collect(self):
+            return [(0,)]
+
+    class DummySession:
+        def sql(self, sql, params=None):
+            sql_calls.append((sql, params))
+            return DummyDF()
+
+    check = _make_check(
+        rule_expr=json.dumps({"compiled_predicate": 'not isnull(T."COL")'}),
+        sample_rows=0,
+    )
+    cfg = DQConfig("cfg", "Cfg", None, "DB.SCHEMA.TABLE", None, None, "ACTIVE", None)
+
+    runner.run_now(DummySession(), cfg, [check])
+
+    assert sql_calls[0][0] == (
+        'SELECT COUNT(*) AS FAILURES FROM DB.SCHEMA.TABLE AS T WHERE NOT (not isnull(T."COL"))'
+    )
