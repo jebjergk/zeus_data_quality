@@ -291,6 +291,7 @@ def ensure_meta_tables(session: Session):
           RULE_PARAMS STRING,
           RULE_VERSION STRING,
           COMPILED_RULE STRING,
+          UPDATED_AT TIMESTAMP_LTZ,
           PRIMARY KEY (CONFIG_ID, CHECK_ID)
         )
     """).collect()
@@ -298,6 +299,7 @@ def ensure_meta_tables(session: Session):
     session.sql(f"ALTER TABLE {_q(DQ_CHECK_TBL)} ADD COLUMN IF NOT EXISTS RULE_PARAMS STRING").collect()
     session.sql(f"ALTER TABLE {_q(DQ_CHECK_TBL)} ADD COLUMN IF NOT EXISTS RULE_VERSION STRING").collect()
     session.sql(f"ALTER TABLE {_q(DQ_CHECK_TBL)} ADD COLUMN IF NOT EXISTS COMPILED_RULE STRING").collect()
+    session.sql(f"ALTER TABLE {_q(DQ_CHECK_TBL)} ADD COLUMN IF NOT EXISTS UPDATED_AT TIMESTAMP_LTZ").collect()
 
 # ---------- CRUD ----------
 def upsert_config(session: Session, cfg: DQConfig):
