@@ -90,6 +90,7 @@ __all__ = [
     "list_tables",
     "get_table_row_count",
     "list_columns",
+    "list_columns_with_types",
     "compute_confidence_pct",
 ]
 
@@ -717,27 +718,49 @@ def list_columns(
     *,
     editor_target_fqn: Optional[str] = None,
 ) -> List[str]:
+    """Return column names for the given table."""
+
+    return [name for name, _ in list_columns_with_types(session, database, schema, table, editor_target_fqn=editor_target_fqn)]
+
+
+def list_columns_with_types(
+    session: Session,
+    database: str,
+    schema: str,
+    table: str,
+    *,
+    editor_target_fqn: Optional[str] = None,
+) -> List[Tuple[str, str]]:
+    """Return column names paired with their Snowflake data types.
+
+    Falls back to ``DESC TABLE`` if INFORMATION_SCHEMA is unavailable.
+    """
+
     if not session or not (database and schema and table):
         return []
+
     cache_key = editor_target_fqn or fq_table(database, schema, table)
-    return _list_columns_cached(cache_key, session, database, schema, table)
+    return _list_columns_with_types_cached(cache_key, session, database, schema, table)
 
 
 @st.cache_data(ttl=120, show_spinner=False, hash_funcs=CACHE_HASH_FUNCS)
-def _list_columns_cached(
+def _list_columns_with_types_cached(
     editor_target_fqn: str,
     session: Session,
     database: str,
     schema: str,
     table: str,
-) -> List[str]:
+) -> List[Tuple[str, str]]:
     del editor_target_fqn
     try:
-        df = session.sql(f"SELECT COLUMN_NAME FROM {_q(database)}.INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? ORDER BY ORDINAL_POSITION", params=[schema.upper(), table.upper()])
-        return [r[0] for r in df.collect()]
+        df = session.sql(
+            f"SELECT COLUMN_NAME, DATA_TYPE FROM {_q(database)}.INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? ORDER BY ORDINAL_POSITION",
+            params=[schema.upper(), table.upper()],
+        )
+        return [(r[0], r[1]) for r in df.collect()]
     except Exception:
         try:
             df = session.sql(f"DESC TABLE {_q(database)}.{_q(schema)}.{_q(table)}")
-            return [r[0] for r in df.collect()]  # NAME
+            return [(r[0], r[1]) for r in df.collect()]  # NAME, TYPE
         except Exception:
             return []
