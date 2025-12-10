@@ -161,7 +161,7 @@ from utils.meta import (
     _q, _parse_relation_name,
     list_configs, get_config, get_checks,
     get_library_checks, update_library_check, insert_library_check, delete_check_by_id,
-    list_columns, list_tables,
+    list_columns, list_columns_with_types, list_tables,
 )
 from utils import schedules
 from services.configs import save_config_and_checks, delete_config_full
@@ -738,6 +738,26 @@ def _list_columns_cached(session_obj, database: str, schema: str, table: str) ->
     return _load_columns((session_cache_token(session_obj), database, schema, table))
 
 
+def _list_column_metadata_cached(
+    session_obj, database: str, schema: str, table: str
+) -> List[Tuple[str, str]]:
+    if not session_obj or not (database and schema and table):
+        return []
+
+    @st.cache_data(ttl=300, show_spinner=False)
+    def _load_column_metadata(cache_token: Tuple[str, str, str, str]) -> List[Tuple[str, str]]:
+        _, db_name, schema_name, table_name = cache_token
+        try:
+            return list_columns_with_types(session_obj, db_name, schema_name, table_name)
+        except Exception as exc:
+            st.error(
+                f"Failed to list columns for {db_name}.{schema_name}.{table_name}: {exc}"
+            )
+            return []
+
+    return _load_column_metadata((session_cache_token(session_obj), database, schema, table))
+
+
 def render_home():
     st.title("Zeus Data Quality")
     st.markdown("""
@@ -1157,11 +1177,13 @@ def render_config_editor():
     st.caption(f"Target Table: {target_table or '— not selected —'}")
 
     # Columns available for rules
-    available_cols = (
-        _list_columns_cached(session, db_sel, sch_sel, tbl_sel)
+    available_col_metadata = (
+        _list_column_metadata_cached(session, db_sel, sch_sel, tbl_sel)
         if (db_sel and sch_sel and tbl_sel)
         else []
     )
+    available_cols = [name for name, _ in available_col_metadata]
+    column_type_lookup = {name: dtype for name, dtype in available_col_metadata}
     table_suggestions = _related_table_options(session, target_table)
     column_lookup = lambda tbl: _columns_for_table(session, tbl)
 
@@ -1463,6 +1485,26 @@ def render_config_editor():
     if "_dq_table_max_age" not in st.session_state:
         st.session_state["_dq_table_max_age"] = max_age_default
 
+    timestamp_columns = [
+        col
+        for col, dtype in available_col_metadata
+        if isinstance(dtype, str)
+        and any(token in dtype.upper() for token in ("TIMESTAMP", "DATE"))
+    ]
+
+    ts_default_clean = ts_default.strip() if isinstance(ts_default, str) else ""
+    if ts_default_clean and ts_default_clean not in timestamp_columns:
+        timestamp_columns.append(ts_default_clean)
+
+    placeholder_ts = "— select timestamp column —"
+    ts_select_options = [placeholder_ts] + timestamp_columns
+
+    def _ts_option_index(options: List[str], current: str) -> int:
+        try:
+            return options.index(current)
+        except ValueError:
+            return 0
+
     preview_counts = False
     table_check_error: Optional[str] = None
 
@@ -1480,11 +1522,26 @@ def render_config_editor():
 
         # Table-level (always)
         st.markdown("### Table-level checks (always included)")
-        ts_col = st.text_input(
+        if target_table and not timestamp_columns:
+            st.info("No TIMESTAMP/DATE columns detected for the selected table.")
+
+        ts_selected = st.selectbox(
             "Timestamp column for table checks",
+            options=ts_select_options,
+            index=_ts_option_index(
+                ts_select_options,
+                st.session_state.get("_dq_table_ts_col", ts_default_clean),
+            ),
             key="_dq_table_ts_col",
-            value=st.session_state.get("_dq_table_ts_col", ts_default),
+            format_func=lambda col: (
+                col
+                if col == placeholder_ts
+                else (f"{col} ({column_type_lookup[col]})" if column_type_lookup.get(col) else col)
+            ),
         )
+        ts_col = "" if ts_selected == placeholder_ts else ts_selected
+        if ts_selected == placeholder_ts:
+            st.session_state["_dq_table_ts_col"] = ""
         st.caption("Table will FAIL if no data arrives within the configured max age or if today's volume is a statistical outlier.")
 
         fr_max_age = st.number_input(
@@ -2177,6 +2234,7 @@ def render_monitor():
     recent_df["time"] = recent_df["run_ts"].dt.strftime("%Y-%m-%d %H:%M:%S")
     recent_df["failures_display"] = recent_df["failures_num"].round().astype(int)
     recent_df["error_msg"] = recent_df["error_msg"].fillna("")
+    recent_df.loc[recent_df["error_msg"] == "", "error_msg"] = "No error message provided."
 
     table = recent_df[[
         "time",
