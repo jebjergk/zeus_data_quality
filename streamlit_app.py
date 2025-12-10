@@ -1202,53 +1202,10 @@ def render_config_editor():
     column_type_lookup = {name: dtype for name, dtype in available_col_metadata}
     table_suggestions = _related_table_options(session, target_table)
     column_lookup = lambda tbl: _columns_for_table(session, tbl)
-
     st.markdown("### Rules")
-    search_col, add_col = st.columns([4, 1])
-    rule_search = search_col.text_input(
-        "Search rules", key="rule_grid_search", placeholder="Search by column, rule, or code"
-    )
-    add_clicked = add_col.button(
-        "➕ Add rule",
-        key="add_rule_global",
-        type="secondary",
-        disabled=not (cfg and target_table),
-        help="Select a target table and save the configuration before adding rules." if not (cfg and target_table) else "",
-    )
 
-    filter_col, filter_code, filter_sev = st.columns(3)
-    rule_columns = sorted({chk.get("column_name") for chk in library_checks if chk.get("column_name")})
-    filter_column = filter_col.selectbox(
-        "Filter by column",
-        options=["All"] + rule_columns,
-        index=0,
-        key="rule_filter_column",
-    )
-    rule_codes = sorted({(chk.get("rule_code") or "").upper() for chk in library_checks if chk.get("rule_code")})
-    filter_rule_code = filter_code.selectbox(
-        "Filter by rule",
-        options=["All"] + rule_codes,
-        index=0,
-        key="rule_filter_code",
-    )
-    severities = sorted({(chk.get("severity") or chk.get("rule_severity") or "ERROR") for chk in library_checks})
-    filter_severity = filter_sev.selectbox(
-        "Filter by severity",
-        options=["All"] + severities,
-        index=0,
-        key="rule_filter_severity",
-    )
-
-    st.markdown(
-        """
-        <style>
-        .dq-rule-grid { max-height: 420px; overflow-y: auto; margin-top: .35rem; }
-        .dq-rule-row { padding: .4rem 0; border-bottom: 1px solid #e7ebf3; }
-        .dq-rule-head { font-weight: 600; font-size: .9rem; color: #4b5563; padding-bottom: .25rem; border-bottom: 1px solid #e7ebf3; }
-        </style>
-        """,
-        unsafe_allow_html=True,
-    )
+    add_mode = st.session_state.get("rule_add_mode", False)
+    detail_mode = add_mode or bool(st.session_state.get("active_rule_edit_id"))
 
     grid_entries: List[Dict[str, Any]] = []
     for rule in library_checks:
@@ -1280,22 +1237,71 @@ def render_config_editor():
             }
         )
 
-    def _matches_filters(entry: Dict[str, Any]) -> bool:
-        if filter_column != "All" and entry.get("column") != filter_column:
-            return False
-        if filter_rule_code != "All" and (entry.get("rule_code") or "").upper() != filter_rule_code:
-            return False
-        if filter_severity != "All" and (entry.get("severity") or "ERROR") != filter_severity:
-            return False
-        if rule_search:
-            query = rule_search.lower()
-            return any(
-                query in str(entry.get(field, "")).lower()
-                for field in ("column", "rule_name", "rule_code")
-            )
-        return True
+    add_clicked = False
+    filtered_entries: List[Dict[str, Any]] = []
+    if not detail_mode:
+        search_col, add_col = st.columns([4, 1])
+        rule_search = search_col.text_input(
+            "Search rules", key="rule_grid_search", placeholder="Search by column, rule, or code"
+        )
+        add_clicked = add_col.button(
+            "➕ Add rule",
+            key="add_rule_global",
+            type="secondary",
+            disabled=not (cfg and target_table),
+            help="Select a target table and save the configuration before adding rules." if not (cfg and target_table) else "",
+        )
 
-    filtered_entries = [e for e in grid_entries if _matches_filters(e)]
+        filter_col, filter_code, filter_sev = st.columns(3)
+        rule_columns = sorted({chk.get("column_name") for chk in library_checks if chk.get("column_name")})
+        filter_column = filter_col.selectbox(
+            "Filter by column",
+            options=["All"] + rule_columns,
+            index=0,
+            key="rule_filter_column",
+        )
+        rule_codes = sorted({(chk.get("rule_code") or "").upper() for chk in library_checks if chk.get("rule_code")})
+        filter_rule_code = filter_code.selectbox(
+            "Filter by rule",
+            options=["All"] + rule_codes,
+            index=0,
+            key="rule_filter_code",
+        )
+        severities = sorted({(chk.get("severity") or chk.get("rule_severity") or "ERROR") for chk in library_checks})
+        filter_severity = filter_sev.selectbox(
+            "Filter by severity",
+            options=["All"] + severities,
+            index=0,
+            key="rule_filter_severity",
+        )
+
+        st.markdown(
+            """
+            <style>
+            .dq-rule-grid { max-height: 420px; overflow-y: auto; margin-top: .35rem; }
+            .dq-rule-row { padding: .4rem 0; border-bottom: 1px solid #e7ebf3; }
+            .dq-rule-head { font-weight: 600; font-size: .9rem; color: #4b5563; padding-bottom: .25rem; border-bottom: 1px solid #e7ebf3; }
+            </style>
+            """,
+            unsafe_allow_html=True,
+        )
+
+        def _matches_filters(entry: Dict[str, Any]) -> bool:
+            if filter_column != "All" and entry.get("column") != filter_column:
+                return False
+            if filter_rule_code != "All" and (entry.get("rule_code") or "").upper() != filter_rule_code:
+                return False
+            if filter_severity != "All" and (entry.get("severity") or "ERROR") != filter_severity:
+                return False
+            if rule_search:
+                query = rule_search.lower()
+                return any(
+                    query in str(entry.get(field, "")).lower()
+                    for field in ("column", "rule_name", "rule_code")
+                )
+            return True
+
+        filtered_entries = [e for e in grid_entries if _matches_filters(e)]
 
     add_mode = st.session_state.get("rule_add_mode", False)
     if add_clicked:
