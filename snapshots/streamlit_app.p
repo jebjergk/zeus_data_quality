@@ -86,6 +86,9 @@ def _modal_container(title: str, key: Optional[str] = None):
     st.warning("Streamlit modal not available; showing content inline instead.")
     return st.container()
 
+
+MODAL_SUPPORTED = hasattr(st, "modal") or hasattr(st, "dialog")
+
 import json
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
@@ -385,6 +388,76 @@ def _render_param_inputs(
         else:
             st.write(f"Unsupported parameter type: {param_type}")
     return values, error
+
+
+def _render_rule_edit_form(
+    *,
+    entry: Dict[str, Any],
+    key_prefix: str,
+    target_table: Optional[str],
+    cfg: Optional[DQConfig],
+    session: Any,
+    available_cols: List[str],
+    table_suggestions: Optional[List[str]],
+    column_lookup: Optional[Any],
+    inline_mode: bool = False,
+):
+    st.markdown(
+        f"**Config:** {cfg.name if cfg else entry.get('column')}  \n"
+        f"**Table:** `{target_table or cfg.target_table_fqn if cfg else ''}`  \n"
+        f"**Rule code:** `{entry.get('rule_code')}`  \n"
+        f"**Category:** {(entry.get('template').category if entry.get('template') else '') or '—'}  \n"
+        f"**Severity:** {(entry.get('severity') or '—')}  \n"
+        f"**Scope:** {(entry.get('template').scope if entry.get('template') else '') or 'COLUMN'}",
+    )
+    param_schema = _normalize_param_schema(entry.get("param_schema"))
+    defaults_raw = entry.get("default_params")
+    defaults = defaults_raw if isinstance(defaults_raw, dict) else {}
+    start_values = {**defaults, **(entry.get("params") or {})}
+    rendered_params, param_error = _render_param_inputs(
+        key_prefix=key_prefix,
+        param_schema=param_schema,
+        current_values=start_values,
+        column_options=available_cols,
+        table_options=table_suggestions,
+        column_lookup=column_lookup,
+    )
+    col_save, col_cancel = st.columns(2)
+    if col_save.button("Save", type="primary", key=f"{key_prefix}_save"):
+        if param_error:
+            st.error(param_error)
+        elif not session:
+            st.error("No active Snowpark session.")
+        elif not target_table:
+            st.error("Select a target table before editing rules.")
+        else:
+            try:
+                compiled_rule = _compile_library_rule(
+                    session,
+                    entry.get("rule_code", ""),
+                    target_table,
+                    entry.get("column", ""),
+                    rendered_params,
+                )
+            except Exception as exc:
+                st.error(f"Rule compile failed: {exc}")
+            else:
+                update_library_check(
+                    session,
+                    check_id=str(entry.get("check_id")),
+                    rule_params=rendered_params,
+                    rule_version=entry.get("rule_version"),
+                    compiled_rule=compiled_rule,
+                    rule_expr=compiled_rule,
+                    severity=entry.get("severity"),
+                )
+                st.success("Rule updated.")
+                st.rerun()
+    if col_cancel.button("Cancel", key=f"{key_prefix}_cancel"):
+        if inline_mode:
+            st.session_state.pop("inline_edit_entry", None)
+            st.session_state.pop("inline_edit_key", None)
+        st.rerun()
 
 
 def _compile_library_rule(
@@ -1041,6 +1114,9 @@ def render_config_editor():
 
     filtered_entries = [e for e in grid_entries if _matches_filters(e)]
 
+    inline_edit_entry: Optional[Dict[str, Any]] = None if MODAL_SUPPORTED else st.session_state.get("inline_edit_entry")
+    inline_edit_key: Optional[str] = None if MODAL_SUPPORTED else st.session_state.get("inline_edit_key")
+
     st.caption(f"Showing {len(filtered_entries)} of {len(grid_entries)} rules")
     head_cols = st.columns([2, 3, 3, 1, 1])
     head_cols[0].markdown("<div class='dq-rule-head'>Column</div>", unsafe_allow_html=True)
@@ -1065,68 +1141,52 @@ def render_config_editor():
                 "🗑️", key=f"delete_rule_{entry.get('check_id')}", help="Delete rule"
             )
             if edit_clicked:
-                with _modal_container(
-                    f"Edit rule: {entry.get('rule_name')} on {entry.get('column')}",
-                    key=f"edit_modal_{entry.get('check_id')}",
-                ):
-                    st.markdown(
-                        f"**Config:** {cfg.name if cfg else entry.get('column')}  \n"
-                        f"**Table:** `{target_table or cfg.target_table_fqn if cfg else ''}`  \n"
-                        f"**Rule code:** `{entry.get('rule_code')}`  \n"
-                        f"**Category:** {(entry.get('template').category if entry.get('template') else '') or '—'}  \n"
-                        f"**Severity:** {(entry.get('severity') or '—')}  \n"
-                        f"**Scope:** {(entry.get('template').scope if entry.get('template') else '') or 'COLUMN'}",
-                    )
-                    param_schema = _normalize_param_schema(entry.get("param_schema"))
-                    defaults_raw = entry.get("default_params")
-                    defaults = defaults_raw if isinstance(defaults_raw, dict) else {}
-                    start_values = {**defaults, **(entry.get("params") or {})}
-                    rendered_params, param_error = _render_param_inputs(
-                        key_prefix=f"edit_modal_{entry.get('check_id')}",
-                        param_schema=param_schema,
-                        current_values=start_values,
-                        column_options=available_cols,
-                        table_options=table_suggestions,
-                        column_lookup=column_lookup,
-                    )
-                    col_save, col_cancel = st.columns(2)
-                    if col_save.button("Save", type="primary", key=f"edit_save_{entry.get('check_id')}"):
-                        if param_error:
-                            st.error(param_error)
-                        elif not session:
-                            st.error("No active Snowpark session.")
-                        elif not target_table:
-                            st.error("Select a target table before editing rules.")
-                        else:
-                            try:
-                                compiled_rule = _compile_library_rule(
-                                    session,
-                                    entry.get("rule_code", ""),
-                                    target_table,
-                                    entry.get("column", ""),
-                                    rendered_params,
-                                )
-                            except Exception as exc:
-                                st.error(f"Rule compile failed: {exc}")
-                            else:
-                                update_library_check(
-                                    session,
-                                    check_id=str(entry.get("check_id")),
-                                    rule_params=rendered_params,
-                                    rule_version=entry.get("rule_version"),
-                                    compiled_rule=compiled_rule,
-                                    rule_expr=compiled_rule,
-                                    severity=entry.get("severity"),
-                                )
-                                st.success("Rule updated.")
-                                st.rerun()
-                    if col_cancel.button("Cancel", key=f"edit_cancel_{entry.get('check_id')}"):
-                        pass
+                if MODAL_SUPPORTED:
+                    st.session_state.pop("inline_edit_entry", None)
+                    st.session_state.pop("inline_edit_key", None)
+                    with _modal_container(
+                        f"Edit rule: {entry.get('rule_name')} on {entry.get('column')}",
+                        key=f"edit_modal_{entry.get('check_id')}",
+                    ):
+                        _render_rule_edit_form(
+                            entry=entry,
+                            key_prefix=f"edit_modal_{entry.get('check_id')}",
+                            target_table=target_table or (cfg.target_table_fqn if cfg else ""),
+                            cfg=cfg,
+                            session=session,
+                            available_cols=available_cols,
+                            table_suggestions=table_suggestions,
+                            column_lookup=column_lookup,
+                        )
+                else:
+                    st.session_state["inline_edit_entry"] = entry
+                    st.session_state["inline_edit_key"] = f"edit_modal_{entry.get('check_id')}"
+                    inline_edit_entry = entry
+                    inline_edit_key = f"edit_modal_{entry.get('check_id')}"
             if delete_clicked:
                 delete_check_by_id(session, str(entry.get("check_id")))
                 st.success("Rule deleted.")
                 st.rerun()
         st.markdown("</div>", unsafe_allow_html=True)
+
+    if not MODAL_SUPPORTED and inline_edit_entry:
+        st.info(
+            "Inline editing is shown because Streamlit modals are unavailable. "
+            "Update parameters here; delete and recreate the rule to switch templates.",
+            icon="✏️",
+        )
+        with st.container(border=True):
+            _render_rule_edit_form(
+                entry=inline_edit_entry,
+                key_prefix=inline_edit_key or "inline_edit",
+                target_table=target_table or (cfg.target_table_fqn if cfg else ""),
+                cfg=cfg,
+                session=session,
+                available_cols=available_cols,
+                table_suggestions=table_suggestions,
+                column_lookup=column_lookup,
+                inline_mode=True,
+            )
 
     if add_clicked:
         with _modal_container("Add rule", key="add_rule_modal"):
