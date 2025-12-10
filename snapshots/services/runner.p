@@ -24,6 +24,24 @@ def _extract_rule_params(check: DQCheck) -> Sequence[Any]:
     return (params,)
 
 
+def _normalize_rule_expression(check: DQCheck) -> str:
+    """Return a SQL predicate for a rule, handling JSON-encoded payloads."""
+
+    raw_expr = (check.compiled_rule or check.rule_expr or "").strip()
+    rule_expr = raw_expr
+    if raw_expr.startswith("{"):
+        try:
+            parsed = json.loads(raw_expr)
+            if isinstance(parsed, dict):
+                compiled = (parsed.get("compiled_predicate") or "").strip()
+                if compiled:
+                    rule_expr = compiled
+        except Exception:
+            # Fall back to the raw expression when parsing fails.
+            pass
+    return rule_expr
+
+
 def _sql_with_params(session, sql: str, params: Sequence[Any]):
     if params:
         return session.sql(sql, params=tuple(params))
@@ -33,7 +51,7 @@ def _sql_with_params(session, sql: str, params: Sequence[Any]):
 def run_now(session, cfg: DQConfig, checks: List[DQCheck]) -> Dict[str, Any]:
     results: Dict[str, Any] = {"config_id": cfg.config_id, "checks": []}
     for chk in checks:
-        rule = (chk.rule_expr or '').strip()
+        rule = _normalize_rule_expression(chk)
         rule_params = _extract_rule_params(chk)
         if rule.upper().startswith(AGG_PREFIX):
             sql = rule[len(AGG_PREFIX):].strip()
