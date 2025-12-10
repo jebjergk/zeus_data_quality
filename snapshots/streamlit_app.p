@@ -503,6 +503,7 @@ def _render_rule_create_form(
     existing_library_checks: List[Dict[str, Any]],
     key_prefix: str,
     state_keys_to_clear: Optional[List[str]] = None,
+    config_id: Optional[str] = None,
 ):
     st.markdown(
         f"**Config:** {cfg.name if cfg else 'New configuration'}  \n"
@@ -555,6 +556,8 @@ def _render_rule_create_form(
             st.error("No active Snowpark session.")
         elif not target_table:
             st.error("Select a target table before adding rules.")
+        elif not config_id:
+            st.error("Create or select a configuration before adding rules.")
         elif not selected_template:
             st.error("Choose a rule template to continue.")
         elif not selected_column or selected_column == "—":
@@ -583,7 +586,7 @@ def _render_rule_create_form(
                 else:
                     insert_library_check(
                         session,
-                        config_id=cfg.config_id if cfg else None,
+                        config_id=config_id,
                         table_fqn=target_table,
                         column_name=selected_column,
                         rule_code=selected_template.rule_code,
@@ -722,7 +725,16 @@ def open_config_editor(
 ) -> None:
     """Switch to the configuration editor with the given selection."""
     st.session_state["cfg_mode"] = "edit"
-    st.session_state["selected_config_id"] = config_id
+    if config_id:
+        st.session_state["selected_config_id"] = config_id
+    else:
+        draft_id = st.session_state.get("selected_config_id") or st.session_state.get(
+            "_draft_config_id"
+        )
+        if not draft_id:
+            draft_id = str(uuid4())
+        st.session_state["selected_config_id"] = draft_id
+        st.session_state["_draft_config_id"] = draft_id
     if target_fqn is not None:
         st.session_state["editor_target_fqn"] = target_fqn
     st.rerun()
@@ -1043,6 +1055,11 @@ def render_config_list():
 def render_config_editor():
     # which config?
     sel_id: Optional[str] = st.session_state.get("selected_config_id")
+    if not sel_id:
+        draft_id = st.session_state.get("_draft_config_id") or str(uuid4())
+        st.session_state["_draft_config_id"] = draft_id
+        st.session_state["selected_config_id"] = draft_id
+        sel_id = draft_id
     cfg = get_config(session, sel_id) if sel_id else None
     existing_checks = get_checks(session, sel_id) if sel_id else []
     library_checks = get_library_checks(session, sel_id) if sel_id else []
@@ -1070,6 +1087,8 @@ def render_config_editor():
         str(rule.get("rule_key", "")).upper(): (rule.get("label") or "")
         for rule in rule_options
     }
+
+    active_config_id = sel_id
 
     def _rule_key(raw_key: str) -> str:
         return normalize_rule_key(raw_key, active_rules)
@@ -1203,8 +1222,6 @@ def render_config_editor():
     table_suggestions = _related_table_options(session, target_table)
     column_lookup = lambda tbl: _columns_for_table(session, tbl)
 
-    # Surface table-level controls before field-level rules
-    table_checks_section = st.container()
     st.markdown("### Rules")
 
     add_mode = st.session_state.get("rule_add_mode", False)
@@ -1265,8 +1282,14 @@ def render_config_editor():
             "➕ Add rule",
             key="add_rule_global",
             type="secondary",
-            disabled=not (cfg and target_table),
-            help="Select a target table and save the configuration before adding rules." if not (cfg and target_table) else "",
+            disabled=not (active_config_id and target_table),
+            help=(
+                "Select a target table to enable rule creation."
+                if not target_table
+                else "Create or select a configuration to enable rule creation."
+                if not active_config_id
+                else ""
+            ),
         )
 
         filter_col, filter_code, filter_sev = st.columns(3)
@@ -1365,6 +1388,7 @@ def render_config_editor():
                 existing_library_checks=library_checks,
                 key_prefix=st.session_state.get("rule_add_key", "add_rule"),
                 state_keys_to_clear=["rule_add_mode", "rule_add_key"],
+                config_id=active_config_id,
             )
         return
 
@@ -1451,7 +1475,7 @@ def render_config_editor():
                 st.rerun()
         st.markdown("</div>", unsafe_allow_html=True)
 
-    with table_checks_section:
+    with st.container():
         # -------- Form --------
         # Pre-populate table-level defaults from existing checks / state
         existing_table_params: Dict[str, Dict[str, Any]] = {}
@@ -1767,7 +1791,8 @@ def render_config_editor():
                 if message:
                     post_submit_notices.append({"type": kind, "message": message})
     
-            new_id = cfg.config_id if cfg else str(uuid4())
+            new_id = cfg.config_id if cfg else (active_config_id or str(uuid4()))
+            st.session_state["selected_config_id"] = new_id
             if apply_now:
                 status = 'ACTIVE'
             elif save_draft:
