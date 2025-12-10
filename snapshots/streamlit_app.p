@@ -61,33 +61,47 @@ logging.basicConfig(
 logging.getLogger("snowflake").setLevel(logging.WARNING)
 
 
+def _resolve_modal_factory():
+    """Return a callable that creates a context-managed modal/dialog if available."""
+
+    def _build_factory(fn_name: str):
+        modal_fn = getattr(st, fn_name, None)
+        if not modal_fn:
+            return None
+        signature = inspect.signature(modal_fn)
+
+        def _builder(title: str, key: Optional[str] = None):
+            kwargs = {}
+            if "key" in signature.parameters and key is not None:
+                kwargs["key"] = key
+            return modal_fn(title, **kwargs)
+
+        try:
+            probe = _builder("__modal_probe__", key=f"__probe_{fn_name}__")
+        except Exception:
+            return None
+
+        if hasattr(probe, "__enter__"):
+            return _builder
+        return None
+
+    return _build_factory("modal") or _build_factory("dialog")
+
+
+_MODAL_FACTORY = _resolve_modal_factory()
+
+
 def _modal_container(title: str, key: Optional[str] = None):
-    """Gracefully handle Streamlit versions without `st.modal`.
+    """Gracefully handle Streamlit versions without context-managed modals."""
 
-    Prefers `st.modal` when available, falls back to `st.dialog` in older
-    releases, and finally to a plain container with a warning.
-    """
-
-    if hasattr(st, "modal"):
-        modal = st.modal(title, key=key)
-        if hasattr(modal, "__enter__"):
-            return modal
-
-    if hasattr(st, "dialog"):
-        dialog_fn = st.dialog
-        dialog_signature = inspect.signature(dialog_fn)
-        if "key" in dialog_signature.parameters and key is not None:
-            dialog = dialog_fn(title, key=key)
-        else:
-            dialog = dialog_fn(title)
-        if hasattr(dialog, "__enter__"):
-            return dialog
+    if _MODAL_FACTORY:
+        return _MODAL_FACTORY(title, key=key)
 
     st.warning("Streamlit modal not available; showing content inline instead.")
     return st.container()
 
 
-MODAL_SUPPORTED = hasattr(st, "modal") or hasattr(st, "dialog")
+MODAL_SUPPORTED = _MODAL_FACTORY is not None
 
 import json
 from datetime import datetime
