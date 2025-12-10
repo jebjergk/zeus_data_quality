@@ -1612,62 +1612,63 @@ def render_config_editor():
                 type="secondary",
                 help="Preview daily row counts using the selected timestamp column.",
             )
-    
+
             if target_table:
                 if not timestamp_missing:
                     fr_params = {"timestamp_column": ts_col, "max_age_minutes": int(fr_max_age)}
-                        try:
-                            fr_rule, fr_is_agg = build_rule_for_table_check(
-                                target_table, _builder_key(freshness_key, "FRESHNESS"), fr_params
-                            )
-                        except ValueError as exc:
-                            table_check_error = f"Invalid freshness configuration: {exc}"
-                        else:
-                            existing_freshness = existing_table_checks.get(freshness_key)
-                            check_rows.append(DQCheck(
-                                config_id=(cfg.config_id if cfg else "temp"),
-                                check_id=(existing_freshness.check_id if existing_freshness else "TABLE_FRESHNESS"),
-                                table_fqn=target_table, column_name=None,
-                                rule_expr=(f"AGG: {fr_rule}" if fr_is_agg else fr_rule), severity=(existing_freshness.severity if existing_freshness else "ERROR"),
-                                sample_rows=0, check_type=freshness_key,
-                                params_json=json.dumps(fr_params)
-                            ))
-    
-                        row_defaults = existing_table_params.get(rowcount_anomaly_key, {}) or {}
-                        try:
-                            lookback_days = int(row_defaults.get("lookback_days", 28))
-                        except (TypeError, ValueError):
-                            lookback_days = 28
-                        try:
-                            sensitivity = float(row_defaults.get("sensitivity", 3.0))
-                        except (TypeError, ValueError):
-                            sensitivity = 3.0
-                        try:
-                            min_history_days = int(row_defaults.get("min_history_days", 7))
-                        except (TypeError, ValueError):
-                            min_history_days = 7
-                        anomaly_params = {
-                            "timestamp_column": ts_col or row_defaults.get("timestamp_column") or ts_default,
-                            "lookback_days": lookback_days,
-                            "sensitivity": sensitivity,
-                            "min_history_days": min_history_days,
-                        }
-                        try:
-                            anomaly_rule, anomaly_is_agg = build_rule_for_table_check(
-                                target_table, _builder_key(rowcount_anomaly_key, "ROW_COUNT_ANOMALY"), anomaly_params
-                            )
-                        except ValueError as exc:
-                            table_check_error = f"Invalid row count anomaly configuration: {exc}"
-                        else:
-                            existing_anomaly = existing_table_checks.get(rowcount_anomaly_key)
-                            check_rows.append(DQCheck(
-                                config_id=(cfg.config_id if cfg else "temp"),
-                                check_id=(existing_anomaly.check_id if existing_anomaly else "TABLE_ROW_COUNT_ANOMALY"),
-                                table_fqn=target_table, column_name=None,
-                                rule_expr=(f"AGG: {anomaly_rule}" if anomaly_is_agg else anomaly_rule), severity=(existing_anomaly.severity if existing_anomaly else "ERROR"),
-                                sample_rows=0, check_type=rowcount_anomaly_key,
-                                params_json=json.dumps(anomaly_params)
-                            ))
+
+                    try:
+                        fr_rule, fr_is_agg = build_rule_for_table_check(
+                            target_table, _builder_key(freshness_key, "FRESHNESS"), fr_params
+                        )
+                    except ValueError as exc:
+                        table_check_error = f"Invalid freshness configuration: {exc}"
+                    else:
+                        existing_freshness = existing_table_checks.get(freshness_key)
+                        check_rows.append(DQCheck(
+                            config_id=(cfg.config_id if cfg else "temp"),
+                            check_id=(existing_freshness.check_id if existing_freshness else "TABLE_FRESHNESS"),
+                            table_fqn=target_table, column_name=None,
+                            rule_expr=(f"AGG: {fr_rule}" if fr_is_agg else fr_rule), severity=(existing_freshness.severity if existing_freshness else "ERROR"),
+                            sample_rows=0, check_type=freshness_key,
+                            params_json=json.dumps(fr_params)
+                        ))
+
+                row_defaults = existing_table_params.get(rowcount_anomaly_key, {}) or {}
+                try:
+                    lookback_days = int(row_defaults.get("lookback_days", 28))
+                except (TypeError, ValueError):
+                    lookback_days = 28
+                try:
+                    sensitivity = float(row_defaults.get("sensitivity", 3.0))
+                except (TypeError, ValueError):
+                    sensitivity = 3.0
+                try:
+                    min_history_days = int(row_defaults.get("min_history_days", 7))
+                except (TypeError, ValueError):
+                    min_history_days = 7
+                anomaly_params = {
+                    "timestamp_column": ts_col or row_defaults.get("timestamp_column") or ts_default,
+                    "lookback_days": lookback_days,
+                    "sensitivity": sensitivity,
+                    "min_history_days": min_history_days,
+                }
+                try:
+                    anomaly_rule, anomaly_is_agg = build_rule_for_table_check(
+                        target_table, _builder_key(rowcount_anomaly_key, "ROW_COUNT_ANOMALY"), anomaly_params
+                    )
+                except ValueError as exc:
+                    table_check_error = f"Invalid row count anomaly configuration: {exc}"
+                else:
+                    existing_anomaly = existing_table_checks.get(rowcount_anomaly_key)
+                    check_rows.append(DQCheck(
+                        config_id=(cfg.config_id if cfg else "temp"),
+                        check_id=(existing_anomaly.check_id if existing_anomaly else "TABLE_ROW_COUNT_ANOMALY"),
+                        table_fqn=target_table, column_name=None,
+                        rule_expr=(f"AGG: {anomaly_rule}" if anomaly_is_agg else anomaly_rule), severity=(existing_anomaly.severity if existing_anomaly else "ERROR"),
+                        sample_rows=0, check_type=rowcount_anomaly_key,
+                        params_json=json.dumps(anomaly_params)
+                    ))
     
             st.markdown("### Schedule")
             existing_cron = getattr(cfg, "schedule_cron", None) if cfg else None
