@@ -69,13 +69,20 @@ def _modal_container(title: str, key: Optional[str] = None):
     """
 
     if hasattr(st, "modal"):
-        return st.modal(title, key=key)
+        modal = st.modal(title, key=key)
+        if hasattr(modal, "__enter__"):
+            return modal
+
     if hasattr(st, "dialog"):
         dialog_fn = st.dialog
         dialog_signature = inspect.signature(dialog_fn)
         if "key" in dialog_signature.parameters and key is not None:
-            return dialog_fn(title, key=key)
-        return dialog_fn(title)
+            dialog = dialog_fn(title, key=key)
+        else:
+            dialog = dialog_fn(title)
+        if hasattr(dialog, "__enter__"):
+            return dialog
+
     st.warning("Streamlit modal not available; showing content inline instead.")
     return st.container()
 
