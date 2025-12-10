@@ -33,7 +33,7 @@ Forbidden patterns:
 
 import inspect
 import streamlit as st, logging
-from typing import Optional
+from typing import Optional, Tuple
 
 # Safe inits (no rendering)
 st.session_state["_rerun_count"] = st.session_state.get("_rerun_count", 0) + 1
@@ -676,6 +676,12 @@ def _summarize_rule(rule_code: str, params: Dict[str, Any]) -> str:
     return ", ".join(f"{k}={v}" for k, v in params.items()) or "—"
 
 
+def _split_target_fqn(fqn: str) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+    if not fqn or fqn.count(".") != 2:
+        return None, None, None
+    return tuple(part.strip('"') for part in fqn.split("."))  # type: ignore[return-value]
+
+
 def _get_page_from_query_params() -> Optional[str]:
     candidate: Optional[str] = None
     try:
@@ -1161,19 +1167,29 @@ def render_config_editor():
         details = f" ({', '.join(summary_parts)})" if summary_parts else ""
         st.success(f"Applied profile suggestion{details}. Review the recommended checks below.")
 
+    rule_form_active = bool(
+        st.session_state.get("rule_add_mode")
+        or st.session_state.get("active_rule_edit_id")
+        or st.session_state.get("inline_edit_entry")
+    )
+
     # Target (picker is stateless, we persist a single FQN)
     st.subheader("Target")
     base_fqn = st.session_state.get("editor_target_fqn") or (cfg.target_table_fqn if cfg else None)
     table_locked = bool(existing_checks)
-    db_sel, sch_sel, tbl_sel, target_table = stateless_table_picker(
-        session, base_fqn, disabled=table_locked
-    )
-    if target_table:
-        st.session_state["editor_target_fqn"] = target_table
-    if table_locked:
-        st.caption(
-            "Table is locked because rules exist. Create a new configuration for a different table."
+    if rule_form_active:
+        db_sel, sch_sel, tbl_sel = _split_target_fqn(base_fqn or "")
+        target_table = base_fqn or ""
+    else:
+        db_sel, sch_sel, tbl_sel, target_table = stateless_table_picker(
+            session, base_fqn, disabled=table_locked
         )
+        if target_table:
+            st.session_state["editor_target_fqn"] = target_table
+        if table_locked:
+            st.caption(
+                "Table is locked because rules exist. Create a new configuration for a different table."
+            )
     st.caption(f"Target Table: {target_table or '— not selected —'}")
 
     # Columns available for rules
@@ -1259,6 +1275,7 @@ def render_config_editor():
                 "param_schema": template.param_schema if template else rule.get("param_schema"),
                 "default_params": template.default_params if template else rule.get("default_params"),
                 "rule_version": template.version if template else rule.get("version"),
+                "category": (template.category if template else rule.get("category")) or "—",
                 "template": template,
             }
         )
@@ -1289,6 +1306,7 @@ def render_config_editor():
         st.session_state.pop("active_rule_edit_id", None)
         st.session_state.pop("active_rule_edit_key", None)
         add_mode = True
+        st.rerun()
 
     active_edit_entry: Optional[Dict[str, Any]] = None
     active_edit_key: Optional[str] = None
@@ -1356,7 +1374,7 @@ def render_config_editor():
     head_cols = st.columns([2, 3, 3, 1, 1])
     head_cols[0].markdown("<div class='dq-rule-head'>Column</div>", unsafe_allow_html=True)
     head_cols[1].markdown("<div class='dq-rule-head'>Rule</div>", unsafe_allow_html=True)
-    head_cols[2].markdown("<div class='dq-rule-head'>Summary</div>", unsafe_allow_html=True)
+    head_cols[2].markdown("<div class='dq-rule-head'>Category</div>", unsafe_allow_html=True)
     head_cols[3].markdown("<div class='dq-rule-head'>Severity</div>", unsafe_allow_html=True)
     head_cols[4].markdown("<div class='dq-rule-head'>Actions</div>", unsafe_allow_html=True)
 
@@ -1369,7 +1387,7 @@ def render_config_editor():
                 f"{entry.get('rule_name')}\n\n<span style='color:#6b7280;font-size:.85rem;'>{entry.get('rule_code')}</span>",
                 unsafe_allow_html=True,
             )
-            cols[2].markdown(_summarize_rule(entry.get("rule_code", ""), entry.get("params") or {}))
+            cols[2].markdown(str(entry.get("category")))
             cols[3].markdown(entry.get("severity") or "—")
             edit_clicked = cols[4].button("✏️", key=f"edit_rule_{entry.get('check_id')}", help="Edit rule")
             delete_clicked = cols[4].button(
