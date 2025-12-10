@@ -30,14 +30,26 @@ def _normalize_rule_expression(check: DQCheck) -> str:
 
     raw_expr = (check.compiled_rule or check.rule_expr or "").strip()
     rule_expr = raw_expr
-    if raw_expr.startswith("{"):
-        try:
-            parsed = json.loads(raw_expr)
-            if isinstance(parsed, dict):
-                compiled = (parsed.get("compiled_predicate") or "").strip()
-                if compiled:
-                    rule_expr = compiled
-        except Exception:
+    try:
+        parsed = json.loads(raw_expr)
+        parsed_compiled = None
+        if isinstance(parsed, dict):
+            parsed_compiled = (parsed.get("compiled_predicate") or "").strip()
+        elif isinstance(parsed, str):
+            # Handle double-encoded JSON payloads or quoted predicates.
+            parsed_compiled = parsed.strip()
+            try:
+                nested = json.loads(parsed)
+                if isinstance(nested, dict):
+                    nested_compiled = (nested.get("compiled_predicate") or "").strip()
+                    if nested_compiled:
+                        parsed_compiled = nested_compiled
+            except Exception:
+                pass
+        if parsed_compiled:
+            rule_expr = parsed_compiled
+    except Exception:
+        if raw_expr.startswith("{"):
             # Attempt a defensive extraction when the payload is not valid JSON.
             patterns = [
                 r'"compiled_predicate"\s*:\s*"(?P<predicate>.*?)"\s*,\s*"',

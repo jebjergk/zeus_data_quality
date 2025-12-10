@@ -42,3 +42,20 @@ def test_normalize_rule_expression_handles_invalid_json_payload():
     check = _make_check(rule_expr=payload)
 
     assert _normalize_rule_expression(check) == compiled
+
+
+def test_normalize_rule_expression_handles_quoted_json_string():
+    compiled = 'T."COL" > 10'
+    payload = json.dumps({"compiled_predicate": compiled})
+    quoted = json.dumps(payload)  # Stored with extra quotes
+    check = _make_check(rule_expr=quoted)
+
+    assert _normalize_rule_expression(check) == compiled
+
+
+def test_normalize_rule_expression_handles_wrapped_predicate_string():
+    compiled = "T.COL < 5"
+    wrapped = json.dumps(compiled)
+    check = _make_check(rule_expr=wrapped)
+
+    assert _normalize_rule_expression(check) == compiled
