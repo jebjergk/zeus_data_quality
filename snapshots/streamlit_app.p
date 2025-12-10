@@ -429,6 +429,18 @@ def _render_rule_edit_form(
     defaults_raw = entry.get("default_params")
     defaults = defaults_raw if isinstance(defaults_raw, dict) else {}
     start_values = {**defaults, **(entry.get("params") or {})}
+    if not param_schema and start_values:
+        inferred_schema: List[Dict[str, Any]] = []
+        for pname, pval in start_values.items():
+            inferred_type = "STRING"
+            if isinstance(pval, bool):
+                inferred_type = "BOOLEAN"
+            elif isinstance(pval, (int, float)):
+                inferred_type = "NUMBER"
+            elif isinstance(pval, list):
+                inferred_type = "STRING_LIST"
+            inferred_schema.append({"name": pname, "type": inferred_type, "required": False})
+        param_schema = _normalize_param_schema(inferred_schema)
     rendered_params, param_error = _render_param_inputs(
         key_prefix=key_prefix,
         param_schema=param_schema,
