@@ -427,7 +427,7 @@ def get_library_checks(session: Session, config_id: str) -> List[Dict[str, Any]]
           r.VERSION,
           r.SCOPE
         FROM {_q(DQ_CHECK_TBL)} c
-        JOIN {rule_table} r
+        LEFT JOIN {rule_table} r
           ON c.RULE_CODE = r.RULE_CODE
         WHERE c.CONFIG_ID = ?
         """,

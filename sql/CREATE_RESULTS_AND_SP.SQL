@@ -102,6 +102,14 @@ def run_dq_config(session: Session, CONFIG_ID: str) -> str:
             else:
                 error_msg = str(exc)
 
+        if not ok and not error_msg:
+            context_sql = agg_sql or failure_sql or rule_expr_raw
+            detail = context_sql[:200] if context_sql else ""
+            error_msg = (
+                f"{check_type or 'Check'} evaluated to FALSE"
+                + (f" | SQL[:200]={detail}" if detail else "")
+            )
+
         session.sql(
             """
             INSERT INTO DQ_RUN_RESULTS (RUN_ID, CONFIG_ID, CHECK_ID, CHECK_TYPE, RUN_TS, FAILURES, OK, ERROR_MSG)
