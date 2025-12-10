@@ -1274,7 +1274,20 @@ def render_config_editor():
             if cancel_new.button("Cancel", key="add_rule_cancel"):
                 pass
 
+    # Column selection (builder contract)
+    default_cols = sorted({chk.column_name for chk in column_checks if chk.column_name})
+    preselected = st.session_state.get("dq_cols_ms") or default_cols
+    st.markdown("### Columns")
+    selected_columns = st.multiselect(
+        "Columns to check",
+        options=available_cols,
+        default=preselected,
+        key="dq_cols_ms",
+    )
+    st.info("Table-level checks **FRESHNESS** and **ROW_COUNT_ANOMALY** are automatically included.")
+
     # -------- Form --------
+    column_errors: List[str] = []
     # Pre-populate table-level defaults from existing checks / state
     existing_table_params: Dict[str, Dict[str, Any]] = {}
     legacy_row_count_params: Dict[str, object] = {}
@@ -1367,7 +1380,204 @@ def render_config_editor():
         st.text_input("Name", value=name, disabled=True, help="Automatically derived from the selected database, schema, and table.")
         desc = st.text_area("Description", value=(cfg.description if cfg else ""))
 
-        check_rows: List[DQCheck] = list(column_checks)
+        check_rows: List[DQCheck] = []
+
+        existing_by_col_type: Dict[Tuple[str, str], DQCheck] = {}
+        for chk in column_checks:
+            key = _rule_key(chk.check_type or chk.rule_code or "")
+            existing_by_col_type[(chk.column_name or "", key)] = chk
+
+        def _current_params(chk: Optional[DQCheck]) -> Dict[str, Any]:
+            if not chk:
+                return {}
+            return _parse_params(chk.params_json)
+
+        def _default_severity(chk: Optional[DQCheck]) -> str:
+            return (chk.severity if chk and chk.severity else "ERROR") or "ERROR"
+
+        severity_options = ["ERROR", "WARN"]
+
+        def _coerce_int(value: Any, default: int = 0) -> int:
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                return default
+
+        def _coerce_float(value: Any, default: float = 0.0) -> float:
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                return default
+
+        def _add_column_check(
+            *,
+            enabled: bool,
+            ctype: str,
+            col: str,
+            params: Dict[str, Any],
+            severity: str,
+            sample_rows: int,
+        ) -> None:
+            if not enabled:
+                return
+            effective_table = target_table or (cfg.target_table_fqn if cfg else "")
+            if not effective_table:
+                column_errors.append("Select a target table to configure column checks.")
+                return
+            existing = existing_by_col_type.get((col, _rule_key(ctype)))
+            try:
+                rule_def = build_rule_for_column_check(effective_table, col, ctype, params)
+            except ValueError as exc:
+                column_errors.append(f"{ctype} for {col}: {exc}")
+                return
+            rule_sql: str
+            is_agg = False
+            if isinstance(rule_def, tuple):
+                rule_sql, is_agg = rule_def[0], bool(rule_def[1]) if len(rule_def) > 1 else False
+            else:
+                rule_sql, is_agg = rule_def.sql, rule_def.is_aggregate
+            compiled_rule = f"AGG: {rule_sql}" if is_agg else rule_sql
+            params_json = json.dumps(params, default=str) if params else None
+            check_rows.append(
+                DQCheck(
+                    config_id=(cfg.config_id if cfg else "temp"),
+                    check_id=existing.check_id if existing and existing.check_id else str(uuid4()),
+                    table_fqn=effective_table,
+                    column_name=col,
+                    rule_expr=compiled_rule,
+                    severity=severity,
+                    sample_rows=int(sample_rows),
+                    check_type=_rule_key(ctype),
+                    params_json=params_json,
+                    rule_params=params if params else None,
+                    compiled_rule=compiled_rule,
+                )
+            )
+
+        for col in selected_columns:
+            sk = _keyify(col)
+            with st.expander(f"Column: {col}", expanded=False):
+                sample_key = f"samp_{sk}"
+                existing_sample = next((c.sample_rows for c in column_checks if c.column_name == col and c.sample_rows is not None), None)
+                sample_rows = st.number_input(
+                    f"Sample failing rows for {col}",
+                    min_value=0,
+                    max_value=1000,
+                    value=int(st.session_state.get(sample_key, existing_sample or 10)),
+                    key=sample_key,
+                )
+
+                uniq_chk = existing_by_col_type.get((col, "UNIQUE"))
+                unique_enabled = st.checkbox("UNIQUE", value=bool(uniq_chk), key=f"{sk}_chk_unique")
+                ignore_nulls = st.checkbox("Ignore NULLs", value=bool(_current_params(uniq_chk).get("ignore_nulls", True)), key=f"{sk}_p_un_ignore") if unique_enabled else _current_params(uniq_chk).get("ignore_nulls", True)
+                sev_unique = st.selectbox("Severity (UNIQUE)", options=severity_options, index=severity_options.index(_default_severity(uniq_chk) if _default_severity(uniq_chk) in severity_options else "ERROR"), key=f"{sk}_sev_unique") if unique_enabled else _default_severity(uniq_chk)
+
+                null_chk = existing_by_col_type.get((col, "NULL_COUNT"))
+                null_enabled = st.checkbox("NULL_COUNT", value=bool(null_chk), key=f"{sk}_chk_nullcount")
+                max_nulls_default = _coerce_int(_current_params(null_chk).get("max_nulls", 0), 0)
+                max_nulls = st.number_input(
+                    "Max NULL rows",
+                    min_value=0,
+                    value=max_nulls_default,
+                    key=f"{sk}_p_nc_max",
+                ) if null_enabled else max_nulls_default
+                sev_null = st.selectbox("Severity (NULL_COUNT)", options=severity_options, index=severity_options.index(_default_severity(null_chk) if _default_severity(null_chk) in severity_options else "ERROR"), key=f"{sk}_sev_null") if null_enabled else _default_severity(null_chk)
+
+                mm_chk = existing_by_col_type.get((col, "MIN_MAX"))
+                mm_enabled = st.checkbox("MIN_MAX", value=bool(mm_chk), key=f"{sk}_chk_minmax")
+                min_val = st.text_input("Min (inclusive)", value=str(_current_params(mm_chk).get("min", "")), key=f"{sk}_p_mm_min") if mm_enabled else _current_params(mm_chk).get("min", "")
+                max_val = st.text_input("Max (inclusive)", value=str(_current_params(mm_chk).get("max", "")), key=f"{sk}_p_mm_max") if mm_enabled else _current_params(mm_chk).get("max", "")
+                sev_mm = st.selectbox("Severity (MIN_MAX)", options=severity_options, index=severity_options.index(_default_severity(mm_chk) if _default_severity(mm_chk) in severity_options else "ERROR"), key=f"{sk}_sev_mm") if mm_enabled else _default_severity(mm_chk)
+
+                ws_chk = existing_by_col_type.get((col, "WHITESPACE"))
+                ws_enabled = st.checkbox("WHITESPACE", value=bool(ws_chk), key=f"{sk}_chk_ws")
+                ws_options = ["NO_LEADING_TRAILING", "NO_INTERNAL_ONLY_WHITESPACE", "NON_EMPTY_TRIMMED"]
+                ws_current = (_current_params(ws_chk).get("mode") or "NO_LEADING_TRAILING")
+                ws_index = ws_options.index(ws_current) if ws_current in ws_options else 0
+                ws_mode = st.selectbox(
+                    "Mode",
+                    options=ws_options,
+                    index=ws_index,
+                    key=f"{sk}_p_ws_mode",
+                ) if ws_enabled else ws_current
+                sev_ws = st.selectbox("Severity (WHITESPACE)", options=severity_options, index=severity_options.index(_default_severity(ws_chk) if _default_severity(ws_chk) in severity_options else "ERROR"), key=f"{sk}_sev_ws") if ws_enabled else _default_severity(ws_chk)
+
+                fmt_chk = existing_by_col_type.get((col, "FORMAT_DISTRIBUTION"))
+                fmt_enabled = st.checkbox("FORMAT_DISTRIBUTION", value=bool(fmt_chk), key=f"{sk}_chk_fmt")
+                fmt_regex = st.text_input("Regex (Snowflake RLIKE)", value=str(_current_params(fmt_chk).get("regex", "")), key=f"{sk}_p_fmt_regex") if fmt_enabled else _current_params(fmt_chk).get("regex", "")
+                fmt_ratio_default = _coerce_float(_current_params(fmt_chk).get("min_match_ratio", 0.8), 0.8)
+                fmt_ratio = st.number_input(
+                    "Min match ratio (0-1)",
+                    min_value=0.0,
+                    max_value=1.0,
+                    step=0.01,
+                    value=fmt_ratio_default,
+                    key=f"{sk}_p_fmt_ratio",
+                ) if fmt_enabled else fmt_ratio_default
+                sev_fmt = st.selectbox("Severity (FORMAT_DISTRIBUTION)", options=severity_options, index=severity_options.index(_default_severity(fmt_chk) if _default_severity(fmt_chk) in severity_options else "ERROR"), key=f"{sk}_sev_fmt") if fmt_enabled else _default_severity(fmt_chk)
+
+                val_chk = existing_by_col_type.get((col, "VALUE_DISTRIBUTION"))
+                val_enabled = st.checkbox("VALUE_DISTRIBUTION", value=bool(val_chk), key=f"{sk}_chk_val")
+                val_csv = st.text_input("Allowed values (CSV)", value=str(_current_params(val_chk).get("allowed_values_csv", "")), key=f"{sk}_p_val_csv") if val_enabled else _current_params(val_chk).get("allowed_values_csv", "")
+                val_ratio_default = _coerce_float(_current_params(val_chk).get("min_match_ratio", 0.8), 0.8)
+                val_ratio = st.number_input(
+                    "Min in-set ratio (0-1)",
+                    min_value=0.0,
+                    max_value=1.0,
+                    step=0.01,
+                    value=val_ratio_default,
+                    key=f"{sk}_p_val_ratio",
+                ) if val_enabled else val_ratio_default
+                sev_val = st.selectbox("Severity (VALUE_DISTRIBUTION)", options=severity_options, index=severity_options.index(_default_severity(val_chk) if _default_severity(val_chk) in severity_options else "ERROR"), key=f"{sk}_sev_val") if val_enabled else _default_severity(val_chk)
+
+                _add_column_check(
+                    enabled=unique_enabled,
+                    ctype="UNIQUE",
+                    col=col,
+                    params={"ignore_nulls": bool(ignore_nulls)},
+                    severity=sev_unique,
+                    sample_rows=int(sample_rows),
+                )
+                _add_column_check(
+                    enabled=null_enabled,
+                    ctype="NULL_COUNT",
+                    col=col,
+                    params={"max_nulls": int(max_nulls) if isinstance(max_nulls, (int, float)) else 0},
+                    severity=sev_null,
+                    sample_rows=int(sample_rows),
+                )
+                _add_column_check(
+                    enabled=mm_enabled,
+                    ctype="MIN_MAX",
+                    col=col,
+                    params={"min": min_val, "max": max_val},
+                    severity=sev_mm,
+                    sample_rows=int(sample_rows),
+                )
+                _add_column_check(
+                    enabled=ws_enabled,
+                    ctype="WHITESPACE",
+                    col=col,
+                    params={"mode": ws_mode},
+                    severity=sev_ws,
+                    sample_rows=int(sample_rows),
+                )
+                _add_column_check(
+                    enabled=fmt_enabled,
+                    ctype="FORMAT_DISTRIBUTION",
+                    col=col,
+                    params={"regex": fmt_regex, "min_match_ratio": fmt_ratio},
+                    severity=sev_fmt,
+                    sample_rows=int(sample_rows),
+                )
+                _add_column_check(
+                    enabled=val_enabled,
+                    ctype="VALUE_DISTRIBUTION",
+                    col=col,
+                    params={"allowed_values_csv": val_csv, "min_match_ratio": val_ratio},
+                    severity=sev_val,
+                    sample_rows=int(sample_rows),
+                )
 
         # Table-level (always)
         st.markdown("### Table-level checks (always included)")
@@ -1479,6 +1689,10 @@ def render_config_editor():
         with c3: run_now_btn = st.form_submit_button("Run Now")
         with c4: delete_btn = st.form_submit_button("Delete", type="secondary")
 
+    if column_errors:
+        for err in dict.fromkeys(column_errors):
+            st.error(err)
+
     if table_check_error:
         st.error(table_check_error)
 
@@ -1520,8 +1734,12 @@ def render_config_editor():
 
     # After submit
     if apply_now or save_draft or run_now_btn or delete_btn:
-        if (apply_now or save_draft or run_now_btn) and table_check_error:
-            st.error(table_check_error)
+        if (apply_now or save_draft or run_now_btn) and (table_check_error or column_errors):
+            if column_errors:
+                for err in dict.fromkeys(column_errors):
+                    st.error(err)
+            if table_check_error:
+                st.error(table_check_error)
             return
         if not session:
             st.error("No active Snowpark session.")
