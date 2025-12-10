@@ -166,7 +166,9 @@ def build_rule_for_column_check(fqn: str, col: str, ctype: str, params: dict):
 def build_rule_for_table_check(fqn: str, ttype: str, params: dict):
     ttype = (ttype or "").upper()
     if ttype == "FRESHNESS":
-        ts_col_raw = params.get("timestamp_column", "LOAD_TIMESTAMP")
+        ts_col_raw = (params or {}).get("timestamp_column")
+        if not ts_col_raw or not str(ts_col_raw).strip():
+            raise ValueError("timestamp_column is required for FRESHNESS checks")
         ts_col = _quote_identifier(ts_col_raw)
         max_age = int(params.get("max_age_minutes", 1920))
         table_name = _quote_table_fqn(fqn)
@@ -184,7 +186,9 @@ def build_rule_for_table_check(fqn: str, ttype: str, params: dict):
         table_name = _quote_table_fqn(fqn)
         return f"SELECT COUNT(*) >= {min_rows} AS OK FROM {table_name}", True
     if ttype == "ROW_COUNT_ANOMALY":
-        ts_col_raw = params.get("timestamp_column", "LOAD_TIMESTAMP")
+        ts_col_raw = (params or {}).get("timestamp_column")
+        if not ts_col_raw or not str(ts_col_raw).strip():
+            raise ValueError("timestamp_column is required for ROW_COUNT_ANOMALY checks")
         ts_col = _quote_identifier(ts_col_raw)
         lookback_days = int(params.get("lookback_days", 28))
         sensitivity = float(params.get("sensitivity", 3.0))

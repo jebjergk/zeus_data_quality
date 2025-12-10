@@ -1428,7 +1428,7 @@ def render_config_editor():
         (session_ts_col if isinstance(session_ts_col, str) and session_ts_col else None)
         or freshness_defaults.get("timestamp_column")
         or legacy_row_count_params.get("timestamp_column")
-        or "LOAD_TIMESTAMP"
+        or ""
     )
     max_age_source: Any = session_max_age if session_max_age is not None else freshness_defaults.get("max_age_minutes")
     if max_age_source is None:
