@@ -135,7 +135,9 @@ def run_now(session, cfg: DQConfig, checks: List[DQCheck]) -> Dict[str, Any]:
                 "sample": []
             })
         else:
-            failure_sql = f"SELECT COUNT(*) AS FAILURES FROM {chk.table_fqn} WHERE NOT ({rule})"
+            failure_sql = (
+                f"SELECT COUNT(*) AS FAILURES FROM {chk.table_fqn} AS T WHERE NOT ({rule})"
+            )
             try:
                 df = _sql_with_params(session, failure_sql, rule_params)
             except Exception as exc:
@@ -144,7 +146,7 @@ def run_now(session, cfg: DQConfig, checks: List[DQCheck]) -> Dict[str, Any]:
             sample = []
             if chk.sample_rows and failures:
                 sample_sql = (
-                    f"SELECT * FROM {chk.table_fqn} WHERE NOT ({rule}) LIMIT {int(chk.sample_rows)}"
+                    f"SELECT * FROM {chk.table_fqn} AS T WHERE NOT ({rule}) LIMIT {int(chk.sample_rows)}"
                 )
                 try:
                     s_df = _sql_with_params(session, sample_sql, rule_params)
