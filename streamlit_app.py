@@ -1849,7 +1849,24 @@ def render_config_editor():
                 cr.config_id = new_id; cr.table_fqn = target_table
                 checks_rebound.append(cr)
 
-            out = save_config_and_checks(session, dq_cfg, checks_rebound, apply_now=apply_now)
+            def _dedupe_checks(checks: List[DQCheck]) -> List[DQCheck]:
+                # Keep the latest instance for each table/column/check_type trio to avoid duplicates
+                deduped: Dict[Tuple[str, str, str], DQCheck] = {}
+                for chk in checks:
+                    key = (
+                        chk.table_fqn or "",
+                        (chk.column_name or "").lower(),
+                        _rule_key(chk.check_type or ""),
+                    )
+                    deduped[key] = chk
+                return list(deduped.values())
+
+            out = save_config_and_checks(
+                session,
+                dq_cfg,
+                _dedupe_checks(checks_rebound),
+                apply_now=apply_now,
+            )
             base_msg = f"Saved config {new_id} ({status})."
             st.success(base_msg)
             remember("success", base_msg)
