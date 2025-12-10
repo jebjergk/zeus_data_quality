@@ -1211,10 +1211,13 @@ def render_config_editor():
     detail_mode = add_mode or bool(st.session_state.get("active_rule_edit_id"))
 
     grid_entries: List[Dict[str, Any]] = []
+    excluded_table_rules = {"FRESHNESS", "ROW_COUNT"}
     for rule in library_checks:
+        rule_code_key = (rule.get("rule_code") or rule.get("rule_id") or "").upper()
+        if rule_code_key in excluded_table_rules:
+            continue
         if not rule.get("column_name"):
             continue
-        rule_code_key = (rule.get("rule_code") or "").upper()
         template = (
             active_rules_by_code.get(rule_code_key)
             or all_rules_map.get(rule_code_key)
