@@ -415,6 +415,7 @@ def _render_rule_edit_form(
     table_suggestions: Optional[List[str]],
     column_lookup: Optional[Any],
     inline_mode: bool = False,
+    state_keys_to_clear: Optional[List[str]] = None,
 ):
     st.markdown(
         f"**Config:** {cfg.name if cfg else entry.get('column')}  \n"
@@ -466,11 +467,15 @@ def _render_rule_edit_form(
                     severity=entry.get("severity"),
                 )
                 st.success("Rule updated.")
+                for key in state_keys_to_clear or []:
+                    st.session_state.pop(key, None)
                 st.rerun()
     if col_cancel.button("Cancel", key=f"{key_prefix}_cancel"):
         if inline_mode:
             st.session_state.pop("inline_edit_entry", None)
             st.session_state.pop("inline_edit_key", None)
+            for key in state_keys_to_clear or []:
+                st.session_state.pop(key, None)
         st.rerun()
 
 
@@ -1128,8 +1133,47 @@ def render_config_editor():
 
     filtered_entries = [e for e in grid_entries if _matches_filters(e)]
 
-    inline_edit_entry: Optional[Dict[str, Any]] = None if MODAL_SUPPORTED else st.session_state.get("inline_edit_entry")
-    inline_edit_key: Optional[str] = None if MODAL_SUPPORTED else st.session_state.get("inline_edit_key")
+    active_edit_entry: Optional[Dict[str, Any]] = None
+    active_edit_key: Optional[str] = None
+    if not MODAL_SUPPORTED:
+        active_edit_id = st.session_state.get("active_rule_edit_id")
+        if active_edit_id:
+            active_edit_entry = next(
+                (
+                    e
+                    for e in grid_entries
+                    if str(e.get("check_id")) == str(active_edit_id)
+                ),
+                None,
+            )
+            active_edit_key = st.session_state.get("active_rule_edit_key") or f"edit_modal_{active_edit_id}"
+            if not active_edit_entry:
+                st.session_state.pop("active_rule_edit_id", None)
+                st.session_state.pop("active_rule_edit_key", None)
+                st.session_state.pop("inline_edit_entry", None)
+                st.session_state.pop("inline_edit_key", None)
+    if active_edit_entry:
+        st.subheader("Edit rule")
+        st.info("Update the parameters below, then save or cancel to return to the rule list.", icon="✏️")
+        with st.container(border=True):
+            _render_rule_edit_form(
+                entry=active_edit_entry,
+                key_prefix=active_edit_key or "inline_edit",
+                target_table=target_table or (cfg.target_table_fqn if cfg else ""),
+                cfg=cfg,
+                session=session,
+                available_cols=available_cols,
+                table_suggestions=table_suggestions,
+                column_lookup=column_lookup,
+                inline_mode=True,
+                state_keys_to_clear=[
+                    "inline_edit_entry",
+                    "inline_edit_key",
+                    "active_rule_edit_id",
+                    "active_rule_edit_key",
+                ],
+            )
+        return
 
     st.caption(f"Showing {len(filtered_entries)} of {len(grid_entries)} rules")
     head_cols = st.columns([2, 3, 3, 1, 1])
@@ -1175,32 +1219,14 @@ def render_config_editor():
                 else:
                     st.session_state["inline_edit_entry"] = entry
                     st.session_state["inline_edit_key"] = f"edit_modal_{entry.get('check_id')}"
-                    inline_edit_entry = entry
-                    inline_edit_key = f"edit_modal_{entry.get('check_id')}"
+                    st.session_state["active_rule_edit_id"] = str(entry.get("check_id"))
+                    st.session_state["active_rule_edit_key"] = f"edit_modal_{entry.get('check_id')}"
+                    st.rerun()
             if delete_clicked:
                 delete_check_by_id(session, str(entry.get("check_id")))
                 st.success("Rule deleted.")
                 st.rerun()
         st.markdown("</div>", unsafe_allow_html=True)
-
-    if not MODAL_SUPPORTED and inline_edit_entry:
-        st.info(
-            "Inline editing is shown because Streamlit modals are unavailable. "
-            "Update parameters here; delete and recreate the rule to switch templates.",
-            icon="✏️",
-        )
-        with st.container(border=True):
-            _render_rule_edit_form(
-                entry=inline_edit_entry,
-                key_prefix=inline_edit_key or "inline_edit",
-                target_table=target_table or (cfg.target_table_fqn if cfg else ""),
-                cfg=cfg,
-                session=session,
-                available_cols=available_cols,
-                table_suggestions=table_suggestions,
-                column_lookup=column_lookup,
-                inline_mode=True,
-            )
 
     if add_clicked:
         with _modal_container("Add rule", key="add_rule_modal"):
@@ -1290,7 +1316,8 @@ def render_config_editor():
 
     # Column selection (builder contract)
     default_cols = sorted({chk.column_name for chk in column_checks if chk.column_name})
-    preselected = st.session_state.get("dq_cols_ms") or default_cols
+    preselected_raw = st.session_state.get("dq_cols_ms") or default_cols
+    preselected = [c for c in preselected_raw if c in (available_cols or [])]
     st.markdown("### Columns")
     selected_columns = st.multiselect(
         "Columns to check",
