@@ -32,6 +32,7 @@ Forbidden patterns:
 """
 
 import streamlit as st, logging
+from typing import Optional
 
 # Safe inits (no rendering)
 st.session_state["_rerun_count"] = st.session_state.get("_rerun_count", 0) + 1
@@ -57,6 +58,21 @@ logging.basicConfig(
     force=True,
 )
 logging.getLogger("snowflake").setLevel(logging.WARNING)
+
+
+def _modal_container(title: str, key: Optional[str] = None):
+    """Gracefully handle Streamlit versions without `st.modal`.
+
+    Prefers `st.modal` when available, falls back to `st.dialog` in older
+    releases, and finally to a plain container with a warning.
+    """
+
+    if hasattr(st, "modal"):
+        return st.modal(title, key=key)
+    if hasattr(st, "dialog"):
+        return st.dialog(title, key=key)
+    st.warning("Streamlit modal not available; showing content inline instead.")
+    return st.container()
 
 import json
 from datetime import datetime
@@ -1037,7 +1053,7 @@ def render_config_editor():
                 "🗑️", key=f"delete_rule_{entry.get('check_id')}", help="Delete rule"
             )
             if edit_clicked:
-                with st.modal(
+                with _modal_container(
                     f"Edit rule: {entry.get('rule_name')} on {entry.get('column')}",
                     key=f"edit_modal_{entry.get('check_id')}",
                 ):
@@ -1101,7 +1117,7 @@ def render_config_editor():
         st.markdown("</div>", unsafe_allow_html=True)
 
     if add_clicked:
-        with st.modal("Add rule", key="add_rule_modal"):
+        with _modal_container("Add rule", key="add_rule_modal"):
             selected_column = st.selectbox(
                 "Column",
                 options=available_cols or ["—"],
