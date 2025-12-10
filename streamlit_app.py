@@ -1202,6 +1202,9 @@ def render_config_editor():
     column_type_lookup = {name: dtype for name, dtype in available_col_metadata}
     table_suggestions = _related_table_options(session, target_table)
     column_lookup = lambda tbl: _columns_for_table(session, tbl)
+
+    # Surface table-level controls before field-level rules
+    table_checks_section = st.container()
     st.markdown("### Rules")
 
     add_mode = st.session_state.get("rule_add_mode", False)
@@ -1429,435 +1432,370 @@ def render_config_editor():
                 st.rerun()
         st.markdown("</div>", unsafe_allow_html=True)
 
-    # -------- Form --------
-    # Pre-populate table-level defaults from existing checks / state
-    existing_table_params: Dict[str, Dict[str, Any]] = {}
-    legacy_row_count_params: Dict[str, object] = {}
-    for ec in existing_checks:
-        if not ec.column_name and ec.params_json:
-            key = _rule_key(ec.check_type or "")
-            try:
-                parsed_params = json.loads(ec.params_json)
-            except Exception:
-                parsed_params = {}
-
-            if key == "ROW_COUNT":
-                legacy_row_count_params = parsed_params or {}
-                continue
-
-            existing_table_params[key] = parsed_params or {}
-
-    freshness_key = _rule_key("FRESHNESS")
-    rowcount_anomaly_key = _rule_key("ROW_COUNT_ANOMALY")
-
-    if "_dq_rowcount_params" in st.session_state:
-        stored_params = st.session_state.get("_dq_rowcount_params") or {}
-        existing_table_params[rowcount_anomaly_key] = {
-            **existing_table_params.get(rowcount_anomaly_key, {}),
-            **stored_params,
-        }
-
-    session_ts_col = st.session_state.get("_dq_table_ts_col")
-    session_max_age = st.session_state.get("_dq_table_max_age")
-    if session_ts_col or session_max_age is not None:
-        freshness_entry = existing_table_params.setdefault(freshness_key, {})
-        if session_ts_col and "timestamp_column" not in freshness_entry:
-            freshness_entry["timestamp_column"] = session_ts_col
-        if session_max_age is not None and "max_age_minutes" not in freshness_entry:
-            try:
-                freshness_entry["max_age_minutes"] = int(session_max_age)
-            except (TypeError, ValueError):
-                pass
-
-    freshness_defaults = existing_table_params.get(freshness_key, {})
-    ts_default = (
-        (session_ts_col if isinstance(session_ts_col, str) and session_ts_col else None)
-        or freshness_defaults.get("timestamp_column")
-        or legacy_row_count_params.get("timestamp_column")
-        or ""
-    )
-    max_age_source: Any = session_max_age if session_max_age is not None else freshness_defaults.get("max_age_minutes")
-    if max_age_source is None:
-        max_age_source = 1920
-    try:
-        max_age_default = int(max_age_source)
-    except (TypeError, ValueError):
-        max_age_default = 1920
-
-    rowcount_defaults = existing_table_params.get(rowcount_anomaly_key) or {}
-    if not rowcount_defaults:
-        rowcount_defaults = {}
-    rowcount_defaults.setdefault("timestamp_column", ts_default)
-    rowcount_defaults.setdefault("lookback_days", 28)
-    rowcount_defaults.setdefault("sensitivity", 3.0)
-    rowcount_defaults.setdefault("min_history_days", 7)
-    existing_table_params[rowcount_anomaly_key] = rowcount_defaults
-
-    current_cfg_id = getattr(cfg, "config_id", None)
-    if st.session_state.get("_dq_table_cfg_id") != current_cfg_id:
-        st.session_state["_dq_table_max_age"] = max_age_default
-        st.session_state["_dq_table_cfg_id"] = current_cfg_id
-
-    if target_table:
-        last_target = st.session_state.get("_dq_table_ts_target")
-        if last_target != target_table:
-            st.session_state["_dq_table_ts_col"] = ts_default
-            st.session_state["_dq_table_max_age"] = max_age_default
-            st.session_state["_dq_table_ts_target"] = target_table
-    if "_dq_table_ts_col" not in st.session_state:
-        st.session_state["_dq_table_ts_col"] = ts_default
-    if "_dq_table_max_age" not in st.session_state:
-        st.session_state["_dq_table_max_age"] = max_age_default
-
-    timestamp_columns = [
-        col
-        for col, dtype in available_col_metadata
-        if isinstance(dtype, str)
-        and any(token in dtype.upper() for token in ("TIMESTAMP", "DATE"))
-    ]
-
-    ts_default_clean = ts_default.strip() if isinstance(ts_default, str) else ""
-    if ts_default_clean and ts_default_clean not in timestamp_columns:
-        timestamp_columns.append(ts_default_clean)
-
-    placeholder_ts = "— select timestamp column —"
-    ts_select_options = [placeholder_ts] + timestamp_columns
-
-    def _ts_option_index(options: List[str], current: str) -> int:
+    with table_checks_section:
+        # -------- Form --------
+        # Pre-populate table-level defaults from existing checks / state
+        existing_table_params: Dict[str, Dict[str, Any]] = {}
+        legacy_row_count_params: Dict[str, object] = {}
+        for ec in existing_checks:
+            if not ec.column_name and ec.params_json:
+                key = _rule_key(ec.check_type or "")
+                try:
+                    parsed_params = json.loads(ec.params_json)
+                except Exception:
+                    parsed_params = {}
+    
+                if key == "ROW_COUNT":
+                    legacy_row_count_params = parsed_params or {}
+                    continue
+    
+                existing_table_params[key] = parsed_params or {}
+    
+        freshness_key = _rule_key("FRESHNESS")
+        rowcount_anomaly_key = _rule_key("ROW_COUNT_ANOMALY")
+    
+        if "_dq_rowcount_params" in st.session_state:
+            stored_params = st.session_state.get("_dq_rowcount_params") or {}
+            existing_table_params[rowcount_anomaly_key] = {
+                **existing_table_params.get(rowcount_anomaly_key, {}),
+                **stored_params,
+            }
+    
+        session_ts_col = st.session_state.get("_dq_table_ts_col")
+        session_max_age = st.session_state.get("_dq_table_max_age")
+        if session_ts_col or session_max_age is not None:
+            freshness_entry = existing_table_params.setdefault(freshness_key, {})
+            if session_ts_col and "timestamp_column" not in freshness_entry:
+                freshness_entry["timestamp_column"] = session_ts_col
+            if session_max_age is not None and "max_age_minutes" not in freshness_entry:
+                try:
+                    freshness_entry["max_age_minutes"] = int(session_max_age)
+                except (TypeError, ValueError):
+                    pass
+    
+        freshness_defaults = existing_table_params.get(freshness_key, {})
+        ts_default = (
+            (session_ts_col if isinstance(session_ts_col, str) and session_ts_col else None)
+            or freshness_defaults.get("timestamp_column")
+            or legacy_row_count_params.get("timestamp_column")
+            or ""
+        )
+        max_age_source: Any = session_max_age if session_max_age is not None else freshness_defaults.get("max_age_minutes")
+        if max_age_source is None:
+            max_age_source = 1920
         try:
-            return options.index(current)
-        except ValueError:
-            return 0
+            max_age_default = int(max_age_source)
+        except (TypeError, ValueError):
+            max_age_default = 1920
+    
+        timestamp_columns = [
+            col
+            for col, dtype in available_col_metadata
+            if isinstance(dtype, str)
+            and any(token in dtype.upper() for token in ("TIMESTAMP", "DATE"))
+        ]
 
-    preview_counts = False
-    table_check_error: Optional[str] = None
+        ts_default_clean = ts_default.strip() if isinstance(ts_default, str) else ""
+        if not ts_default_clean and timestamp_columns:
+            ts_default_clean = timestamp_columns[0]
+            ts_default = ts_default_clean
+        if ts_default_clean and ts_default_clean not in timestamp_columns:
+            timestamp_columns.append(ts_default_clean)
 
-    derived_name = target_table or ""
-    if not derived_name and cfg:
-        derived_name = cfg.target_table_fqn or cfg.name or ""
+        rowcount_defaults = existing_table_params.get(rowcount_anomaly_key) or {}
+        if not rowcount_defaults:
+            rowcount_defaults = {}
+        rowcount_defaults.setdefault("timestamp_column", ts_default)
+        rowcount_defaults.setdefault("lookback_days", 28)
+        rowcount_defaults.setdefault("sensitivity", 3.0)
+        rowcount_defaults.setdefault("min_history_days", 7)
+        existing_table_params[rowcount_anomaly_key] = rowcount_defaults
 
-    with st.form("cfg_form", clear_on_submit=False):
-        st.subheader("Configuration")
-        name = derived_name
-        st.text_input("Name", value=name, disabled=True, help="Automatically derived from the selected database, schema, and table.")
-        desc = st.text_area("Description", value=(cfg.description if cfg else ""))
-
-        check_rows: List[DQCheck] = []
-
-        # Table-level (always)
-        st.markdown("### Table-level checks (always included)")
-        if target_table and not timestamp_columns:
-            st.info("No TIMESTAMP/DATE columns detected for the selected table.")
-
-        ts_selected = st.selectbox(
-            "Timestamp column for table checks",
-            options=ts_select_options,
-            index=_ts_option_index(
-                ts_select_options,
-                st.session_state.get("_dq_table_ts_col", ts_default_clean),
-            ),
-            key="_dq_table_ts_col",
-            format_func=lambda col: (
-                col
-                if col == placeholder_ts
-                else (f"{col} ({column_type_lookup[col]})" if column_type_lookup.get(col) else col)
-            ),
-        )
-        ts_col = "" if ts_selected == placeholder_ts else ts_selected
-        if ts_selected == placeholder_ts:
-            st.session_state["_dq_table_ts_col"] = ""
-        st.caption("Table will FAIL if no data arrives within the configured max age or if today's volume is a statistical outlier.")
-
-        fr_max_age = st.number_input(
-            "Freshness max age (minutes)",
-            min_value=1,
-            max_value=10080,
-            value=int(st.session_state.get("_dq_table_max_age", max_age_default)),
-            step=30,
-        )
-        st.session_state["_dq_table_max_age"] = int(fr_max_age)
-
-        timestamp_missing = not (ts_col and ts_col.strip())
-
-        preview_counts = st.form_submit_button(
-            "Preview last 60 days row counts",
-            type="secondary",
-            help="Preview daily row counts using the selected timestamp column.",
-        )
+        current_cfg_id = getattr(cfg, "config_id", None)
+        if st.session_state.get("_dq_table_cfg_id") != current_cfg_id:
+            st.session_state["_dq_table_max_age"] = max_age_default
+            st.session_state["_dq_table_cfg_id"] = current_cfg_id
 
         if target_table:
-            if not timestamp_missing:
-                fr_params = {"timestamp_column": ts_col, "max_age_minutes": int(fr_max_age)}
-                try:
-                    fr_rule, fr_is_agg = build_rule_for_table_check(
-                        target_table, _builder_key(freshness_key, "FRESHNESS"), fr_params
-                    )
-                except ValueError as exc:
-                    table_check_error = f"Invalid freshness configuration: {exc}"
-                else:
-                    check_rows.append(DQCheck(
-                        config_id=(cfg.config_id if cfg else "temp"),
-                        check_id="TABLE_FRESHNESS",
-                        table_fqn=target_table, column_name=None,
-                        rule_expr=(f"AGG: {fr_rule}" if fr_is_agg else fr_rule), severity="ERROR",
-                        sample_rows=0, check_type=freshness_key,
-                        params_json=json.dumps(fr_params)
-                    ))
-
-                    row_defaults = existing_table_params.get(rowcount_anomaly_key, {}) or {}
+            last_target = st.session_state.get("_dq_table_ts_target")
+            if last_target != target_table:
+                st.session_state["_dq_table_ts_col"] = ts_default
+                st.session_state["_dq_table_max_age"] = max_age_default
+                st.session_state["_dq_table_ts_target"] = target_table
+        if "_dq_table_ts_col" not in st.session_state:
+            st.session_state["_dq_table_ts_col"] = ts_default
+        if "_dq_table_max_age" not in st.session_state:
+            st.session_state["_dq_table_max_age"] = max_age_default
+    
+        placeholder_ts = "— select timestamp column —"
+        ts_select_options = [placeholder_ts] + timestamp_columns
+    
+        def _ts_option_index(options: List[str], current: str) -> int:
+            try:
+                return options.index(current)
+            except ValueError:
+                return 0
+    
+        preview_counts = False
+        table_check_error: Optional[str] = None
+    
+        derived_name = target_table or ""
+        if not derived_name and cfg:
+            derived_name = cfg.target_table_fqn or cfg.name or ""
+    
+        with st.form("cfg_form", clear_on_submit=False):
+            st.subheader("Configuration")
+            name = derived_name
+            st.text_input("Name", value=name, disabled=True, help="Automatically derived from the selected database, schema, and table.")
+            desc = st.text_area("Description", value=(cfg.description if cfg else ""))
+    
+            check_rows: List[DQCheck] = []
+    
+            # Table-level (always)
+            st.markdown("### Table-level checks (always included)")
+            if target_table and not timestamp_columns:
+                st.info("No TIMESTAMP/DATE columns detected for the selected table.")
+    
+            ts_selected = st.selectbox(
+                "Timestamp column for table checks",
+                options=ts_select_options,
+                index=_ts_option_index(
+                    ts_select_options,
+                    st.session_state.get("_dq_table_ts_col", ts_default_clean),
+                ),
+                key="_dq_table_ts_col",
+                format_func=lambda col: (
+                    col
+                    if col == placeholder_ts
+                    else (f"{col} ({column_type_lookup[col]})" if column_type_lookup.get(col) else col)
+                ),
+            )
+            ts_col = "" if ts_selected == placeholder_ts else ts_selected
+            if ts_selected == placeholder_ts:
+                st.session_state["_dq_table_ts_col"] = ""
+            st.caption("Table will FAIL if no data arrives within the configured max age or if today's volume is a statistical outlier.")
+    
+            fr_max_age = st.number_input(
+                "Freshness max age (minutes)",
+                min_value=1,
+                max_value=10080,
+                value=int(st.session_state.get("_dq_table_max_age", max_age_default)),
+                step=30,
+            )
+            st.session_state["_dq_table_max_age"] = int(fr_max_age)
+    
+            timestamp_missing = not (ts_col and ts_col.strip())
+    
+            preview_counts = st.form_submit_button(
+                "Preview last 60 days row counts",
+                type="secondary",
+                help="Preview daily row counts using the selected timestamp column.",
+            )
+    
+            if target_table:
+                if not timestamp_missing:
+                    fr_params = {"timestamp_column": ts_col, "max_age_minutes": int(fr_max_age)}
                     try:
-                        lookback_days = int(row_defaults.get("lookback_days", 28))
-                    except (TypeError, ValueError):
-                        lookback_days = 28
-                    try:
-                        sensitivity = float(row_defaults.get("sensitivity", 3.0))
-                    except (TypeError, ValueError):
-                        sensitivity = 3.0
-                    try:
-                        min_history_days = int(row_defaults.get("min_history_days", 7))
-                    except (TypeError, ValueError):
-                        min_history_days = 7
-                    anomaly_params = {
-                        "timestamp_column": ts_col or row_defaults.get("timestamp_column") or ts_default,
-                        "lookback_days": lookback_days,
-                        "sensitivity": sensitivity,
-                        "min_history_days": min_history_days,
-                    }
-                    try:
-                        anomaly_rule, anomaly_is_agg = build_rule_for_table_check(
-                            target_table, _builder_key(rowcount_anomaly_key, "ROW_COUNT_ANOMALY"), anomaly_params
+                        fr_rule, fr_is_agg = build_rule_for_table_check(
+                            target_table, _builder_key(freshness_key, "FRESHNESS"), fr_params
                         )
                     except ValueError as exc:
-                        table_check_error = f"Invalid row count anomaly configuration: {exc}"
+                        table_check_error = f"Invalid freshness configuration: {exc}"
                     else:
                         check_rows.append(DQCheck(
                             config_id=(cfg.config_id if cfg else "temp"),
-                            check_id="TABLE_ROW_COUNT_ANOMALY",
+                            check_id="TABLE_FRESHNESS",
                             table_fqn=target_table, column_name=None,
-                            rule_expr=(f"AGG: {anomaly_rule}" if anomaly_is_agg else anomaly_rule), severity="ERROR",
-                            sample_rows=0, check_type=rowcount_anomaly_key,
-                            params_json=json.dumps(anomaly_params)
+                            rule_expr=(f"AGG: {fr_rule}" if fr_is_agg else fr_rule), severity="ERROR",
+                            sample_rows=0, check_type=freshness_key,
+                            params_json=json.dumps(fr_params)
                         ))
-
-        st.markdown("### Schedule")
-        existing_cron = getattr(cfg, "schedule_cron", None) if cfg else None
-        existing_timezone = getattr(cfg, "schedule_timezone", None) if cfg else None
-        existing_enabled = getattr(cfg, "schedule_enabled", True) if cfg else True
-        default_cron = existing_cron or "0 8 * * *"
-        default_timezone = existing_timezone or "Europe/Berlin"
-        schedule_enabled = st.checkbox(
-            "Enable daily task",
-            value=bool(existing_enabled),
-            help=(
-                "When saving as Draft, scheduling is always disabled and any existing task is "
-                "suspended. Enable daily task only applies when you Save & Apply."
-            ),
-        )
-        cron_expr = st.text_input(
-            "Cron expression",
-            value=default_cron,
-            help="Snowflake `USING CRON` expression (e.g. `0 8 * * *`).",
-            disabled=not schedule_enabled
-        )
-        timezone_expr = st.text_input(
-            "Timezone",
-            value=default_timezone,
-            help="IANA timezone name (e.g. `Europe/Berlin`).",
-            disabled=not schedule_enabled
-        )
-
-        c1, c2, c3, c4 = st.columns(4)
-        with c1: apply_now = st.form_submit_button("Save & Apply")
-        with c2: save_draft = st.form_submit_button("Save as Draft")
-        with c3: run_now_btn = st.form_submit_button("Run Now")
-        with c4: delete_btn = st.form_submit_button("Delete", type="secondary")
-
-    submit_triggered = apply_now or save_draft or run_now_btn or preview_counts
-    if target_table and timestamp_missing and submit_triggered and not table_check_error:
-        table_check_error = "Enter a timestamp column to configure table-level checks."
-
-    if table_check_error:
-        st.error(table_check_error)
-
-    safe_ts = None
-    if preview_counts:
-        if not session:
-            st.warning("No active Snowpark session — unable to preview row counts.")
-        elif not target_table:
-            st.warning("Select a target table to preview row counts.")
-        elif not (ts_col and ts_col.strip()):
-            st.warning("Enter a timestamp column to preview row counts.")
-        else:
-            safe_ts = "".join(ch for ch in ts_col.strip().replace('"', '') if ch.isalnum() or ch in ("_", "$"))
-            if not safe_ts:
-                st.warning("Timestamp column contains unsupported characters — unable to preview row counts.")
-    if preview_counts and safe_ts:
-        query = f"""
-            WITH days AS (
-                SELECT DATEADD(day, -seq4(), CURRENT_DATE()) AS day
-                FROM TABLE(GENERATOR(ROWCOUNT => 60))
-            ),
-            counts AS (
-                SELECT DATE_TRUNC('day', "{safe_ts}") AS day, COUNT(*) AS cnt
-                FROM {target_table}
-                WHERE "{safe_ts}" >= DATEADD(day, -59, CURRENT_DATE())
-                GROUP BY 1
-            )
-            SELECT d.day AS "day", COALESCE(c.cnt, 0) AS "cnt"
-            FROM days d
-            LEFT JOIN counts c ON c.day = d.day
-            ORDER BY d.day
-        """
-        try:
-            df = session.sql(query).to_pandas()
-        except Exception as exc:
-            st.error(f"Failed to preview row counts: {exc}")
-        else:
-            render_row_count_preview(df)
-
-    # After submit
-    if apply_now or save_draft or run_now_btn or delete_btn:
-        if (apply_now or save_draft or run_now_btn) and table_check_error:
-            st.error(table_check_error)
-            return
-        if not session:
-            st.error("No active Snowpark session.")
-            return
-        if delete_btn and cfg:
-            out = delete_config_full(session, cfg.config_id)
-            msg = f"Deleted config {cfg.config_id}. Dropped: {len(out.get('dmfs_dropped', []))} view(s)."
-            st.success(msg)
-            st.session_state["last_notices"] = [{"type": "success", "message": msg}]
-            st.session_state["cfg_mode"] = "list"; st.rerun(); return
-
-        post_submit_notices: List[Dict[str, str]] = []
-
-        def remember(kind: str, message: str) -> None:
-            if message:
-                post_submit_notices.append({"type": kind, "message": message})
-
-        new_id = cfg.config_id if cfg else str(uuid4())
-        if apply_now:
-            status = 'ACTIVE'
-        elif save_draft:
-            status = 'DRAFT'
-        else:
-            status = (cfg.status if cfg and cfg.status else 'DRAFT')
-        state = get_state()
-        dq_cfg = DQConfig(
-            config_id=new_id, name=name or None, description=(desc or None),
-            target_table_fqn=target_table, run_as_role=(state.get('run_as_role') or None),
-            dmf_role=(state.get('dmf_role') or None), status=status, owner=None,
-            schedule_cron=(cron_expr.strip() if cron_expr else "0 8 * * *"),
-            schedule_timezone=(timezone_expr.strip() if timezone_expr else "Europe/Berlin"),
-            schedule_enabled=(False if save_draft else bool(schedule_enabled))
-        )
-        if not dq_cfg.name:
-            err_msg = "Select a database, schema, and table to generate a configuration name before saving."
-            st.error(err_msg)
-            remember("error", err_msg)
-            return
-
-        normalized_target = (dq_cfg.target_table_fqn or "").strip().lower()
-        if normalized_target:
-            existing_cfgs = list_configs(session)
-            conflict = next(
-                (
-                    existing
-                    for existing in existing_cfgs
-                    if (existing.target_table_fqn or "").strip().lower() == normalized_target
-                    and existing.config_id != dq_cfg.config_id
+    
+                        row_defaults = existing_table_params.get(rowcount_anomaly_key, {}) or {}
+                        try:
+                            lookback_days = int(row_defaults.get("lookback_days", 28))
+                        except (TypeError, ValueError):
+                            lookback_days = 28
+                        try:
+                            sensitivity = float(row_defaults.get("sensitivity", 3.0))
+                        except (TypeError, ValueError):
+                            sensitivity = 3.0
+                        try:
+                            min_history_days = int(row_defaults.get("min_history_days", 7))
+                        except (TypeError, ValueError):
+                            min_history_days = 7
+                        anomaly_params = {
+                            "timestamp_column": ts_col or row_defaults.get("timestamp_column") or ts_default,
+                            "lookback_days": lookback_days,
+                            "sensitivity": sensitivity,
+                            "min_history_days": min_history_days,
+                        }
+                        try:
+                            anomaly_rule, anomaly_is_agg = build_rule_for_table_check(
+                                target_table, _builder_key(rowcount_anomaly_key, "ROW_COUNT_ANOMALY"), anomaly_params
+                            )
+                        except ValueError as exc:
+                            table_check_error = f"Invalid row count anomaly configuration: {exc}"
+                        else:
+                            check_rows.append(DQCheck(
+                                config_id=(cfg.config_id if cfg else "temp"),
+                                check_id="TABLE_ROW_COUNT_ANOMALY",
+                                table_fqn=target_table, column_name=None,
+                                rule_expr=(f"AGG: {anomaly_rule}" if anomaly_is_agg else anomaly_rule), severity="ERROR",
+                                sample_rows=0, check_type=rowcount_anomaly_key,
+                                params_json=json.dumps(anomaly_params)
+                            ))
+    
+            st.markdown("### Schedule")
+            existing_cron = getattr(cfg, "schedule_cron", None) if cfg else None
+            existing_timezone = getattr(cfg, "schedule_timezone", None) if cfg else None
+            existing_enabled = getattr(cfg, "schedule_enabled", True) if cfg else True
+            default_cron = existing_cron or "0 8 * * *"
+            default_timezone = existing_timezone or "Europe/Berlin"
+            schedule_enabled = st.checkbox(
+                "Enable daily task",
+                value=bool(existing_enabled),
+                help=(
+                    "When saving as Draft, scheduling is always disabled and any existing task is "
+                    "suspended. Enable daily task only applies when you Save & Apply."
                 ),
-                None,
             )
-            if conflict:
-                err_msg = (
-                    f"A configuration for `{dq_cfg.target_table_fqn}` already exists "
-                    f"(ID: {conflict.config_id}). Edit the existing configuration or choose a different table."
+            cron_expr = st.text_input(
+                "Cron expression",
+                value=default_cron,
+                help="Snowflake `USING CRON` expression (e.g. `0 8 * * *`).",
+                disabled=not schedule_enabled
+            )
+            timezone_expr = st.text_input(
+                "Timezone",
+                value=default_timezone,
+                help="IANA timezone name (e.g. `Europe/Berlin`).",
+                disabled=not schedule_enabled
+            )
+    
+            c1, c2, c3, c4 = st.columns(4)
+            with c1: apply_now = st.form_submit_button("Save & Apply")
+            with c2: save_draft = st.form_submit_button("Save as Draft")
+            with c3: run_now_btn = st.form_submit_button("Run Now")
+            with c4: delete_btn = st.form_submit_button("Delete", type="secondary")
+    
+        submit_triggered = apply_now or save_draft or run_now_btn or preview_counts
+        if target_table and timestamp_missing and submit_triggered and not table_check_error:
+            table_check_error = "Enter a timestamp column to configure table-level checks."
+    
+        if table_check_error:
+            st.error(table_check_error)
+    
+        safe_ts = None
+        if preview_counts:
+            if not session:
+                st.warning("No active Snowpark session — unable to preview row counts.")
+            elif not target_table:
+                st.warning("Select a target table to preview row counts.")
+            elif not (ts_col and ts_col.strip()):
+                st.warning("Enter a timestamp column to preview row counts.")
+            else:
+                safe_ts = "".join(ch for ch in ts_col.strip().replace('"', '') if ch.isalnum() or ch in ("_", "$"))
+                if not safe_ts:
+                    st.warning("Timestamp column contains unsupported characters — unable to preview row counts.")
+        if preview_counts and safe_ts:
+            query = f"""
+                WITH days AS (
+                    SELECT DATEADD(day, -seq4(), CURRENT_DATE()) AS day
+                    FROM TABLE(GENERATOR(ROWCOUNT => 60))
+                ),
+                counts AS (
+                    SELECT DATE_TRUNC('day', "{safe_ts}") AS day, COUNT(*) AS cnt
+                    FROM {target_table}
+                    WHERE "{safe_ts}" >= DATEADD(day, -59, CURRENT_DATE())
+                    GROUP BY 1
                 )
+                SELECT d.day AS "day", COALESCE(c.cnt, 0) AS "cnt"
+                FROM days d
+                LEFT JOIN counts c ON c.day = d.day
+                ORDER BY d.day
+            """
+            try:
+                df = session.sql(query).to_pandas()
+            except Exception as exc:
+                st.error(f"Failed to preview row counts: {exc}")
+            else:
+                render_row_count_preview(df)
+    
+        # After submit
+        if apply_now or save_draft or run_now_btn or delete_btn:
+            if (apply_now or save_draft or run_now_btn) and table_check_error:
+                st.error(table_check_error)
+                return
+            if not session:
+                st.error("No active Snowpark session.")
+                return
+            if delete_btn and cfg:
+                out = delete_config_full(session, cfg.config_id)
+                msg = f"Deleted config {cfg.config_id}. Dropped: {len(out.get('dmfs_dropped', []))} view(s)."
+                st.success(msg)
+                st.session_state["last_notices"] = [{"type": "success", "message": msg}]
+                st.session_state["cfg_mode"] = "list"; st.rerun(); return
+    
+            post_submit_notices: List[Dict[str, str]] = []
+    
+            def remember(kind: str, message: str) -> None:
+                if message:
+                    post_submit_notices.append({"type": kind, "message": message})
+    
+            new_id = cfg.config_id if cfg else str(uuid4())
+            if apply_now:
+                status = 'ACTIVE'
+            elif save_draft:
+                status = 'DRAFT'
+            else:
+                status = (cfg.status if cfg and cfg.status else 'DRAFT')
+            state = get_state()
+            dq_cfg = DQConfig(
+                config_id=new_id, name=name or None, description=(desc or None),
+                target_table_fqn=target_table, run_as_role=(state.get('run_as_role') or None),
+                dmf_role=(state.get('dmf_role') or None), status=status, owner=None,
+                schedule_cron=(cron_expr.strip() if cron_expr else "0 8 * * *"),
+                schedule_timezone=(timezone_expr.strip() if timezone_expr else "Europe/Berlin"),
+                schedule_enabled=(False if save_draft else bool(schedule_enabled))
+            )
+            if not dq_cfg.name:
+                err_msg = "Select a database, schema, and table to generate a configuration name before saving."
                 st.error(err_msg)
                 remember("error", err_msg)
                 return
-        # rebind ids
-        checks_rebound: List[DQCheck] = []
-        for cr in check_rows:
-            cr.config_id = new_id; cr.table_fqn = target_table
-            checks_rebound.append(cr)
-
-        out = save_config_and_checks(session, dq_cfg, checks_rebound, apply_now=apply_now)
-        base_msg = f"Saved config {new_id} ({status})."
-        st.success(base_msg)
-        remember("success", base_msg)
-        if save_draft:
-            suspend_result = schedules.suspend_task_for_config(session, dq_cfg.config_id)
-            suspend_status = suspend_result.get("status")
-            if suspend_status == "FALLBACK":
-                warn_msg = (
-                    f"Failed to suspend task {suspend_result.get('task') or task_name_for_config(dq_cfg.config_id)}: "
-                    f"{suspend_result.get('reason')}"
+    
+            normalized_target = (dq_cfg.target_table_fqn or "").strip().lower()
+            if normalized_target:
+                existing_cfgs = list_configs(session)
+                conflict = next(
+                    (
+                        existing
+                        for existing in existing_cfgs
+                        if (existing.target_table_fqn or "").strip().lower() == normalized_target
+                        and existing.config_id != dq_cfg.config_id
+                    ),
+                    None,
                 )
-                st.warning(warn_msg)
-                remember("warning", warn_msg)
-            else:
-                info_msg = (
-                    "Saved as Draft. Scheduling is disabled and any existing task has been suspended."
-                )
-                st.info(info_msg)
-                remember("info", info_msg)
-        if apply_now:
-            dmfs_attached = out.get("dmfs_attached") or []
-            if dmfs_attached:
-                dmf_msg = "Attached views:\n- " + "\n- ".join(dmfs_attached)
-                st.success(dmf_msg)
-                remember("success", dmf_msg)
-            else:
-                info_msg = "No row-level failing-row views were required for this configuration."
-                st.info(info_msg)
-                remember("info", info_msg)
-
-        if run_now_btn:
-            try:
-                db, schema, _ = _parse_relation_name(dq_cfg.target_table_fqn or "")
-            except Exception as exc:
-                err_msg = f"Failed to determine task location: {exc}"
-                st.error(err_msg)
-                remember("error", err_msg)
-            else:
-                if not db or not schema:
-                    warn_msg = "Run Now requires a fully qualified target table (database and schema)."
-                    st.warning(warn_msg)
-                    remember("warning", warn_msg)
-                else:
-                    try:
-                        result_df = run_task_now(
-                            session,
-                            METADATA_DB,
-                            METADATA_SCHEMA,
-                            dq_cfg.config_id,
-                            proc_name=PROC_NAME,
-                        )
-                    except Exception as exc:
-                        err_msg = f"Failed to trigger task run: {exc}"
-                        st.error(err_msg)
-                        remember("error", err_msg)
-                    else:
-                        result_details = None
-                        if result_df is not None and not result_df.empty:
-                            first_row = result_df.iloc[0]
-                            for value in first_row.tolist():
-                                if value:
-                                    result_details = str(value)
-                                    break
-                        success_msg = (
-                            f"Ran `{PROC_NAME}` for config `{dq_cfg.config_id}`."
-                        )
-                        if result_details:
-                            success_msg = f"{success_msg} Result: {result_details}"
-                        st.success(success_msg)
-                        remember("success", success_msg)
-
-        if apply_now and status == 'ACTIVE':
-            if not dq_cfg.schedule_enabled:
+                if conflict:
+                    err_msg = (
+                        f"A configuration for `{dq_cfg.target_table_fqn}` already exists "
+                        f"(ID: {conflict.config_id}). Edit the existing configuration or choose a different table."
+                    )
+                    st.error(err_msg)
+                    remember("error", err_msg)
+                    return
+            # rebind ids
+            checks_rebound: List[DQCheck] = []
+            for cr in check_rows:
+                cr.config_id = new_id; cr.table_fqn = target_table
+                checks_rebound.append(cr)
+    
+            out = save_config_and_checks(session, dq_cfg, checks_rebound, apply_now=apply_now)
+            base_msg = f"Saved config {new_id} ({status})."
+            st.success(base_msg)
+            remember("success", base_msg)
+            if save_draft:
                 suspend_result = schedules.suspend_task_for_config(session, dq_cfg.config_id)
                 suspend_status = suspend_result.get("status")
                 if suspend_status == "FALLBACK":
@@ -1868,189 +1806,258 @@ def render_config_editor():
                     st.warning(warn_msg)
                     remember("warning", warn_msg)
                 else:
-                    task_label = suspend_result.get("task") or task_name_for_config(dq_cfg.config_id)
-                    if suspend_status == "NOT_FOUND":
-                        success_msg = (
-                            "Task scheduling disabled. No existing task was found, so nothing was suspended."
-                        )
-                    else:
-                        success_msg = f"Task scheduling disabled. Suspended **{task_label}**."
-                    st.success(success_msg)
-                    remember("success", success_msg)
-            else:
-                st.caption(f"Namespace: {METADATA_DB}.{METADATA_SCHEMA}, Proc: {PROC_NAME}")
-                dbg_df = None
-                snapshot_error: Optional[Exception] = None
-                try:
-                    dbg_df = session_snapshot(session)
-                except Exception as exc:  # pragma: no cover - Snowflake specific
-                    snapshot_error = exc
-
-                meta_db, meta_schema = METADATA_DB, METADATA_SCHEMA
-                metadata_error: Optional[Exception] = None
-                task_fqn: Optional[str] = None
-                proc_fqn: Optional[str] = None
-                if not meta_db or not meta_schema:
-                    metadata_error = ValueError("Metadata namespace is not configured")
-                else:
-                    task_fqn = _q_task(meta_db, meta_schema, task_name_for_config(dq_cfg.config_id))
-                    proc_fqn = _q_task(meta_db, meta_schema, PROC_NAME)
-
-                try:
-                    warehouse_name = session.get_current_warehouse()
-                except Exception:  # pragma: no cover - Snowflake specific
-                    warehouse_name = None
-                warehouse_name = (warehouse_name or "").strip()
-                run_role_name = (dq_cfg.run_as_role or "").strip()
-
-                task_failure_reported = False
-                task_sql_recorded = False
-                task_manage_sql: Optional[str] = None
-
-                if meta_db and meta_schema:
-                    def _quote_ident(value: Optional[str]) -> str:
-                        text = "" if value is None else str(value)
-                        return '"' + text.replace('"', '""') + '"'
-
-                    def _quote_literal(value: Optional[str]) -> str:
-                        if value is None:
-                            return "NULL"
-                        text = str(value)
-                        return "'" + text.replace("'", "''") + "'"
-
-                    cron_expression = (dq_cfg.schedule_cron or "0 8 * * *").strip() or "0 8 * * *"
-                    timezone_name = (dq_cfg.schedule_timezone or "Europe/Berlin").strip() or "Europe/Berlin"
-                    task_manage_sql = (
-                        f"CALL {_quote_ident(meta_db)}.{_quote_ident(meta_schema)}.\"SP_DQ_MANAGE_TASK\"("
-                        f"{_quote_literal(meta_db)}, {_quote_literal(meta_schema)}, {_quote_literal(DEFAULT_WAREHOUSE)}, "
-                        f"{_quote_literal(dq_cfg.config_id)}, {_quote_literal(PROC_NAME)}, "
-                        f"{_quote_literal(cron_expression)}, {_quote_literal(timezone_name)}, TRUE)"
+                    info_msg = (
+                        "Saved as Draft. Scheduling is disabled and any existing task has been suspended."
                     )
-
-                def show_task_failure(message: str) -> None:
-                    nonlocal task_failure_reported, task_sql_recorded
-                    task_failure_reported = True
-                    st.error(message)
-                    remember("error", message)
-                    inferred_task_fqn = task_fqn
-                    inferred_proc_fqn = proc_fqn
-                    if not inferred_task_fqn:
-                        if meta_db and meta_schema:
-                            inferred_task_fqn = _q_task(meta_db, meta_schema, task_name_for_config(dq_cfg.config_id))
-                        else:
-                            inferred_task_fqn = task_name_for_config(dq_cfg.config_id)
-                    if not inferred_proc_fqn:
-                        if meta_db and meta_schema:
-                            inferred_proc_fqn = _q_task(meta_db, meta_schema, PROC_NAME)
-                        else:
-                            inferred_proc_fqn = PROC_NAME
-                    st.markdown(
-                        f"**Task FQN:** `{inferred_task_fqn}`  \\\n+**Procedure FQN:** `{inferred_proc_fqn}`"
-                    )
-                    if task_manage_sql:
-                        st.caption("Task creation call (for debugging):")
-                        st.code(task_manage_sql, language="sql")
-                        if not task_sql_recorded:
-                            post_submit_notices.append(
-                                {
-                                    "type": "sql",
-                                    "message": "Task creation call (for debugging):",
-                                    "code": task_manage_sql,
-                                    "language": "sql",
-                                }
-                            )
-                            task_sql_recorded = True
-                    if dbg_df is not None:
-                        st.caption("Session snapshot at failure:")
-                        st.dataframe(dbg_df, use_container_width=True, hide_index=True)
-                    elif snapshot_error is not None:
-                        st.caption(f"Session snapshot unavailable: {snapshot_error}")
-
-                sched: Dict[str, Any] = {}
-                if metadata_error is not None:
-                    show_task_failure(f"Unable to determine metadata schema: {metadata_error}")
-                    sched = {
-                        "status": "FALLBACK",
-                        "reason": str(metadata_error),
-                        "task": task_name_for_config(dq_cfg.config_id),
-                    }
-                else:
-                    preflight_failed = False
-                    try:
-                        ensure_session_context(
-                            session,
-                            run_role_name,
-                            warehouse_name,
-                            meta_db or "",
-                            meta_schema or "",
-                        )
-                        if meta_db and meta_schema:
-                            preflight_requirements(
-                                session,
-                                meta_db,
-                                meta_schema,
-                                proc_name=PROC_NAME,
-                                arg_sig="(VARCHAR)",
-                            )
-                            preflight_requirements(
-                                session,
-                                meta_db,
-                                meta_schema,
-                                proc_name="SP_DQ_MANAGE_TASK",
-                                arg_sig="(STRING, STRING, STRING, STRING, STRING, STRING, STRING, BOOLEAN)",
-                            )
-                    except Exception as exc:  # pragma: no cover - Snowflake specific
-                        show_task_failure(f"Task preflight failed: {exc}")
-                        sched = {
-                            "status": "FALLBACK",
-                            "reason": str(exc),
-                            "task": task_fqn or task_name_for_config(dq_cfg.config_id),
-                        }
-                        preflight_failed = True
-                    if not preflight_failed:
-                        sched = schedules.ensure_task_for_config(session, dq_cfg)
-                        if sched.get("status") == "FALLBACK" and sched.get("reason"):
-                            show_task_failure(f"Task creation failed: {sched['reason']}")
-
-                sched_status = sched.get("status")
-                if sched_status == "TASK_CREATED":
-                    cron_disp = dq_cfg.schedule_cron or "0 8 * * *"
-                    tz_disp = dq_cfg.schedule_timezone or "Europe/Berlin"
-                    sched_msg = f"Scheduled **{sched['task']}** (`{cron_disp}` {tz_disp})."
-                    st.success(sched_msg)
-                    remember("success", sched_msg)
-                elif sched_status == "SCHEDULE_DISABLED":
-                    info_msg = "Schedule disabled — skipped automatic task creation."
                     st.info(info_msg)
                     remember("info", info_msg)
-                elif sched_status == "INVALID_SCHEDULE":
-                    warn_msg = sched.get("reason") or "Schedule settings were invalid; task not created."
-                    st.warning(warn_msg)
-                    remember("warning", warn_msg)
-                elif sched_status == "NO_WAREHOUSE":
-                    warn_msg = (
-                        "No active warehouse is set for this session. "
-                        "Select a warehouse in Snowflake or configure a default before saving again."
-                    )
-                    st.warning(warn_msg)
-                    remember("warning", warn_msg)
-                elif sched_status == "FALLBACK" and task_failure_reported:
-                    pass
+            if apply_now:
+                dmfs_attached = out.get("dmfs_attached") or []
+                if dmfs_attached:
+                    dmf_msg = "Attached views:\n- " + "\n- ".join(dmfs_attached)
+                    st.success(dmf_msg)
+                    remember("success", dmf_msg)
                 else:
-                    reason = sched.get("reason")
-                    if reason:
-                        warn_msg = (
-                            f"Could not create task {sched.get('task') or ''}: {reason}. "
-                            "Task intent was stored for manual follow-up."
-                        )
+                    info_msg = "No row-level failing-row views were required for this configuration."
+                    st.info(info_msg)
+                    remember("info", info_msg)
+    
+            if run_now_btn:
+                try:
+                    db, schema, _ = _parse_relation_name(dq_cfg.target_table_fqn or "")
+                except Exception as exc:
+                    err_msg = f"Failed to determine task location: {exc}"
+                    st.error(err_msg)
+                    remember("error", err_msg)
+                else:
+                    if not db or not schema:
+                        warn_msg = "Run Now requires a fully qualified target table (database and schema)."
+                        st.warning(warn_msg)
+                        remember("warning", warn_msg)
                     else:
-                        warn_msg = "Could not create task automatically; stored fallback intent."
-                    st.warning(warn_msg)
-                    remember("warning", warn_msg)
-
-        st.session_state["last_notices"] = post_submit_notices
-        st.session_state["cfg_mode"] = "list"; st.rerun()
-
+                        try:
+                            result_df = run_task_now(
+                                session,
+                                METADATA_DB,
+                                METADATA_SCHEMA,
+                                dq_cfg.config_id,
+                                proc_name=PROC_NAME,
+                            )
+                        except Exception as exc:
+                            err_msg = f"Failed to trigger task run: {exc}"
+                            st.error(err_msg)
+                            remember("error", err_msg)
+                        else:
+                            result_details = None
+                            if result_df is not None and not result_df.empty:
+                                first_row = result_df.iloc[0]
+                                for value in first_row.tolist():
+                                    if value:
+                                        result_details = str(value)
+                                        break
+                            success_msg = (
+                                f"Ran `{PROC_NAME}` for config `{dq_cfg.config_id}`."
+                            )
+                            if result_details:
+                                success_msg = f"{success_msg} Result: {result_details}"
+                            st.success(success_msg)
+                            remember("success", success_msg)
+    
+            if apply_now and status == 'ACTIVE':
+                if not dq_cfg.schedule_enabled:
+                    suspend_result = schedules.suspend_task_for_config(session, dq_cfg.config_id)
+                    suspend_status = suspend_result.get("status")
+                    if suspend_status == "FALLBACK":
+                        warn_msg = (
+                            f"Failed to suspend task {suspend_result.get('task') or task_name_for_config(dq_cfg.config_id)}: "
+                            f"{suspend_result.get('reason')}"
+                        )
+                        st.warning(warn_msg)
+                        remember("warning", warn_msg)
+                    else:
+                        task_label = suspend_result.get("task") or task_name_for_config(dq_cfg.config_id)
+                        if suspend_status == "NOT_FOUND":
+                            success_msg = (
+                                "Task scheduling disabled. No existing task was found, so nothing was suspended."
+                            )
+                        else:
+                            success_msg = f"Task scheduling disabled. Suspended **{task_label}**."
+                        st.success(success_msg)
+                        remember("success", success_msg)
+                else:
+                    st.caption(f"Namespace: {METADATA_DB}.{METADATA_SCHEMA}, Proc: {PROC_NAME}")
+                    dbg_df = None
+                    snapshot_error: Optional[Exception] = None
+                    try:
+                        dbg_df = session_snapshot(session)
+                    except Exception as exc:  # pragma: no cover - Snowflake specific
+                        snapshot_error = exc
+    
+                    meta_db, meta_schema = METADATA_DB, METADATA_SCHEMA
+                    metadata_error: Optional[Exception] = None
+                    task_fqn: Optional[str] = None
+                    proc_fqn: Optional[str] = None
+                    if not meta_db or not meta_schema:
+                        metadata_error = ValueError("Metadata namespace is not configured")
+                    else:
+                        task_fqn = _q_task(meta_db, meta_schema, task_name_for_config(dq_cfg.config_id))
+                        proc_fqn = _q_task(meta_db, meta_schema, PROC_NAME)
+    
+                    try:
+                        warehouse_name = session.get_current_warehouse()
+                    except Exception:  # pragma: no cover - Snowflake specific
+                        warehouse_name = None
+                    warehouse_name = (warehouse_name or "").strip()
+                    run_role_name = (dq_cfg.run_as_role or "").strip()
+    
+                    task_failure_reported = False
+                    task_sql_recorded = False
+                    task_manage_sql: Optional[str] = None
+    
+                    if meta_db and meta_schema:
+                        def _quote_ident(value: Optional[str]) -> str:
+                            text = "" if value is None else str(value)
+                            return '"' + text.replace('"', '""') + '"'
+    
+                        def _quote_literal(value: Optional[str]) -> str:
+                            if value is None:
+                                return "NULL"
+                            text = str(value)
+                            return "'" + text.replace("'", "''") + "'"
+    
+                        cron_expression = (dq_cfg.schedule_cron or "0 8 * * *").strip() or "0 8 * * *"
+                        timezone_name = (dq_cfg.schedule_timezone or "Europe/Berlin").strip() or "Europe/Berlin"
+                        task_manage_sql = (
+                            f"CALL {_quote_ident(meta_db)}.{_quote_ident(meta_schema)}.\"SP_DQ_MANAGE_TASK\"("
+                            f"{_quote_literal(meta_db)}, {_quote_literal(meta_schema)}, {_quote_literal(DEFAULT_WAREHOUSE)}, "
+                            f"{_quote_literal(dq_cfg.config_id)}, {_quote_literal(PROC_NAME)}, "
+                            f"{_quote_literal(cron_expression)}, {_quote_literal(timezone_name)}, TRUE)"
+                        )
+    
+                    def show_task_failure(message: str) -> None:
+                        nonlocal task_failure_reported, task_sql_recorded
+                        task_failure_reported = True
+                        st.error(message)
+                        remember("error", message)
+                        inferred_task_fqn = task_fqn
+                        inferred_proc_fqn = proc_fqn
+                        if not inferred_task_fqn:
+                            if meta_db and meta_schema:
+                                inferred_task_fqn = _q_task(meta_db, meta_schema, task_name_for_config(dq_cfg.config_id))
+                            else:
+                                inferred_task_fqn = task_name_for_config(dq_cfg.config_id)
+                        if not inferred_proc_fqn:
+                            if meta_db and meta_schema:
+                                inferred_proc_fqn = _q_task(meta_db, meta_schema, PROC_NAME)
+                            else:
+                                inferred_proc_fqn = PROC_NAME
+                        st.markdown(
+                            f"**Task FQN:** `{inferred_task_fqn}`  \\\n+**Procedure FQN:** `{inferred_proc_fqn}`"
+                        )
+                        if task_manage_sql:
+                            st.caption("Task creation call (for debugging):")
+                            st.code(task_manage_sql, language="sql")
+                            if not task_sql_recorded:
+                                post_submit_notices.append(
+                                    {
+                                        "type": "sql",
+                                        "message": "Task creation call (for debugging):",
+                                        "code": task_manage_sql,
+                                        "language": "sql",
+                                    }
+                                )
+                                task_sql_recorded = True
+                        if dbg_df is not None:
+                            st.caption("Session snapshot at failure:")
+                            st.dataframe(dbg_df, use_container_width=True, hide_index=True)
+                        elif snapshot_error is not None:
+                            st.caption(f"Session snapshot unavailable: {snapshot_error}")
+    
+                    sched: Dict[str, Any] = {}
+                    if metadata_error is not None:
+                        show_task_failure(f"Unable to determine metadata schema: {metadata_error}")
+                        sched = {
+                            "status": "FALLBACK",
+                            "reason": str(metadata_error),
+                            "task": task_name_for_config(dq_cfg.config_id),
+                        }
+                    else:
+                        preflight_failed = False
+                        try:
+                            ensure_session_context(
+                                session,
+                                run_role_name,
+                                warehouse_name,
+                                meta_db or "",
+                                meta_schema or "",
+                            )
+                            if meta_db and meta_schema:
+                                preflight_requirements(
+                                    session,
+                                    meta_db,
+                                    meta_schema,
+                                    proc_name=PROC_NAME,
+                                    arg_sig="(VARCHAR)",
+                                )
+                                preflight_requirements(
+                                    session,
+                                    meta_db,
+                                    meta_schema,
+                                    proc_name="SP_DQ_MANAGE_TASK",
+                                    arg_sig="(STRING, STRING, STRING, STRING, STRING, STRING, STRING, BOOLEAN)",
+                                )
+                        except Exception as exc:  # pragma: no cover - Snowflake specific
+                            show_task_failure(f"Task preflight failed: {exc}")
+                            sched = {
+                                "status": "FALLBACK",
+                                "reason": str(exc),
+                                "task": task_fqn or task_name_for_config(dq_cfg.config_id),
+                            }
+                            preflight_failed = True
+                        if not preflight_failed:
+                            sched = schedules.ensure_task_for_config(session, dq_cfg)
+                            if sched.get("status") == "FALLBACK" and sched.get("reason"):
+                                show_task_failure(f"Task creation failed: {sched['reason']}")
+    
+                    sched_status = sched.get("status")
+                    if sched_status == "TASK_CREATED":
+                        cron_disp = dq_cfg.schedule_cron or "0 8 * * *"
+                        tz_disp = dq_cfg.schedule_timezone or "Europe/Berlin"
+                        sched_msg = f"Scheduled **{sched['task']}** (`{cron_disp}` {tz_disp})."
+                        st.success(sched_msg)
+                        remember("success", sched_msg)
+                    elif sched_status == "SCHEDULE_DISABLED":
+                        info_msg = "Schedule disabled — skipped automatic task creation."
+                        st.info(info_msg)
+                        remember("info", info_msg)
+                    elif sched_status == "INVALID_SCHEDULE":
+                        warn_msg = sched.get("reason") or "Schedule settings were invalid; task not created."
+                        st.warning(warn_msg)
+                        remember("warning", warn_msg)
+                    elif sched_status == "NO_WAREHOUSE":
+                        warn_msg = (
+                            "No active warehouse is set for this session. "
+                            "Select a warehouse in Snowflake or configure a default before saving again."
+                        )
+                        st.warning(warn_msg)
+                        remember("warning", warn_msg)
+                    elif sched_status == "FALLBACK" and task_failure_reported:
+                        pass
+                    else:
+                        reason = sched.get("reason")
+                        if reason:
+                            warn_msg = (
+                                f"Could not create task {sched.get('task') or ''}: {reason}. "
+                                "Task intent was stored for manual follow-up."
+                            )
+                        else:
+                            warn_msg = "Could not create task automatically; stored fallback intent."
+                        st.warning(warn_msg)
+                        remember("warning", warn_msg)
+    
+            st.session_state["last_notices"] = post_submit_notices
+            st.session_state["cfg_mode"] = "list"; st.rerun()
+    
 def render_monitor():
     st.header("📊 Monitor")
     if not session:
