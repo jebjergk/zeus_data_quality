@@ -1390,13 +1390,17 @@ def render_config_editor():
     with st.container():
         st.markdown("<div class='dq-rule-grid'>", unsafe_allow_html=True)
         for entry in filtered_entries:
+            column_label = entry.get("column") or "—"
+            rule_label = entry.get("rule_name") or entry.get("rule_code") or "—"
+            rule_code = entry.get("rule_code") or "—"
+            category_label = entry.get("category") or "—"
             cols = st.columns([2, 3, 3, 1, 1])
-            cols[0].markdown(f"**{entry.get('column')}**")
+            cols[0].markdown(f"**{column_label}**")
             cols[1].markdown(
-                f"{entry.get('rule_name')}\n\n<span style='color:#6b7280;font-size:.85rem;'>{entry.get('rule_code')}</span>",
+                f"{rule_label}\n\n<span style='color:#6b7280;font-size:.85rem;'>{rule_code}</span>",
                 unsafe_allow_html=True,
             )
-            cols[2].markdown(str(entry.get("category")))
+            cols[2].markdown(category_label)
             cols[3].markdown(entry.get("severity") or "—")
             edit_clicked = cols[4].button("✏️", key=f"edit_rule_{entry.get('check_id')}", help="Edit rule")
             delete_clicked = cols[4].button(
