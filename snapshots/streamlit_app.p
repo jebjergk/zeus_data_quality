@@ -491,6 +491,120 @@ def _render_rule_edit_form(
         st.rerun()
 
 
+def _render_rule_create_form(
+    *,
+    cfg: Optional[DQConfig],
+    session: Any,
+    target_table: Optional[str],
+    available_cols: List[str],
+    table_suggestions: Optional[List[str]],
+    column_lookup: Optional[Any],
+    rule_templates: List[RuleTemplate],
+    existing_library_checks: List[Dict[str, Any]],
+    key_prefix: str,
+    state_keys_to_clear: Optional[List[str]] = None,
+):
+    st.markdown(
+        f"**Config:** {cfg.name if cfg else 'New configuration'}  \n"
+        f"**Table:** `{target_table or cfg.target_table_fqn if cfg else ''}`"
+    )
+
+    available_templates = [
+        t for t in rule_templates if t.enabled and (t.scope or "").upper() == "COLUMN"
+    ]
+    template_labels = {
+        t.rule_code: f"{t.rule_id} ({t.rule_code})" if t.rule_code else t.rule_id
+        for t in available_templates
+    }
+
+    selected_column = st.selectbox(
+        "Column",
+        options=available_cols or ["—"],
+        index=0 if available_cols else 0,
+        key=f"{key_prefix}_column",
+    )
+    selected_code = st.selectbox(
+        "Rule template",
+        options=list(template_labels.keys()) or [""],
+        format_func=lambda code: template_labels.get(code, code),
+        key=f"{key_prefix}_code",
+    )
+    selected_template = next((t for t in available_templates if t.rule_code == selected_code), None)
+
+    if not selected_template:
+        st.warning("Select a rule template to configure parameters.")
+        param_schema: List[Dict[str, Any]] = []
+        defaults: Dict[str, Any] = {}
+    else:
+        param_schema = _normalize_param_schema(selected_template.param_schema)
+        defaults_raw = selected_template.default_params or {}
+        defaults = defaults_raw if isinstance(defaults_raw, dict) else {}
+
+    rendered_params, param_error = _render_param_inputs(
+        key_prefix=f"{key_prefix}_{selected_code or 'new'}",
+        param_schema=param_schema,
+        current_values=defaults,
+        column_options=available_cols,
+        table_options=table_suggestions,
+        column_lookup=column_lookup,
+    )
+
+    save_col, cancel_col = st.columns(2)
+    if save_col.button("Save", type="primary", key=f"{key_prefix}_save"):
+        if not session:
+            st.error("No active Snowpark session.")
+        elif not target_table:
+            st.error("Select a target table before adding rules.")
+        elif not selected_template:
+            st.error("Choose a rule template to continue.")
+        elif not selected_column or selected_column == "—":
+            st.error("Select a column before adding a rule.")
+        elif param_error:
+            st.error(param_error)
+        else:
+            duplicate = any(
+                (chk.get("column_name") == selected_column)
+                and ((chk.get("rule_code") or "").upper() == selected_template.rule_code.upper())
+                for chk in existing_library_checks
+            )
+            if duplicate:
+                st.warning("This rule already exists for this column.")
+            else:
+                try:
+                    compiled_rule = _compile_library_rule(
+                        session,
+                        selected_template.rule_code,
+                        target_table,
+                        selected_column,
+                        rendered_params,
+                    )
+                except Exception as exc:
+                    st.error(f"Rule compile failed: {exc}")
+                else:
+                    insert_library_check(
+                        session,
+                        config_id=cfg.config_id if cfg else None,
+                        table_fqn=target_table,
+                        column_name=selected_column,
+                        rule_code=selected_template.rule_code,
+                        rule_id=selected_template.rule_id,
+                        rule_params=rendered_params,
+                        rule_version=selected_template.version,
+                        compiled_rule=compiled_rule,
+                        severity=selected_template.severity or "ERROR",
+                        sample_rows=0,
+                    )
+                    st.success("Rule added.")
+                    for key in state_keys_to_clear or []:
+                        st.session_state.pop(key, None)
+                    st.rerun()
+
+    if cancel_col.button("Cancel", key=f"{key_prefix}_cancel"):
+        for key in state_keys_to_clear or []:
+            st.session_state.pop(key, None)
+        st.rerun()
+
+
 def _compile_library_rule(
     session: Any,
     rule_code: str,
@@ -1048,7 +1162,6 @@ def render_config_editor():
         if (db_sel and sch_sel and tbl_sel)
         else []
     )
-    column_checks = [c for c in existing_checks if c.column_name]
     table_suggestions = _related_table_options(session, target_table)
     column_lookup = lambda tbl: _columns_for_table(session, tbl)
 
@@ -1066,7 +1179,7 @@ def render_config_editor():
     )
 
     filter_col, filter_code, filter_sev = st.columns(3)
-    rule_columns = sorted({c.column_name for c in column_checks if c.column_name})
+    rule_columns = sorted({chk.get("column_name") for chk in library_checks if chk.get("column_name")})
     filter_column = filter_col.selectbox(
         "Filter by column",
         options=["All"] + rule_columns,
@@ -1145,6 +1258,16 @@ def render_config_editor():
 
     filtered_entries = [e for e in grid_entries if _matches_filters(e)]
 
+    add_mode = st.session_state.get("rule_add_mode", False)
+    if add_clicked:
+        st.session_state["rule_add_mode"] = True
+        st.session_state["rule_add_key"] = st.session_state.get("rule_add_key") or f"add_rule_{len(grid_entries)}"
+        st.session_state.pop("inline_edit_entry", None)
+        st.session_state.pop("inline_edit_key", None)
+        st.session_state.pop("active_rule_edit_id", None)
+        st.session_state.pop("active_rule_edit_key", None)
+        add_mode = True
+
     active_edit_entry: Optional[Dict[str, Any]] = None
     active_edit_key: Optional[str] = None
     if not MODAL_SUPPORTED:
@@ -1164,7 +1287,27 @@ def render_config_editor():
                 st.session_state.pop("active_rule_edit_key", None)
                 st.session_state.pop("inline_edit_entry", None)
                 st.session_state.pop("inline_edit_key", None)
+    if add_mode:
+        st.subheader("Add rule")
+        st.info("Select a rule template and configure parameters, then save or cancel to return to the rule list.", icon="➕")
+        with st.container(border=True):
+            _render_rule_create_form(
+                cfg=cfg,
+                session=session,
+                target_table=target_table or (cfg.target_table_fqn if cfg else ""),
+                available_cols=available_cols,
+                table_suggestions=table_suggestions,
+                column_lookup=column_lookup,
+                rule_templates=rule_templates,
+                existing_library_checks=library_checks,
+                key_prefix=st.session_state.get("rule_add_key", "add_rule"),
+                state_keys_to_clear=["rule_add_mode", "rule_add_key"],
+            )
+        return
+
     if active_edit_entry:
+        st.session_state.pop("rule_add_mode", None)
+        st.session_state.pop("rule_add_key", None)
         st.subheader("Edit rule")
         st.info("Update the parameters below, then save or cancel to return to the rule list.", icon="✏️")
         with st.container(border=True):
@@ -1240,107 +1383,7 @@ def render_config_editor():
                 st.rerun()
         st.markdown("</div>", unsafe_allow_html=True)
 
-    if add_clicked:
-        with _modal_container("Add rule", key="add_rule_modal"):
-            selected_column = st.selectbox(
-                "Column",
-                options=available_cols or ["—"],
-                index=0 if available_cols else 0,
-                key="add_rule_column",
-            )
-            available_templates = [
-                t for t in rule_templates if t.enabled and (t.scope or "").upper() == "COLUMN"
-            ]
-            template_labels = {
-                t.rule_code: f"{t.rule_id} ({t.rule_code})" if t.rule_code else t.rule_id
-                for t in available_templates
-            }
-            selected_code = st.selectbox(
-                "Rule template",
-                options=list(template_labels.keys()) or [""],
-                format_func=lambda code: template_labels.get(code, code),
-                key="add_rule_code",
-            )
-            selected_template = next((t for t in available_templates if t.rule_code == selected_code), None)
-            param_schema = _normalize_param_schema(selected_template.param_schema if selected_template else [])
-            defaults_raw = selected_template.default_params if selected_template else {}
-            defaults = defaults_raw if isinstance(defaults_raw, dict) else {}
-            rendered_params, param_error = _render_param_inputs(
-                key_prefix=f"add_modal_{selected_code or 'new'}",
-                param_schema=param_schema,
-                current_values=defaults,
-                column_options=available_cols,
-                table_options=table_suggestions,
-                column_lookup=column_lookup,
-            )
-            save_new, cancel_new = st.columns(2)
-            if save_new.button("Save", type="primary", key="add_rule_save"):
-                if param_error:
-                    st.error(param_error)
-                elif not selected_template:
-                    st.error("Select a rule to add.")
-                elif not session:
-                    st.error("No active Snowpark session.")
-                elif not target_table:
-                    st.error("Select a target table before adding rules.")
-                elif not selected_column or selected_column == "—":
-                    st.error("Select a column for this rule.")
-                elif not cfg or not cfg.config_id:
-                    st.error("Save the configuration before adding rules.")
-                else:
-                    duplicate = any(
-                        (entry.get("rule_code") == selected_template.rule_code)
-                        and (entry.get("column") == selected_column)
-                        and (entry.get("params") == rendered_params)
-                        for entry in grid_entries
-                    )
-                    if duplicate:
-                        st.warning("This rule already exists for this column.")
-                    else:
-                        try:
-                            compiled_rule = _compile_library_rule(
-                                session,
-                                selected_template.rule_code,
-                                target_table,
-                                selected_column,
-                                rendered_params,
-                            )
-                        except Exception as exc:
-                            st.error(f"Rule compile failed: {exc}")
-                        else:
-                            insert_library_check(
-                                session,
-                                config_id=cfg.config_id,
-                                table_fqn=target_table,
-                                column_name=selected_column,
-                                rule_code=selected_template.rule_code,
-                                rule_id=selected_template.rule_id,
-                                rule_params=rendered_params,
-                                rule_version=selected_template.version,
-                                compiled_rule=compiled_rule,
-                                severity=selected_template.severity or "ERROR",
-                                sample_rows=0,
-                            )
-                            st.success("Rule added.")
-                            st.rerun()
-            if cancel_new.button("Cancel", key="add_rule_cancel"):
-                pass
-
-    # Column selection (builder contract)
-    default_cols = sorted({chk.column_name for chk in column_checks if chk.column_name})
-    preselected_raw = st.session_state.get("dq_cols_ms") or default_cols
-    preselected = [c for c in preselected_raw if c in (available_cols or [])]
-    st.markdown("### Columns")
-    selected_columns = st.multiselect(
-        "Columns to check",
-        options=available_cols,
-        default=preselected,
-        key="dq_cols_ms",
-    )
-    st.info("Table-level checks **FRESHNESS** and **ROW_COUNT_ANOMALY** are automatically included.")
-
     # -------- Form --------
-    column_errors: List[str] = []
     # Pre-populate table-level defaults from existing checks / state
     existing_table_params: Dict[str, Dict[str, Any]] = {}
     legacy_row_count_params: Dict[str, object] = {}
@@ -1434,203 +1477,6 @@ def render_config_editor():
         desc = st.text_area("Description", value=(cfg.description if cfg else ""))
 
         check_rows: List[DQCheck] = []
-
-        existing_by_col_type: Dict[Tuple[str, str], DQCheck] = {}
-        for chk in column_checks:
-            key = _rule_key(chk.check_type or chk.rule_code or "")
-            existing_by_col_type[(chk.column_name or "", key)] = chk
-
-        def _current_params(chk: Optional[DQCheck]) -> Dict[str, Any]:
-            if not chk:
-                return {}
-            return _parse_params(chk.params_json)
-
-        def _default_severity(chk: Optional[DQCheck]) -> str:
-            return (chk.severity if chk and chk.severity else "ERROR") or "ERROR"
-
-        severity_options = ["ERROR", "WARN"]
-
-        def _coerce_int(value: Any, default: int = 0) -> int:
-            try:
-                return int(value)
-            except (TypeError, ValueError):
-                return default
-
-        def _coerce_float(value: Any, default: float = 0.0) -> float:
-            try:
-                return float(value)
-            except (TypeError, ValueError):
-                return default
-
-        def _add_column_check(
-            *,
-            enabled: bool,
-            ctype: str,
-            col: str,
-            params: Dict[str, Any],
-            severity: str,
-            sample_rows: int,
-        ) -> None:
-            if not enabled:
-                return
-            effective_table = target_table or (cfg.target_table_fqn if cfg else "")
-            if not effective_table:
-                column_errors.append("Select a target table to configure column checks.")
-                return
-            existing = existing_by_col_type.get((col, _rule_key(ctype)))
-            try:
-                rule_def = build_rule_for_column_check(effective_table, col, ctype, params)
-            except ValueError as exc:
-                column_errors.append(f"{ctype} for {col}: {exc}")
-                return
-            rule_sql: str
-            is_agg = False
-            if isinstance(rule_def, tuple):
-                rule_sql, is_agg = rule_def[0], bool(rule_def[1]) if len(rule_def) > 1 else False
-            else:
-                rule_sql, is_agg = rule_def.sql, rule_def.is_aggregate
-            compiled_rule = f"AGG: {rule_sql}" if is_agg else rule_sql
-            params_json = json.dumps(params, default=str) if params else None
-            check_rows.append(
-                DQCheck(
-                    config_id=(cfg.config_id if cfg else "temp"),
-                    check_id=existing.check_id if existing and existing.check_id else str(uuid4()),
-                    table_fqn=effective_table,
-                    column_name=col,
-                    rule_expr=compiled_rule,
-                    severity=severity,
-                    sample_rows=int(sample_rows),
-                    check_type=_rule_key(ctype),
-                    params_json=params_json,
-                    rule_params=params if params else None,
-                    compiled_rule=compiled_rule,
-                )
-            )
-
-        for col in selected_columns:
-            sk = _keyify(col)
-            with st.expander(f"Column: {col}", expanded=False):
-                sample_key = f"samp_{sk}"
-                existing_sample = next((c.sample_rows for c in column_checks if c.column_name == col and c.sample_rows is not None), None)
-                sample_rows = st.number_input(
-                    f"Sample failing rows for {col}",
-                    min_value=0,
-                    max_value=1000,
-                    value=int(st.session_state.get(sample_key, existing_sample or 10)),
-                    key=sample_key,
-                )
-
-                uniq_chk = existing_by_col_type.get((col, "UNIQUE"))
-                unique_enabled = st.checkbox("UNIQUE", value=bool(uniq_chk), key=f"{sk}_chk_unique")
-                ignore_nulls = st.checkbox("Ignore NULLs", value=bool(_current_params(uniq_chk).get("ignore_nulls", True)), key=f"{sk}_p_un_ignore") if unique_enabled else _current_params(uniq_chk).get("ignore_nulls", True)
-                sev_unique = st.selectbox("Severity (UNIQUE)", options=severity_options, index=severity_options.index(_default_severity(uniq_chk) if _default_severity(uniq_chk) in severity_options else "ERROR"), key=f"{sk}_sev_unique") if unique_enabled else _default_severity(uniq_chk)
-
-                null_chk = existing_by_col_type.get((col, "NULL_COUNT"))
-                null_enabled = st.checkbox("NULL_COUNT", value=bool(null_chk), key=f"{sk}_chk_nullcount")
-                max_nulls_default = _coerce_int(_current_params(null_chk).get("max_nulls", 0), 0)
-                max_nulls = st.number_input(
-                    "Max NULL rows",
-                    min_value=0,
-                    value=max_nulls_default,
-                    key=f"{sk}_p_nc_max",
-                ) if null_enabled else max_nulls_default
-                sev_null = st.selectbox("Severity (NULL_COUNT)", options=severity_options, index=severity_options.index(_default_severity(null_chk) if _default_severity(null_chk) in severity_options else "ERROR"), key=f"{sk}_sev_null") if null_enabled else _default_severity(null_chk)
-
-                mm_chk = existing_by_col_type.get((col, "MIN_MAX"))
-                mm_enabled = st.checkbox("MIN_MAX", value=bool(mm_chk), key=f"{sk}_chk_minmax")
-                min_val = st.text_input("Min (inclusive)", value=str(_current_params(mm_chk).get("min", "")), key=f"{sk}_p_mm_min") if mm_enabled else _current_params(mm_chk).get("min", "")
-                max_val = st.text_input("Max (inclusive)", value=str(_current_params(mm_chk).get("max", "")), key=f"{sk}_p_mm_max") if mm_enabled else _current_params(mm_chk).get("max", "")
-                sev_mm = st.selectbox("Severity (MIN_MAX)", options=severity_options, index=severity_options.index(_default_severity(mm_chk) if _default_severity(mm_chk) in severity_options else "ERROR"), key=f"{sk}_sev_mm") if mm_enabled else _default_severity(mm_chk)
-
-                ws_chk = existing_by_col_type.get((col, "WHITESPACE"))
-                ws_enabled = st.checkbox("WHITESPACE", value=bool(ws_chk), key=f"{sk}_chk_ws")
-                ws_options = ["NO_LEADING_TRAILING", "NO_INTERNAL_ONLY_WHITESPACE", "NON_EMPTY_TRIMMED"]
-                ws_current = (_current_params(ws_chk).get("mode") or "NO_LEADING_TRAILING")
-                ws_index = ws_options.index(ws_current) if ws_current in ws_options else 0
-                ws_mode = st.selectbox(
-                    "Mode",
-                    options=ws_options,
-                    index=ws_index,
-                    key=f"{sk}_p_ws_mode",
-                ) if ws_enabled else ws_current
-                sev_ws = st.selectbox("Severity (WHITESPACE)", options=severity_options, index=severity_options.index(_default_severity(ws_chk) if _default_severity(ws_chk) in severity_options else "ERROR"), key=f"{sk}_sev_ws") if ws_enabled else _default_severity(ws_chk)
-
-                fmt_chk = existing_by_col_type.get((col, "FORMAT_DISTRIBUTION"))
-                fmt_enabled = st.checkbox("FORMAT_DISTRIBUTION", value=bool(fmt_chk), key=f"{sk}_chk_fmt")
-                fmt_regex = st.text_input("Regex (Snowflake RLIKE)", value=str(_current_params(fmt_chk).get("regex", "")), key=f"{sk}_p_fmt_regex") if fmt_enabled else _current_params(fmt_chk).get("regex", "")
-                fmt_ratio_default = _coerce_float(_current_params(fmt_chk).get("min_match_ratio", 0.8), 0.8)
-                fmt_ratio = st.number_input(
-                    "Min match ratio (0-1)",
-                    min_value=0.0,
-                    max_value=1.0,
-                    step=0.01,
-                    value=fmt_ratio_default,
-                    key=f"{sk}_p_fmt_ratio",
-                ) if fmt_enabled else fmt_ratio_default
-                sev_fmt = st.selectbox("Severity (FORMAT_DISTRIBUTION)", options=severity_options, index=severity_options.index(_default_severity(fmt_chk) if _default_severity(fmt_chk) in severity_options else "ERROR"), key=f"{sk}_sev_fmt") if fmt_enabled else _default_severity(fmt_chk)
-
-                val_chk = existing_by_col_type.get((col, "VALUE_DISTRIBUTION"))
-                val_enabled = st.checkbox("VALUE_DISTRIBUTION", value=bool(val_chk), key=f"{sk}_chk_val")
-                val_csv = st.text_input("Allowed values (CSV)", value=str(_current_params(val_chk).get("allowed_values_csv", "")), key=f"{sk}_p_val_csv") if val_enabled else _current_params(val_chk).get("allowed_values_csv", "")
-                val_ratio_default = _coerce_float(_current_params(val_chk).get("min_match_ratio", 0.8), 0.8)
-                val_ratio = st.number_input(
-                    "Min in-set ratio (0-1)",
-                    min_value=0.0,
-                    max_value=1.0,
-                    step=0.01,
-                    value=val_ratio_default,
-                    key=f"{sk}_p_val_ratio",
-                ) if val_enabled else val_ratio_default
-                sev_val = st.selectbox("Severity (VALUE_DISTRIBUTION)", options=severity_options, index=severity_options.index(_default_severity(val_chk) if _default_severity(val_chk) in severity_options else "ERROR"), key=f"{sk}_sev_val") if val_enabled else _default_severity(val_chk)
-
-                _add_column_check(
-                    enabled=unique_enabled,
-                    ctype="UNIQUE",
-                    col=col,
-                    params={"ignore_nulls": bool(ignore_nulls)},
-                    severity=sev_unique,
-                    sample_rows=int(sample_rows),
-                )
-                _add_column_check(
-                    enabled=null_enabled,
-                    ctype="NULL_COUNT",
-                    col=col,
-                    params={"max_nulls": int(max_nulls) if isinstance(max_nulls, (int, float)) else 0},
-                    severity=sev_null,
-                    sample_rows=int(sample_rows),
-                )
-                _add_column_check(
-                    enabled=mm_enabled,
-                    ctype="MIN_MAX",
-                    col=col,
-                    params={"min": min_val, "max": max_val},
-                    severity=sev_mm,
-                    sample_rows=int(sample_rows),
-                )
-                _add_column_check(
-                    enabled=ws_enabled,
-                    ctype="WHITESPACE",
-                    col=col,
-                    params={"mode": ws_mode},
-                    severity=sev_ws,
-                    sample_rows=int(sample_rows),
-                )
-                _add_column_check(
-                    enabled=fmt_enabled,
-                    ctype="FORMAT_DISTRIBUTION",
-                    col=col,
-                    params={"regex": fmt_regex, "min_match_ratio": fmt_ratio},
-                    severity=sev_fmt,
-                    sample_rows=int(sample_rows),
-                )
-                _add_column_check(
-                    enabled=val_enabled,
-                    ctype="VALUE_DISTRIBUTION",
-                    col=col,
-                    params={"allowed_values_csv": val_csv, "min_match_ratio": val_ratio},
-                    severity=sev_val,
-                    sample_rows=int(sample_rows),
-                )
 
         # Table-level (always)
         st.markdown("### Table-level checks (always included)")
@@ -1742,10 +1588,6 @@ def render_config_editor():
         with c3: run_now_btn = st.form_submit_button("Run Now")
         with c4: delete_btn = st.form_submit_button("Delete", type="secondary")
 
-    if column_errors:
-        for err in dict.fromkeys(column_errors):
-            st.error(err)
-
     if table_check_error:
         st.error(table_check_error)
 
@@ -1787,12 +1629,8 @@ def render_config_editor():
 
     # After submit
     if apply_now or save_draft or run_now_btn or delete_btn:
-        if (apply_now or save_draft or run_now_btn) and (table_check_error or column_errors):
-            if column_errors:
-                for err in dict.fromkeys(column_errors):
-                    st.error(err)
-            if table_check_error:
-                st.error(table_check_error)
+        if (apply_now or save_draft or run_now_btn) and table_check_error:
+            st.error(table_check_error)
             return
         if not session:
             st.error("No active Snowpark session.")
