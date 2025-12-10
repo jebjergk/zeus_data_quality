@@ -225,6 +225,8 @@ def _parse_relation_name(name: str) -> Tuple[Optional[str], Optional[str], str]:
         return None, parts[0], parts[1]
     if len(parts) == 1:
         return None, None, parts[0]
+    if len(parts) == 0:
+        return None, None, ""
     raise ValueError("Invalid relation name")
 
 def _current_db_schema(session: Session) -> Tuple[Optional[str], Optional[str]]:
