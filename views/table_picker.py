@@ -101,8 +101,17 @@ def _list_tables_cached(session_obj, database: str, schema: str) -> List[str]:
     return _load_tables((session_cache_token(session_obj), database, schema))
 
 
-def stateless_table_picker(session_obj, preselect_fqn: Optional[str]):
-    """Simple, stateless DB → Schema → Table picker. Returns (db, schema, table, fqn)."""
+def stateless_table_picker(
+    session_obj, preselect_fqn: Optional[str], *, disabled: bool = False
+):
+    """Simple, stateless DB → Schema → Table picker. Returns (db, schema, table, fqn).
+
+    Parameters
+    ----------
+    disabled:
+        When True, renders the selectors in a read-only state while preserving the
+        currently selected values.
+    """
 
     def split_fqn(fqn):
         if not fqn or fqn.count(".") != 2:
@@ -123,6 +132,7 @@ def stateless_table_picker(session_obj, preselect_fqn: Optional[str]):
         dbs or ["— none —"],
         index=db_index if dbs else 0,
         key="selected_db",
+        disabled=disabled,
     )
     if not dbs or db_sel == "— none —":
         return None, None, None, ""
@@ -138,6 +148,7 @@ def stateless_table_picker(session_obj, preselect_fqn: Optional[str]):
         schemas or ["— none —"],
         index=sch_index if schemas else 0,
         key="selected_schema",
+        disabled=disabled,
     )
     if not schemas or sch_sel == "— none —":
         return db_sel, None, None, ""
@@ -154,6 +165,7 @@ def stateless_table_picker(session_obj, preselect_fqn: Optional[str]):
         index=tbl_index if tables else 0,
         key="selected_table",
         on_change=_on_table_change,
+        disabled=disabled,
     )
     fqn = ""
     if tables and tbl_sel != "— none —":
