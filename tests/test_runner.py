@@ -34,3 +34,11 @@ def test_normalize_rule_expression_prefers_compiled_rule():
     check = _make_check(rule_expr=payload, compiled_rule=compiled_rule)
 
     assert _normalize_rule_expression(check) == compiled_rule
+
+
+def test_normalize_rule_expression_handles_invalid_json_payload():
+    compiled = 'T."COL" > 0'
+    payload = '{\n  "compiled_predicate": "' + compiled + '",\n  "rule_code": "GT_ZERO"\n'
+    check = _make_check(rule_expr=payload)
+
+    assert _normalize_rule_expression(check) == compiled

@@ -1,5 +1,6 @@
 # services/runner.py
 import json
+import re
 from typing import Any, Dict, List, Sequence
 from utils.checkdefs import _RULE_PARAMS_KEY
 from utils.meta import DQCheck, DQConfig
@@ -37,8 +38,45 @@ def _normalize_rule_expression(check: DQCheck) -> str:
                 if compiled:
                     rule_expr = compiled
         except Exception:
-            # Fall back to the raw expression when parsing fails.
-            pass
+            # Attempt a defensive extraction when the payload is not valid JSON.
+            patterns = [
+                r'"compiled_predicate"\s*:\s*"(?P<predicate>.*?)"\s*,\s*"',
+                r'"compiled_predicate"\s*:\s*"(?P<predicate>(?:[^"\\]|\\.)*)"',
+            ]
+            for pattern in patterns:
+                match = re.search(pattern, raw_expr, flags=re.DOTALL)
+                if match:
+                    compiled = match.group("predicate")
+                    compiled = (
+                        compiled.replace("\\\"", '"')
+                        .replace("\\n", "\n")
+                        .strip()
+                    )
+                    if compiled:
+                        rule_expr = compiled
+                        break
+
+            if rule_expr == raw_expr:
+                start = raw_expr.find('"compiled_predicate"')
+                if start != -1:
+                    remainder = raw_expr[start:]
+                    colon_idx = remainder.find(":")
+                    if colon_idx != -1:
+                        value_part = remainder[colon_idx + 1 :].lstrip()
+                        if value_part.startswith('"'):
+                            value_part = value_part[1:]
+                            end_idx = value_part.find('",')
+                            if end_idx == -1:
+                                end_idx = value_part.find('"\n')
+                            if end_idx != -1:
+                                compiled = (
+                                    value_part[:end_idx]
+                                    .replace("\\\"", '"')
+                                    .replace("\\n", "\n")
+                                    .strip()
+                                )
+                                if compiled:
+                                    rule_expr = compiled
     return rule_expr
 
 
