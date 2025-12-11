@@ -100,148 +100,98 @@ def _serialize_params(value: Any) -> Optional[str]:
     return json.dumps(value, default=str)
 
 
-def _upsert_table_check(session: Any, check: DQCheck) -> None:
+def _reset_table_level_checks(
+    session: Any,
+    *,
+    config_id: str,
+    table_fqn: str,
+    freshness_params: Dict[str, Any],
+    rowcount_params: Dict[str, Any],
+    freshness_rule_expr: str,
+    rowcount_rule_expr: str,
+) -> None:
     if not session or not CHECKS_TBL:
         logging.warning(
-            "dq_config: skipping table check upsert (session=%s, checks_table=%s)",
+            "dq_config: skipping table check reset (session=%s, checks_table=%s)",
             bool(session),
             CHECKS_TBL,
         )
         return
 
-    rule_code_lookup = {
-        "FRESHNESS": TABLE_FRESHNESS_RULE_CODE,
-        TABLE_FRESHNESS_RULE_CODE: TABLE_FRESHNESS_RULE_CODE,
-        "ROW_COUNT": TABLE_ROWCOUNT_RULE_CODE,
-        "ROW_COUNT_ANOMALY": TABLE_ROWCOUNT_RULE_CODE,
-        TABLE_ROWCOUNT_RULE_CODE: TABLE_ROWCOUNT_RULE_CODE,
-    }
-
-    rule_code = (check.rule_code or check.check_type or "").upper()
-    rule_code = rule_code_lookup.get(rule_code, rule_code)
-    if rule_code not in {TABLE_FRESHNESS_RULE_CODE, TABLE_ROWCOUNT_RULE_CODE}:
-        logging.info(
-            "dq_config: ignoring table check with unsupported rule_code=%s (raw=%s)",
-            rule_code,
-            check.rule_code,
-        )
-        return
-
-    check.rule_code = rule_code
-    if not check.rule_version:
-        rules_table = (
-            _q(f"{METADATA_DB}.{METADATA_SCHEMA}.DQ_RULE_LIBRARY")
-            if METADATA_DB and METADATA_SCHEMA
-            else _q("DQ_RULE_LIBRARY")
-        )
-        try:
-            version_rows = session.sql(
-                f"""
-                SELECT VERSION
-                FROM {rules_table}
-                WHERE RULE_CODE = :1
-                  AND SCOPE = 'TABLE'
-                """,
-                params=[rule_code],
-            ).collect()
-        except Exception as exc:
-            logging.exception(
-                "dq_config: failed to load rule version for rule_code=%s: %s",
-                rule_code,
-                exc,
-            )
-            version_rows = []
-        if version_rows:
-            check.rule_version = version_rows[0].get("VERSION")
-
-    serialized_params = _serialize_params(check.rule_params) or _serialize_params(check.params_json)
-    existing_id: Optional[str] = None
-    try:
-        result = session.sql(
-            f"""
-            SELECT CHECK_ID
-            FROM {_q(CHECKS_TBL)}
-            WHERE CONFIG_ID = :1
-              AND COLUMN_NAME IS NULL
-              AND RULE_CODE = :2
-            QUALIFY ROW_NUMBER() OVER (ORDER BY UPDATED_AT DESC, CHECK_ID) = 1
-            """,
-            params=[check.config_id, rule_code],
-        ).collect()
-        if result:
-            existing_id = result[0]["CHECK_ID"]
-    except Exception as exc:
-        logging.exception(
-            "dq_config: failed to load existing table check for config_id=%s, rule_code=%s: %s",
-            check.config_id,
-            rule_code,
-            exc,
-        )
-        existing_id = None
-
-    check_id = existing_id or check.check_id or str(uuid4())
-    check.check_id = check_id
+    checks_table = _q(CHECKS_TBL)
+    rule_library_table = (
+        _q(f"{METADATA_DB}.{METADATA_SCHEMA}.DQ_RULE_LIBRARY")
+        if METADATA_DB and METADATA_SCHEMA
+        else _q("DQ_RULE_LIBRARY")
+    )
 
     try:
         session.sql(
             f"""
-            MERGE INTO {_q(CHECKS_TBL)} AS target
-            USING (
-                SELECT :1 AS CONFIG_ID, :2 AS RULE_CODE, :3 AS CHECK_ID
-            ) AS source
-            ON target.CONFIG_ID = source.CONFIG_ID
-               AND target.RULE_CODE = source.RULE_CODE
-               AND target.COLUMN_NAME IS NULL
-            WHEN MATCHED THEN UPDATE SET
-                TABLE_FQN = :4,
-                RULE_EXPR = :5,
-                SEVERITY = :6,
-                SAMPLE_ROWS = :7,
-                CHECK_TYPE = :8,
-                PARAMS_JSON = :9,
-                RULE_PARAMS = :10,
-                RULE_VERSION = :11,
-                COMPILED_RULE = :12,
-                UPDATED_AT = CURRENT_TIMESTAMP()
-            WHEN NOT MATCHED THEN INSERT (
-                CONFIG_ID, CHECK_ID, TABLE_FQN, COLUMN_NAME, RULE_EXPR, SEVERITY,
-                SAMPLE_ROWS, CHECK_TYPE, PARAMS_JSON, RULE_CODE, RULE_PARAMS,
-                RULE_VERSION, COMPILED_RULE, UPDATED_AT
-            ) VALUES (
-                :1, :3, :4, NULL, :5, :6, :7, :8, :9, :2, :10, :11, :12, CURRENT_TIMESTAMP()
-            )
-            """,
-            params=[
-                check.config_id,
-                rule_code,
-                check_id,
-                check.table_fqn,
-                check.rule_expr,
-                check.severity,
-                int(check.sample_rows),
-                check.check_type,
-                _serialize_params(check.params_json),
-                serialized_params,
-                check.rule_version,
-                check.compiled_rule,
-            ],
-        ).collect()
-        logging.info(
-            "dq_config: upserted table check %s for config_id=%s (rule_code=%s, check_type=%s)",
-            check_id,
-            check.config_id,
-            rule_code,
-            check.check_type,
-        )
+            DELETE FROM {checks_table}
+            WHERE CONFIG_ID = :config_id
+              AND COLUMN_NAME IS NULL
+            """
+        ).bind({"config_id": config_id}).collect()
     except Exception as exc:
         logging.exception(
-            "dq_config: failed to upsert table check %s for config_id=%s (rule_code=%s): %s",
-            check_id,
-            check.config_id,
-            rule_code,
+            "dq_config: failed to delete existing table checks for config_id=%s: %s",
+            config_id,
             exc,
         )
         raise
+
+    def _insert_table_check(rule_code: str, params: Dict[str, Any], rule_expr: str) -> None:
+        serialized_params = json.dumps(params, default=str)
+        payload = {
+            "config_id": config_id,
+            "check_id": str(uuid4()),
+            "table_fqn": table_fqn,
+            "rule_expr": rule_expr,
+            "params_json": serialized_params,
+            "rule_params": serialized_params,
+            "rule_code": rule_code,
+        }
+
+        try:
+            session.sql(
+                f"""
+                INSERT INTO {checks_table} (
+                    CONFIG_ID, CHECK_ID, TABLE_FQN, COLUMN_NAME, RULE_EXPR, SEVERITY,
+                    SAMPLE_ROWS, CHECK_TYPE, PARAMS_JSON, RULE_CODE, RULE_PARAMS,
+                    RULE_VERSION, COMPILED_RULE, UPDATED_AT
+                )
+                SELECT
+                    :config_id,
+                    :check_id,
+                    :table_fqn,
+                    NULL,
+                    :rule_expr,
+                    COALESCE(r.SEVERITY, 'ERROR'),
+                    0,
+                    COALESCE(r.CHECK_TYPE, r.RULE_ID, r.RULE_CODE),
+                    :params_json,
+                    r.RULE_CODE,
+                    :rule_params,
+                    r.VERSION,
+                    :rule_expr,
+                    CURRENT_TIMESTAMP()
+                FROM {rule_library_table} r
+                WHERE r.RULE_CODE = :rule_code
+                  AND COALESCE(UPPER(r.SCOPE), 'TABLE') = 'TABLE'
+                """
+            ).bind(payload).collect()
+        except Exception as exc:
+            logging.exception(
+                "dq_config: failed to insert table check %s for config_id=%s: %s",
+                rule_code,
+                config_id,
+                exc,
+            )
+            raise
+
+    _insert_table_check(TABLE_FRESHNESS_RULE_CODE, freshness_params, freshness_rule_expr)
+    _insert_table_check(TABLE_ROWCOUNT_RULE_CODE, rowcount_params, rowcount_rule_expr)
 
 def _resolve_modal_factory():
     """Return a callable that creates a context-managed modal/dialog if available."""
@@ -1668,8 +1618,11 @@ def render_config_editor():
             st.text_input("Name", value=name, disabled=True, help="Automatically derived from the selected database, schema, and table.")
             desc = st.text_area("Description", value=(cfg.description if cfg else ""))
     
-            check_rows: List[DQCheck] = []
-    
+            freshness_params_for_save: Optional[Dict[str, Any]] = None
+            rowcount_params_for_save: Optional[Dict[str, Any]] = None
+            freshness_rule_expr: Optional[str] = None
+            rowcount_rule_expr: Optional[str] = None
+
             # Table-level (always)
             st.markdown("### Table-level checks (always included)")
             if target_table and not timestamp_columns:
@@ -1715,46 +1668,10 @@ def render_config_editor():
                 fr_template = table_templates_by_key.get(freshness_key)
                 existing_freshness = existing_table_checks.get(freshness_key) or {}
                 if timestamp_missing:
-                    stored_params = existing_table_params.get(freshness_key) or {}
-                    serialized_params = (
-                        json.dumps(stored_params, default=str)
-                        if isinstance(stored_params, dict)
-                        else stored_params
+                    st.warning(
+                        "Select a timestamp column to keep the freshness check.",
+                        icon="⚠️",
                     )
-                    if existing_freshness:
-                        fallback_rule = (
-                            existing_freshness.get("compiled_rule")
-                            or existing_freshness.get("rule_expr")
-                            or ""
-                        )
-                        fallback_rule_code = (
-                            (existing_freshness.get("rule_code") or "").upper()
-                            or (
-                                (fr_template.rule_code if fr_template else TABLE_FRESHNESS_RULE_CODE)
-                            )
-                        )
-                        check_rows.append(
-                            DQCheck(
-                                config_id=(cfg.config_id if cfg else "temp"),
-                                check_id=existing_freshness.get("check_id") or "TABLE_FRESHNESS",
-                                table_fqn=target_table,
-                                column_name=None,
-                                rule_expr=fallback_rule,
-                                severity=existing_freshness.get("severity") or "ERROR",
-                                sample_rows=0,
-                                check_type=_builder_key(freshness_key, "FRESHNESS"),
-                                params_json=serialized_params,
-                                rule_code=(fallback_rule_code.upper() if fallback_rule_code else None),
-                                rule_params=serialized_params,
-                                rule_version=existing_freshness.get("rule_version"),
-                                compiled_rule=fallback_rule,
-                            )
-                        )
-                    else:
-                        st.warning(
-                            "Select a timestamp column to keep the freshness check.",
-                            icon="⚠️",
-                        )
                 else:
                     fr_params = {"timestamp_column": ts_col, "max_age_minutes": int(fr_max_age)}
 
@@ -1765,110 +1682,36 @@ def render_config_editor():
                     except ValueError as exc:
                         table_check_error = f"Invalid freshness configuration: {exc}"
                     else:
-                        fr_template = table_templates_by_key.get(freshness_key)
-                        rule_code_value = (
-                            (existing_freshness.get("rule_code") or "").upper()
-                            or (
-                                fr_template.rule_code
-                                if fr_template
-                                else TABLE_FRESHNESS_RULE_CODE
-                            )
-                        )
-                        check_rows.append(
-                            DQCheck(
-                                config_id=(cfg.config_id if cfg else "temp"),
-                                check_id=(
-                                    existing_freshness.get("check_id")
-                                    or "TABLE_FRESHNESS"
-                                ),
-                                table_fqn=target_table,
-                                column_name=None,
-                                rule_expr=(f"AGG: {fr_rule}" if fr_is_agg else fr_rule),
-                                severity=(
-                                    existing_freshness.get("severity")
-                                    or "ERROR"
-                                ),
-                                sample_rows=0,
-                                check_type=_builder_key(freshness_key, "FRESHNESS"),
-                                params_json=json.dumps(fr_params),
-                                rule_code=rule_code_value.upper(),
-                                rule_params=json.dumps(fr_params),
-                                rule_version=(
-                                    fr_template.version if fr_template else existing_freshness.get("rule_version")
-                                ),
-                                compiled_rule=(f"AGG: {fr_rule}" if fr_is_agg else fr_rule),
-                            )
-                        )
+                        freshness_params_for_save = fr_params
+                        freshness_rule_expr = f"AGG: {fr_rule}" if fr_is_agg else fr_rule
 
-                existing_anomaly = existing_table_checks.get(rowcount_anomaly_key) or {}
-                stored_anomaly_params = existing_table_params.get(rowcount_anomaly_key) or {}
-                serialized_anomaly_params = (
-                    json.dumps(stored_anomaly_params, default=str)
-                    if isinstance(stored_anomaly_params, dict)
-                    else stored_anomaly_params
-                )
+                row_defaults = existing_table_params.get(rowcount_anomaly_key, {}) or {}
+                try:
+                    lookback_days = int(row_defaults.get("lookback_days", 28))
+                except (TypeError, ValueError):
+                    lookback_days = 28
+                try:
+                    sensitivity = float(row_defaults.get("sensitivity", 3.0))
+                except (TypeError, ValueError):
+                    sensitivity = 3.0
+                try:
+                    min_history_days = int(row_defaults.get("min_history_days", 7))
+                except (TypeError, ValueError):
+                    min_history_days = 7
+                anomaly_params = {
+                    "timestamp_column": ts_col,
+                    "lookback_days": lookback_days,
+                    "sensitivity": sensitivity,
+                    "min_history_days": min_history_days,
+                }
+                rowcount_params_for_save = anomaly_params
 
                 if timestamp_missing:
-                    if existing_anomaly:
-                        fallback_rule = (
-                            existing_anomaly.get("compiled_rule")
-                            or existing_anomaly.get("rule_expr")
-                            or ""
-                        )
-                        fallback_rule_code = (
-                            (existing_anomaly.get("rule_code") or "").upper()
-                            or (
-                                table_templates_by_key[rowcount_anomaly_key].rule_code
-                                if table_templates_by_key.get(rowcount_anomaly_key)
-                                else TABLE_ROWCOUNT_RULE_CODE
-                            )
-                        )
-                        check_rows.append(
-                            DQCheck(
-                                config_id=(cfg.config_id if cfg else "temp"),
-                                check_id=(
-                                    existing_anomaly.get("check_id")
-                                    or "TABLE_ROW_COUNT_ANOMALY"
-                                ),
-                                table_fqn=target_table,
-                                column_name=None,
-                                rule_expr=fallback_rule,
-                                severity=existing_anomaly.get("severity")
-                                or "ERROR",
-                                sample_rows=0,
-                                check_type=_builder_key(rowcount_anomaly_key, "ROW_COUNT_ANOMALY"),
-                                params_json=serialized_anomaly_params,
-                                rule_code=fallback_rule_code.upper(),
-                                rule_params=serialized_anomaly_params,
-                                rule_version=existing_anomaly.get("rule_version"),
-                                compiled_rule=fallback_rule,
-                            )
-                        )
-                    else:
-                        st.warning(
-                            "Select a timestamp column to keep the row count anomaly check.",
-                            icon="⚠️",
-                        )
+                    st.warning(
+                        "Select a timestamp column to keep the row count anomaly check.",
+                        icon="⚠️",
+                    )
                 else:
-                    row_defaults = existing_table_params.get(rowcount_anomaly_key, {}) or {}
-                    try:
-                        lookback_days = int(row_defaults.get("lookback_days", 28))
-                    except (TypeError, ValueError):
-                        lookback_days = 28
-                    try:
-                        sensitivity = float(row_defaults.get("sensitivity", 3.0))
-                    except (TypeError, ValueError):
-                        sensitivity = 3.0
-                    try:
-                        min_history_days = int(row_defaults.get("min_history_days", 7))
-                    except (TypeError, ValueError):
-                        min_history_days = 7
-                    anomaly_params = {
-                        "timestamp_column": ts_col,
-                        "lookback_days": lookback_days,
-                        "sensitivity": sensitivity,
-                        "min_history_days": min_history_days,
-                    }
                     logging.info(
                         "dq_config: building row count anomaly for %s with params=%s (timestamp_missing=%s)",
                         target_table,
@@ -1885,42 +1728,8 @@ def render_config_editor():
                         table_check_error = f"Invalid row count anomaly configuration: {exc}"
                         logging.warning("dq_config: row count anomaly build failed: %s", exc)
                     else:
-                        anomaly_template = table_templates_by_key.get(rowcount_anomaly_key)
-                        rule_code_value = (
-                            anomaly_template.rule_code
-                            if anomaly_template
-                            else TABLE_ROWCOUNT_RULE_CODE
-                        )
-                        check_rows.append(
-                            DQCheck(
-                                config_id=(cfg.config_id if cfg else "temp"),
-                                check_id=(
-                                    existing_anomaly.get("check_id")
-                                    or "TABLE_ROW_COUNT_ANOMALY"
-                                ),
-                                table_fqn=target_table,
-                                column_name=None,
-                                rule_expr=(
-                                    f"AGG: {anomaly_rule}" if anomaly_is_agg else anomaly_rule
-                                ),
-                                severity=(
-                                    existing_anomaly.get("severity")
-                                    or "ERROR"
-                                ),
-                                sample_rows=0,
-                                check_type=_builder_key(rowcount_anomaly_key, "ROW_COUNT_ANOMALY"),
-                                params_json=json.dumps(anomaly_params),
-                                rule_code=rule_code_value.upper(),
-                                rule_params=json.dumps(anomaly_params),
-                                rule_version=(
-                                    anomaly_template.version
-                                    if anomaly_template
-                                    else existing_anomaly.get("rule_version")
-                                ),
-                                compiled_rule=(
-                                    f"AGG: {anomaly_rule}" if anomaly_is_agg else anomaly_rule
-                                ),
-                            )
+                        rowcount_rule_expr = (
+                            f"AGG: {anomaly_rule}" if anomaly_is_agg else anomaly_rule
                         )
     
             st.markdown("### Schedule")
@@ -2064,40 +1873,6 @@ def render_config_editor():
                     remember("error", err_msg)
                     return
             # Preserve existing column-level rules and rebind to the active config
-            existing_column_checks: List[DQCheck] = []
-            for rule in column_library_checks:
-                column_name = rule.get("column_name")
-                if not column_name:
-                    continue
-
-            table_checks: Dict[str, DQCheck] = {}
-            for cr in check_rows:
-                cr.config_id = new_id
-                cr.table_fqn = target_table
-                rule_identity = (cr.rule_code or cr.check_type or "").upper()
-                if not rule_identity and cr.check_type:
-                    rule_identity = _rule_key(cr.check_type).upper()
-                if not rule_identity:
-                    continue
-                table_checks[rule_identity] = cr
-
-            missing_table_checks = {
-                key
-                for key in (freshness_key, rowcount_anomaly_key)
-                if key not in table_checks and submit_triggered
-            }
-            if missing_table_checks:
-                logging.warning(
-                    "dq_config: skipping table checks %s for config_id=%s (table_check_error=%s, timestamp_missing=%s)",
-                    sorted(missing_table_checks),
-                    new_id,
-                    table_check_error,
-                    timestamp_missing,
-                )
-
-            for chk in table_checks.values():
-                _upsert_table_check(session, chk)
-
             field_checks: List[DQCheck] = []
             for rule in column_library_checks:
                 converted = _convert_column_rule(rule, table_override=target_table)
@@ -2107,7 +1882,7 @@ def render_config_editor():
                         converted.table_fqn = target_table
                     field_checks.append(converted)
 
-            combined_checks = field_checks + list(table_checks.values())
+            combined_checks = field_checks
 
             out = save_config_and_checks(
                 session,
@@ -2115,6 +1890,30 @@ def render_config_editor():
                 combined_checks,
                 apply_now=apply_now,
             )
+
+            if not table_check_error:
+                if (
+                    freshness_params_for_save
+                    and rowcount_params_for_save
+                    and freshness_rule_expr
+                    and rowcount_rule_expr
+                ):
+                    _reset_table_level_checks(
+                        session,
+                        config_id=new_id,
+                        table_fqn=target_table,
+                        freshness_params=freshness_params_for_save,
+                        rowcount_params=rowcount_params_for_save,
+                        freshness_rule_expr=freshness_rule_expr,
+                        rowcount_rule_expr=rowcount_rule_expr,
+                    )
+                else:
+                    logging.warning(
+                        "dq_config: table check payloads missing for config_id=%s (freshness_params=%s, rowcount_params=%s)",
+                        new_id,
+                        bool(freshness_params_for_save),
+                        bool(rowcount_params_for_save),
+                    )
             base_msg = f"Saved config {new_id} ({status})."
             st.success(base_msg)
             remember("success", base_msg)
