@@ -18,10 +18,40 @@ HANDLER = 'run_dq_config'
 EXECUTE AS CALLER
 AS
 $$
+import json
 import uuid
 from snowflake.snowpark import Session
 
 AGG_PREFIX = "AGG:"
+
+
+def _compiled_from_json(text):
+    """Best-effort extraction of ``compiled_predicate`` from a JSON payload."""
+
+    if not isinstance(text, str):
+        return None
+
+    trimmed = text.strip()
+    if not trimmed or "compiled_predicate" not in trimmed:
+        return None
+
+    try:
+        parsed = json.loads(trimmed)
+    except Exception:
+        return None
+
+    if isinstance(parsed, dict):
+        return parsed.get("compiled_predicate")
+
+    if isinstance(parsed, str):
+        try:
+            nested = json.loads(parsed)
+        except Exception:
+            return None
+        if isinstance(nested, dict):
+            return nested.get("compiled_predicate")
+
+    return None
 
 
 def _extract_predicate(compiled_rule, rule_expr_raw):
@@ -34,7 +64,7 @@ def _extract_predicate(compiled_rule, rule_expr_raw):
 
     if compiled_rule is not None:
         if isinstance(compiled_rule, str):
-            predicate = compiled_rule
+            predicate = _compiled_from_json(compiled_rule) or compiled_rule
         elif isinstance(compiled_rule, dict):
             predicate = compiled_rule.get("compiled_predicate")
         elif hasattr(compiled_rule, "get"):
@@ -42,7 +72,7 @@ def _extract_predicate(compiled_rule, rule_expr_raw):
             predicate = compiled_rule.get("compiled_predicate")
 
     if not predicate:
-        predicate = rule_expr_raw
+        predicate = _compiled_from_json(rule_expr_raw) or rule_expr_raw
 
     return (predicate or "").strip()
 
