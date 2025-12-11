@@ -66,10 +66,14 @@ METADATA_DB, METADATA_SCHEMA = get_metadata_namespace()
 # Override with fully-qualified names if desired (e.g., "DB.SCHEMA.DQ_CONFIG")
 DQ_CONFIG_TBL: str = f"{METADATA_DB}.{METADATA_SCHEMA}.DQ_CONFIG"
 DQ_CHECK_TBL: str = f"{METADATA_DB}.{METADATA_SCHEMA}.DQ_CHECK"
+TABLE_FRESHNESS_RULE_CODE = "TABLE_FRESHNESS_CHECK"
+TABLE_ROWCOUNT_RULE_CODE = "TABLE_ROWCOUNT_ANOMALY"
 
 __all__ = [
     "DQ_CONFIG_TBL",
     "DQ_CHECK_TBL",
+    "TABLE_FRESHNESS_RULE_CODE",
+    "TABLE_ROWCOUNT_RULE_CODE",
     "DQConfig",
     "DQCheck",
     "_q",
@@ -417,6 +421,10 @@ def get_library_checks(
     if scope:
         scope_clause = " AND COALESCE(UPPER(r.SCOPE), '') = UPPER(?)"
         params.append(scope)
+        if scope.upper() == "COLUMN":
+            scope_clause += " AND c.COLUMN_NAME IS NOT NULL"
+        elif scope.upper() == "TABLE":
+            scope_clause += " AND c.COLUMN_NAME IS NULL"
 
     df = session.sql(
         f"""

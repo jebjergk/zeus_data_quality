@@ -16,7 +16,8 @@ USING (
         CATEGORY,
         SEVERITY,
         ENABLED,
-        VERSION
+        VERSION,
+        CHECK_TYPE
     FROM (
         SELECT * FROM VALUES
             (
@@ -31,7 +32,8 @@ USING (
                 'COMPLETENESS',
                 'HIGH',
                 TRUE,
-                1
+                1,
+                'COMPLETENESS'
             ),
             (
                 'RANGE_CHECK',
@@ -45,7 +47,8 @@ USING (
                 'VALIDITY',
                 'MEDIUM',
                 TRUE,
-                1
+                1,
+                'VALIDITY'
             ),
             (
                 'REGEX_MATCH',
@@ -59,7 +62,8 @@ USING (
                 'VALIDITY',
                 'MEDIUM',
                 TRUE,
-                1
+                1,
+                'VALIDITY'
             ),
             (
                 'IN_REFERENCE_TABLE',
@@ -73,9 +77,40 @@ USING (
                 'REFERENTIAL_INTEGRITY',
                 'HIGH',
                 TRUE,
-                1
+                1,
+                'REFERENTIAL_INTEGRITY'
+            ),
+            (
+                'TABLE_FRESHNESS_CHECK',
+                'TABLE',
+                'SQL',
+                NULL,
+                '[{"name":"timestamp_column","type":"STRING","required":true},{"name":"max_age_minutes","type":"NUMBER","required":true}]',
+                '{}',
+                '[]',
+                '[]',
+                'TIMELINESS',
+                'HIGH',
+                TRUE,
+                1,
+                'FRESHNESS'
+            ),
+            (
+                'TABLE_ROWCOUNT_ANOMALY',
+                'TABLE',
+                'SQL',
+                NULL,
+                '[{"name":"timestamp_column","type":"STRING","required":true},{"name":"lookback_days","type":"NUMBER","required":true},{"name":"sensitivity","type":"NUMBER","required":true},{"name":"min_history_days","type":"NUMBER","required":true}]',
+                '{}',
+                '[]',
+                '[]',
+                'VALIDITY',
+                'MEDIUM',
+                TRUE,
+                1,
+                'ROW_COUNT_ANOMALY'
             )
-            AS v(RULE_CODE, SCOPE, ENGINE_TYPE, EXPRESSION, PARAM_SCHEMA_JSON, DEFAULT_PARAMS_JSON, ALLOWED_DATA_TYPES_JSON, ALLOWED_CLASSIFICATIONS_JSON, CATEGORY, SEVERITY, ENABLED, VERSION)
+            AS v(RULE_CODE, SCOPE, ENGINE_TYPE, EXPRESSION, PARAM_SCHEMA_JSON, DEFAULT_PARAMS_JSON, ALLOWED_DATA_TYPES_JSON, ALLOWED_CLASSIFICATIONS_JSON, CATEGORY, SEVERITY, ENABLED, VERSION, CHECK_TYPE)
     )
 ) AS source
 ON target.RULE_CODE = source.RULE_CODE
@@ -92,7 +127,7 @@ WHEN MATCHED THEN UPDATE SET
     ENABLED = source.ENABLED,
     VERSION = source.VERSION,
     RULE_ID = COALESCE(target.RULE_ID, source.RULE_CODE),
-    CHECK_TYPE = COALESCE(target.CHECK_TYPE, source.CATEGORY),
+    CHECK_TYPE = COALESCE(target.CHECK_TYPE, source.CHECK_TYPE),
     EXPRESSION_TEMPLATE = COALESCE(target.EXPRESSION_TEMPLATE, source.EXPRESSION),
     DEFAULT_SEVERITY = COALESCE(target.DEFAULT_SEVERITY, source.SEVERITY),
     ACTIVE = COALESCE(target.ACTIVE, source.ENABLED),
@@ -116,7 +151,7 @@ WHEN NOT MATCHED THEN INSERT (
     source.SEVERITY,
     source.ENABLED,
     source.VERSION,
-    source.CATEGORY,
+    source.CHECK_TYPE,
     source.EXPRESSION,
     source.SEVERITY,
     source.ENABLED,
