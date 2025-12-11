@@ -29,7 +29,7 @@ logging.getLogger("snowflake").setLevel(logging.WARNING)
 
 from typing import Dict, List, Optional
 
-ALLOWED_PAGES = {"home", "cfg", "profile", "monitor", "docs", "rules"}
+ALLOWED_PAGES = {"home", "cfg", "profile", "monitor", "monitor_v3", "docs", "rules"}
 
 if st.session_state["_rerun_count"] == 1:
     logging.info("route:init %s", current_view)
@@ -76,6 +76,7 @@ from utils.flags import DEBUG_PROFILING
 from utils.meta import _q, list_configs
 from utils.version import build_sha, build_time
 from views.docs_view import render_docs as render_docs_view
+from views.monitor_v3_view import render_monitor_v3
 from views.profile_view import render_profile as render_profiling_view
 from views.rule_admin_view import render_rule_admin
 
@@ -525,6 +526,14 @@ with st.sidebar:
         args=("monitor",),
     )
     st.button(
+        "📈 DQ Monitor v3",
+        use_container_width=True,
+        type="primary" if view == "monitor_v3" else "secondary",
+        key="nav_monitor_v3",
+        on_click=navigate_to,
+        args=("monitor_v3",),
+    )
+    st.button(
         "DQ Rule Library",
         use_container_width=True,
         type="primary" if view == "rules" else "secondary",
@@ -570,6 +579,8 @@ elif view == "profile":
     render_profiling_view(session, METADATA_DB, METADATA_SCHEMA, profiling_v2)
 elif view == "monitor":
     render_monitor()
+elif view == "monitor_v3":
+    render_monitor_v3(session)
 elif view == "rules":
     render_rule_admin(session, METADATA_DB, METADATA_SCHEMA)
 elif view == "docs":
