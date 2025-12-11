@@ -1,0 +1,6 @@
+# Runtime dependencies for the Streamlit application
+pandas
+streamlit
+jinja2
+altair
+matplotlib
