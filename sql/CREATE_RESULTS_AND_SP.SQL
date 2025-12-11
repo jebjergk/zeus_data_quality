@@ -24,6 +24,29 @@ from snowflake.snowpark import Session
 AGG_PREFIX = "AGG:"
 
 
+def _extract_predicate(compiled_rule, rule_expr_raw):
+    """
+    Derive the predicate string from compiled_rule (preferred) or rule_expr_raw (fallback).
+    Supports VARIANT JSON objects produced by the compiler as well as legacy string rules.
+    """
+
+    predicate = None
+
+    if compiled_rule is not None:
+        if isinstance(compiled_rule, str):
+            predicate = compiled_rule
+        elif isinstance(compiled_rule, dict):
+            predicate = compiled_rule.get("compiled_predicate")
+        elif hasattr(compiled_rule, "get"):
+            # Defensive fallback for objects that expose mapping-style access
+            predicate = compiled_rule.get("compiled_predicate")
+
+    if not predicate:
+        predicate = rule_expr_raw
+
+    return (predicate or "").strip()
+
+
 def _normalize_bool(value):
     if isinstance(value, bool):
         return value
@@ -41,7 +64,7 @@ def run_dq_config(session: Session, CONFIG_ID: str) -> str:
     run_id = str(uuid.uuid4())
     checks = session.sql(
         """
-        SELECT CONFIG_ID, CHECK_ID, CHECK_TYPE, TABLE_FQN, RULE_EXPR
+        SELECT CONFIG_ID, CHECK_ID, CHECK_TYPE, TABLE_FQN, RULE_EXPR, COMPILED_RULE
         FROM DQ_CHECK
         WHERE CONFIG_ID = ?
         ORDER BY CHECK_ID
@@ -58,6 +81,7 @@ def run_dq_config(session: Session, CONFIG_ID: str) -> str:
         check_type = (data.get("CHECK_TYPE") or "").strip()
         table_fqn = data.get("TABLE_FQN")
         rule_expr_raw = (data.get("RULE_EXPR") or "").strip()
+        compiled_rule = data.get("COMPILED_RULE")
         rule_expr_upper = rule_expr_raw.upper()
 
         ok = False
@@ -86,10 +110,10 @@ def run_dq_config(session: Session, CONFIG_ID: str) -> str:
             else:
                 if not table_fqn:
                     raise ValueError("TABLE_FQN is required for row checks")
-                predicate = rule_expr_raw
+                predicate = _extract_predicate(compiled_rule, rule_expr_raw)
                 if not predicate:
-                    raise ValueError("RULE_EXPR is required for row checks")
-                failure_sql = f"SELECT COUNT(*) AS FAILURES FROM {table_fqn} WHERE NOT ({predicate})"
+                    raise ValueError("Predicate is required for row checks")
+                failure_sql = f"SELECT COUNT(*) AS FAILURES FROM {table_fqn} AS T WHERE NOT ({predicate})"
                 failure_count = session.sql(failure_sql).collect()[0][0]
                 failures = int(failure_count or 0)
                 ok = failures == 0
