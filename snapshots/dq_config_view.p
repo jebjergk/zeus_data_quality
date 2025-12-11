@@ -617,12 +617,9 @@ def open_config_editor(
     st.session_state["cfg_mode"] = "edit"
     if config_id:
         st.session_state["selected_config_id"] = config_id
+        st.session_state["_draft_config_id"] = None
     else:
-        draft_id = st.session_state.get("selected_config_id") or st.session_state.get(
-            "_draft_config_id"
-        )
-        if not draft_id:
-            draft_id = str(uuid4())
+        draft_id = str(uuid4())
         st.session_state["selected_config_id"] = draft_id
         st.session_state["_draft_config_id"] = draft_id
     if target_fqn is not None:
@@ -948,6 +945,40 @@ def render_config_editor():
     }
 
     active_config_id = sel_id
+
+    def _convert_column_rule(
+        rule: Dict[str, Any], *, table_override: Optional[str] = None
+    ) -> Optional[DQCheck]:
+        column_name = rule.get("column_name")
+        if not column_name:
+            return None
+
+        serialized_params = rule.get("params_json") or rule.get("rule_params")
+        if isinstance(serialized_params, dict):
+            serialized_params = json.dumps(serialized_params, default=str)
+
+        normalized_code = (rule.get("rule_code") or rule.get("rule_id") or "").upper()
+        compiled_expr = rule.get("compiled_rule") or rule.get("rule_expr") or ""
+        return DQCheck(
+            config_id=str(rule.get("config_id") or sel_id),
+            check_id=str(rule.get("check_id") or uuid4()),
+            table_fqn=table_override or rule.get("table_fqn") or "",
+            column_name=column_name,
+            rule_expr=compiled_expr,
+            severity=(rule.get("severity") or rule.get("rule_severity") or "ERROR"),
+            sample_rows=int(rule.get("sample_rows") or 0),
+            check_type=_rule_key(
+                rule.get("check_type")
+                or rule.get("rule_id")
+                or rule.get("rule_code")
+                or ""
+            ),
+            params_json=serialized_params,
+            rule_code=normalized_code or None,
+            rule_params=serialized_params,
+            rule_version=rule.get("rule_version") or rule.get("version"),
+            compiled_rule=compiled_expr,
+        )
 
     def _rule_key(raw_key: str) -> str:
         return normalize_rule_key(raw_key, active_rules)
@@ -1540,7 +1571,9 @@ def render_config_editor():
                         )
                         fallback_rule_code = (
                             (existing_freshness.get("rule_code") or "").upper()
-                            or (fr_template.rule_code if fr_template else TABLE_FRESHNESS_RULE_CODE)
+                            or (
+                                (fr_template.rule_code if fr_template else TABLE_FRESHNESS_RULE_CODE)
+                            )
                         )
                         check_rows.append(
                             DQCheck(
@@ -1553,7 +1586,7 @@ def render_config_editor():
                                 sample_rows=0,
                                 check_type=_builder_key(freshness_key, "FRESHNESS"),
                                 params_json=serialized_params,
-                                rule_code=fallback_rule_code,
+                                rule_code=(fallback_rule_code.upper() if fallback_rule_code else None),
                                 rule_params=serialized_params,
                                 rule_version=existing_freshness.get("rule_version"),
                                 compiled_rule=fallback_rule,
@@ -1575,6 +1608,14 @@ def render_config_editor():
                         table_check_error = f"Invalid freshness configuration: {exc}"
                     else:
                         fr_template = table_templates_by_key.get(freshness_key)
+                        rule_code_value = (
+                            (existing_freshness.get("rule_code") or "").upper()
+                            or (
+                                fr_template.rule_code
+                                if fr_template
+                                else TABLE_FRESHNESS_RULE_CODE
+                            )
+                        )
                         check_rows.append(
                             DQCheck(
                                 config_id=(cfg.config_id if cfg else "temp"),
@@ -1592,10 +1633,7 @@ def render_config_editor():
                                 sample_rows=0,
                                 check_type=_builder_key(freshness_key, "FRESHNESS"),
                                 params_json=json.dumps(fr_params),
-                                rule_code=(
-                                    (existing_freshness.get("rule_code") or "").upper()
-                                    or (fr_template.rule_code if fr_template else TABLE_FRESHNESS_RULE_CODE)
-                                ),
+                                rule_code=rule_code_value.upper(),
                                 rule_params=json.dumps(fr_params),
                                 rule_version=(
                                     fr_template.version if fr_template else existing_freshness.get("rule_version")
@@ -1632,6 +1670,14 @@ def render_config_editor():
                 else:
                     existing_anomaly = existing_table_checks.get(rowcount_anomaly_key) or {}
                     anomaly_template = table_templates_by_key.get(rowcount_anomaly_key)
+                    rule_code_value = (
+                        (existing_anomaly.get("rule_code") or "").upper()
+                        or (
+                            anomaly_template.rule_code
+                            if anomaly_template
+                            else TABLE_ROWCOUNT_RULE_CODE
+                        )
+                    )
                     check_rows.append(
                         DQCheck(
                             config_id=(cfg.config_id if cfg else "temp"),
@@ -1651,14 +1697,7 @@ def render_config_editor():
                             sample_rows=0,
                             check_type=_builder_key(rowcount_anomaly_key, "ROW_COUNT_ANOMALY"),
                             params_json=json.dumps(anomaly_params),
-                            rule_code=(
-                                (existing_anomaly.get("rule_code") or "").upper()
-                                or (
-                                    anomaly_template.rule_code
-                                    if anomaly_template
-                                    else TABLE_ROWCOUNT_RULE_CODE
-                                )
-                            ),
+                            rule_code=rule_code_value.upper(),
                             rule_params=json.dumps(anomaly_params),
                             rule_version=(
                                 anomaly_template.version
@@ -1818,56 +1857,32 @@ def render_config_editor():
                 if not column_name:
                     continue
 
-                serialized_params = rule.get("params_json") or rule.get("rule_params")
-                if isinstance(serialized_params, dict):
-                    serialized_params = json.dumps(serialized_params, default=str)
-
-                existing_column_checks.append(
-                    DQCheck(
-                        config_id=new_id,
-                        check_id=str(rule.get("check_id")),
-                        table_fqn=target_table or (rule.get("table_fqn") or ""),
-                        column_name=column_name,
-                        rule_expr=(rule.get("compiled_rule") or rule.get("rule_expr") or ""),
-                        severity=(rule.get("severity") or rule.get("rule_severity") or "ERROR"),
-                        sample_rows=int(rule.get("sample_rows") or 0),
-                        check_type=_rule_key(
-                            rule.get("check_type")
-                            or rule.get("rule_id")
-                            or rule.get("rule_code")
-                            or ""
-                        ),
-                        params_json=serialized_params,
-                        rule_code=rule.get("rule_code"),
-                        rule_params=serialized_params,
-                        rule_version=(rule.get("rule_version") or rule.get("version")),
-                        compiled_rule=(rule.get("compiled_rule") or rule.get("rule_expr")),
-                    )
-                )
-
-            # rebind ids
-            checks_rebound: List[DQCheck] = existing_column_checks.copy()
+            table_checks: Dict[str, DQCheck] = {}
             for cr in check_rows:
-                cr.config_id = new_id; cr.table_fqn = target_table
-                checks_rebound.append(cr)
+                cr.config_id = new_id
+                cr.table_fqn = target_table
+                rule_identity = (cr.rule_code or cr.check_type or "").upper()
+                if not rule_identity and cr.check_type:
+                    rule_identity = _rule_key(cr.check_type).upper()
+                if not rule_identity:
+                    continue
+                table_checks[rule_identity] = cr
 
-            def _dedupe_checks(checks: List[DQCheck]) -> List[DQCheck]:
-                # Keep the latest instance for each table/column/check_type trio to avoid duplicates
-                deduped: Dict[Tuple[str, str, str], DQCheck] = {}
-                for chk in checks:
-                    rule_identity = _rule_key((chk.rule_code or chk.check_type or ""))
-                    key = (
-                        chk.table_fqn or "",
-                        (chk.column_name or "").lower(),
-                        rule_identity,
-                    )
-                    deduped[key] = chk
-                return list(deduped.values())
+            field_checks: List[DQCheck] = []
+            for rule in column_library_checks:
+                converted = _convert_column_rule(rule, table_override=target_table)
+                if converted:
+                    converted.config_id = new_id
+                    if not converted.table_fqn:
+                        converted.table_fqn = target_table
+                    field_checks.append(converted)
+
+            combined_checks = field_checks + list(table_checks.values())
 
             out = save_config_and_checks(
                 session,
                 dq_cfg,
-                _dedupe_checks(checks_rebound),
+                combined_checks,
                 apply_now=apply_now,
             )
             base_msg = f"Saved config {new_id} ({status})."
