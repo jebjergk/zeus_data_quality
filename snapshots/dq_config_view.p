@@ -1099,7 +1099,13 @@ def render_config_editor():
 
     def _builder_key(rule_id: str, fallback: str) -> str:
         template = active_rules.get(rule_id) or all_rules_map.get(rule_id)
-        return (template.check_type or template.rule_id) if template else fallback
+        if not template:
+            return fallback
+
+        # Prefer the declared ``CHECK_TYPE``; fall back to the requested key when
+        # it is missing to avoid persisting template IDs such as
+        # ``TABLE_ROWCOUNT_ANOMALY`` in ``DQ_CHECK``.
+        return template.check_type or fallback or template.rule_id
 
     table_templates_by_key: Dict[str, RuleTemplate] = {}
     for tmpl in rule_templates:
