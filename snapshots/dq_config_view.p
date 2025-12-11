@@ -39,7 +39,7 @@ from uuid import uuid4
 
 import streamlit as st
 
-from services.configs import delete_config_full, save_config_and_checks
+from services.configs import delete_config_full, transaction
 from services.rule_library import (
     LEGACY_RULE_KEY_MAP,
     RuleTemplate,
@@ -51,9 +51,10 @@ from services.rule_library import (
 from services.state import get_state
 from utils import schedules
 from utils.checkdefs import build_rule_for_column_check, build_rule_for_table_check
-from utils.configs import get_proc_name
+from utils.configs import get_metadata_namespace, get_proc_name
 from utils.dmfs import (
     DEFAULT_WAREHOUSE,
+    attach_dmfs,
     ensure_session_context,
     preflight_requirements,
     run_task_now,
@@ -79,6 +80,7 @@ from utils.meta import (
     list_configs,
     list_tables,
     update_library_check,
+    upsert_config,
 )
 from views.config_editor import render_row_count_preview
 from views.table_picker import session_cache_token, stateless_table_picker
@@ -119,6 +121,7 @@ def _reset_table_level_checks(
         return
 
     checks_table = _q(CHECKS_TBL)
+    # IMPORTANT: header save must only touch table-level checks (COLUMN_NAME IS NULL).
     rule_library_table = (
         _q(f"{METADATA_DB}.{METADATA_SCHEMA}.DQ_RULE_LIBRARY")
         if METADATA_DB and METADATA_SCHEMA
@@ -463,20 +466,21 @@ def _render_rule_edit_form(
                 )
             except Exception as exc:
                 st.error(f"Rule compile failed: {exc}")
-            else:
-                update_library_check(
-                    session,
-                    check_id=str(entry.get("check_id")),
-                    rule_params=rendered_params,
+                else:
+                    update_library_check(
+                        session,
+                        check_id=str(entry.get("check_id")),
+                        rule_params=rendered_params,
                     rule_version=entry.get("rule_version"),
-                    compiled_rule=compiled_rule,
-                    rule_expr=compiled_rule,
-                    severity=entry.get("severity"),
-                )
-                st.success("Rule updated.")
-                for key in state_keys_to_clear or []:
-                    st.session_state.pop(key, None)
-                st.rerun()
+                        compiled_rule=compiled_rule,
+                        rule_expr=compiled_rule,
+                        severity=entry.get("severity"),
+                    )
+                    # IMPORTANT: field-rule save must not modify table-level checks (COLUMN_NAME IS NULL).
+                    st.success("Rule updated.")
+                    for key in state_keys_to_clear or []:
+                        st.session_state.pop(key, None)
+                    st.rerun()
     if col_cancel.button("Cancel", key=f"{key_prefix}_cancel"):
         if inline_mode:
             st.session_state.pop("inline_edit_entry", None)
@@ -592,6 +596,7 @@ def _render_rule_create_form(
                         severity=selected_template.severity or "ERROR",
                         sample_rows=0,
                     )
+                    # IMPORTANT: field-rule save must not modify table-level checks (COLUMN_NAME IS NULL).
                     st.success("Rule added.")
                     for key in state_keys_to_clear or []:
                         st.session_state.pop(key, None)
@@ -1482,6 +1487,7 @@ def render_config_editor():
                     st.session_state["active_rule_edit_key"] = f"edit_modal_{row_key}"
                     st.rerun()
             if delete_clicked:
+                # IMPORTANT: field-rule delete must not impact table-level checks (COLUMN_NAME IS NULL).
                 delete_check_by_id(session, str(entry.get("check_id")))
                 st.success("Rule deleted.")
                 st.rerun()
@@ -1885,17 +1891,11 @@ def render_config_editor():
                         converted.table_fqn = target_table
                     field_checks.append(converted)
 
-            combined_checks = field_checks
+            save_result: Dict[str, Any] = {"config_id": new_id, "status": status}
+            with transaction(session):
+                upsert_config(session, dq_cfg)
 
-            out = save_config_and_checks(
-                session,
-                dq_cfg,
-                combined_checks,
-                apply_now=apply_now,
-            )
-
-            if not table_check_error:
-                if (
+                if not table_check_error and (
                     freshness_params_for_save
                     and rowcount_params_for_save
                     and freshness_rule_expr
@@ -1910,12 +1910,18 @@ def render_config_editor():
                         freshness_rule_expr=freshness_rule_expr,
                         rowcount_rule_expr=rowcount_rule_expr,
                     )
-                else:
+                elif not table_check_error:
                     logging.warning(
                         "dq_config: table check payloads missing for config_id=%s (freshness_params=%s, rowcount_params=%s)",
                         new_id,
                         bool(freshness_params_for_save),
                         bool(rowcount_params_for_save),
+                    )
+
+                if apply_now:
+                    meta_db, meta_schema = get_metadata_namespace()
+                    save_result["dmfs_attached"] = attach_dmfs(
+                        session, dq_cfg, field_checks, db=meta_db, schema=meta_schema
                     )
             base_msg = f"Saved config {new_id} ({status})."
             st.success(base_msg)
@@ -1937,7 +1943,7 @@ def render_config_editor():
                     st.info(info_msg)
                     remember("info", info_msg)
             if apply_now:
-                dmfs_attached = out.get("dmfs_attached") or []
+                dmfs_attached = save_result.get("dmfs_attached") or []
                 if dmfs_attached:
                     dmf_msg = "Attached views:\n- " + "\n- ".join(dmfs_attached)
                     st.success(dmf_msg)
