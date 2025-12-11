@@ -131,8 +131,9 @@ def _reset_table_level_checks(
             DELETE FROM {checks_table}
             WHERE CONFIG_ID = :config_id
               AND COLUMN_NAME IS NULL
-            """
-        ).bind({"config_id": config_id}).collect()
+            """,
+            params={"config_id": config_id},
+        ).collect()
     except Exception as exc:
         logging.exception(
             "dq_config: failed to delete existing table checks for config_id=%s: %s",
@@ -179,8 +180,9 @@ def _reset_table_level_checks(
                 FROM {rule_library_table} r
                 WHERE r.RULE_CODE = :rule_code
                   AND COALESCE(UPPER(r.SCOPE), 'TABLE') = 'TABLE'
-                """
-            ).bind(payload).collect()
+                """,
+                params=payload,
+            ).collect()
         except Exception as exc:
             logging.exception(
                 "dq_config: failed to insert table check %s for config_id=%s: %s",
