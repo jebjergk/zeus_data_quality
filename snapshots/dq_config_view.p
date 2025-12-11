@@ -102,6 +102,11 @@ def _serialize_params(value: Any) -> Optional[str]:
 
 def _upsert_table_check(session: Any, check: DQCheck) -> None:
     if not session or not CHECKS_TBL:
+        logging.warning(
+            "dq_config: skipping table check upsert (session=%s, checks_table=%s)",
+            bool(session),
+            CHECKS_TBL,
+        )
         return
 
     rule_code_lookup = {
@@ -115,6 +120,11 @@ def _upsert_table_check(session: Any, check: DQCheck) -> None:
     rule_code = (check.rule_code or check.check_type or "").upper()
     rule_code = rule_code_lookup.get(rule_code, rule_code)
     if rule_code not in {TABLE_FRESHNESS_RULE_CODE, TABLE_ROWCOUNT_RULE_CODE}:
+        logging.info(
+            "dq_config: ignoring table check with unsupported rule_code=%s (raw=%s)",
+            rule_code,
+            check.rule_code,
+        )
         return
 
     check.rule_code = rule_code
@@ -134,7 +144,12 @@ def _upsert_table_check(session: Any, check: DQCheck) -> None:
                 """,
                 params=[rule_code],
             ).collect()
-        except Exception:
+        except Exception as exc:
+            logging.exception(
+                "dq_config: failed to load rule version for rule_code=%s: %s",
+                rule_code,
+                exc,
+            )
             version_rows = []
         if version_rows:
             check.rule_version = version_rows[0].get("VERSION")
@@ -155,55 +170,78 @@ def _upsert_table_check(session: Any, check: DQCheck) -> None:
         ).collect()
         if result:
             existing_id = result[0]["CHECK_ID"]
-    except Exception:
+    except Exception as exc:
+        logging.exception(
+            "dq_config: failed to load existing table check for config_id=%s, rule_code=%s: %s",
+            check.config_id,
+            rule_code,
+            exc,
+        )
         existing_id = None
 
     check_id = existing_id or check.check_id or str(uuid4())
     check.check_id = check_id
 
-    session.sql(
-        f"""
-        MERGE INTO {_q(CHECKS_TBL)} AS target
-        USING (
-            SELECT :1 AS CONFIG_ID, :2 AS RULE_CODE, :3 AS CHECK_ID
-        ) AS source
-        ON target.CONFIG_ID = source.CONFIG_ID
-           AND target.RULE_CODE = source.RULE_CODE
-           AND target.COLUMN_NAME IS NULL
-        WHEN MATCHED THEN UPDATE SET
-            TABLE_FQN = :4,
-            RULE_EXPR = :5,
-            SEVERITY = :6,
-            SAMPLE_ROWS = :7,
-            CHECK_TYPE = :8,
-            PARAMS_JSON = :9,
-            RULE_PARAMS = :10,
-            RULE_VERSION = :11,
-            COMPILED_RULE = :12,
-            UPDATED_AT = CURRENT_TIMESTAMP()
-        WHEN NOT MATCHED THEN INSERT (
-            CONFIG_ID, CHECK_ID, TABLE_FQN, COLUMN_NAME, RULE_EXPR, SEVERITY,
-            SAMPLE_ROWS, CHECK_TYPE, PARAMS_JSON, RULE_CODE, RULE_PARAMS,
-            RULE_VERSION, COMPILED_RULE, UPDATED_AT
-        ) VALUES (
-            :1, :3, :4, NULL, :5, :6, :7, :8, :9, :2, :10, :11, :12, CURRENT_TIMESTAMP()
-        )
-        """,
-        params=[
+    try:
+        session.sql(
+            f"""
+            MERGE INTO {_q(CHECKS_TBL)} AS target
+            USING (
+                SELECT :1 AS CONFIG_ID, :2 AS RULE_CODE, :3 AS CHECK_ID
+            ) AS source
+            ON target.CONFIG_ID = source.CONFIG_ID
+               AND target.RULE_CODE = source.RULE_CODE
+               AND target.COLUMN_NAME IS NULL
+            WHEN MATCHED THEN UPDATE SET
+                TABLE_FQN = :4,
+                RULE_EXPR = :5,
+                SEVERITY = :6,
+                SAMPLE_ROWS = :7,
+                CHECK_TYPE = :8,
+                PARAMS_JSON = :9,
+                RULE_PARAMS = :10,
+                RULE_VERSION = :11,
+                COMPILED_RULE = :12,
+                UPDATED_AT = CURRENT_TIMESTAMP()
+            WHEN NOT MATCHED THEN INSERT (
+                CONFIG_ID, CHECK_ID, TABLE_FQN, COLUMN_NAME, RULE_EXPR, SEVERITY,
+                SAMPLE_ROWS, CHECK_TYPE, PARAMS_JSON, RULE_CODE, RULE_PARAMS,
+                RULE_VERSION, COMPILED_RULE, UPDATED_AT
+            ) VALUES (
+                :1, :3, :4, NULL, :5, :6, :7, :8, :9, :2, :10, :11, :12, CURRENT_TIMESTAMP()
+            )
+            """,
+            params=[
+                check.config_id,
+                rule_code,
+                check_id,
+                check.table_fqn,
+                check.rule_expr,
+                check.severity,
+                int(check.sample_rows),
+                check.check_type,
+                _serialize_params(check.params_json),
+                serialized_params,
+                check.rule_version,
+                check.compiled_rule,
+            ],
+        ).collect()
+        logging.info(
+            "dq_config: upserted table check %s for config_id=%s (rule_code=%s, check_type=%s)",
+            check_id,
             check.config_id,
             rule_code,
-            check_id,
-            check.table_fqn,
-            check.rule_expr,
-            check.severity,
-            int(check.sample_rows),
             check.check_type,
-            _serialize_params(check.params_json),
-            serialized_params,
-            check.rule_version,
-            check.compiled_rule,
-        ],
-    ).collect()
+        )
+    except Exception as exc:
+        logging.exception(
+            "dq_config: failed to upsert table check %s for config_id=%s (rule_code=%s): %s",
+            check_id,
+            check.config_id,
+            rule_code,
+            exc,
+        )
+        raise
 
 def _resolve_modal_factory():
     """Return a callable that creates a context-managed modal/dialog if available."""
@@ -1781,12 +1819,19 @@ def render_config_editor():
                     "sensitivity": sensitivity,
                     "min_history_days": min_history_days,
                 }
+                logging.info(
+                    "dq_config: building row count anomaly for %s with params=%s (timestamp_missing=%s)",
+                    target_table,
+                    anomaly_params,
+                    timestamp_missing,
+                )
                 try:
                     anomaly_rule, anomaly_is_agg = build_rule_for_table_check(
                         target_table, _builder_key(rowcount_anomaly_key, "ROW_COUNT_ANOMALY"), anomaly_params
                     )
                 except ValueError as exc:
                     table_check_error = f"Invalid row count anomaly configuration: {exc}"
+                    logging.warning("dq_config: row count anomaly build failed: %s", exc)
                 else:
                     existing_anomaly = existing_table_checks.get(rowcount_anomaly_key) or {}
                     anomaly_template = table_templates_by_key.get(rowcount_anomaly_key)
@@ -1984,6 +2029,20 @@ def render_config_editor():
                 if not rule_identity:
                     continue
                 table_checks[rule_identity] = cr
+
+            missing_table_checks = {
+                key
+                for key in (freshness_key, rowcount_anomaly_key)
+                if key not in table_checks and submit_triggered
+            }
+            if missing_table_checks:
+                logging.warning(
+                    "dq_config: skipping table checks %s for config_id=%s (table_check_error=%s, timestamp_missing=%s)",
+                    sorted(missing_table_checks),
+                    new_id,
+                    table_check_error,
+                    timestamp_missing,
+                )
 
             for chk in table_checks.values():
                 _upsert_table_check(session, chk)
