@@ -129,10 +129,10 @@ def _reset_table_level_checks(
         session.sql(
             f"""
             DELETE FROM {checks_table}
-            WHERE CONFIG_ID = :config_id
+            WHERE CONFIG_ID = ?
               AND COLUMN_NAME IS NULL
             """,
-            params={"config_id": config_id},
+            params=[config_id],
         ).collect()
     except Exception as exc:
         logging.exception(
@@ -144,15 +144,16 @@ def _reset_table_level_checks(
 
     def _insert_table_check(rule_code: str, params: Dict[str, Any], rule_expr: str) -> None:
         serialized_params = json.dumps(params, default=str)
-        payload = {
-            "config_id": config_id,
-            "check_id": str(uuid4()),
-            "table_fqn": table_fqn,
-            "rule_expr": rule_expr,
-            "params_json": serialized_params,
-            "rule_params": serialized_params,
-            "rule_code": rule_code,
-        }
+        payload = [
+            config_id,
+            str(uuid4()),
+            table_fqn,
+            rule_expr,
+            serialized_params,
+            serialized_params,
+            rule_expr,
+            rule_code,
+        ]
 
         try:
             session.sql(
@@ -163,22 +164,22 @@ def _reset_table_level_checks(
                     RULE_VERSION, COMPILED_RULE, UPDATED_AT
                 )
                 SELECT
-                    :config_id,
-                    :check_id,
-                    :table_fqn,
+                    ?,
+                    ?,
+                    ?,
                     NULL,
-                    :rule_expr,
+                    ?,
                     COALESCE(r.SEVERITY, 'ERROR'),
                     0,
                     COALESCE(r.CHECK_TYPE, r.RULE_ID, r.RULE_CODE),
-                    :params_json,
+                    ?,
                     r.RULE_CODE,
-                    :rule_params,
+                    ?,
                     r.VERSION,
-                    :rule_expr,
+                    ?,
                     CURRENT_TIMESTAMP()
                 FROM {rule_library_table} r
-                WHERE r.RULE_CODE = :rule_code
+                WHERE r.RULE_CODE = ?
                   AND COALESCE(UPPER(r.SCOPE), 'TABLE') = 'TABLE'
                 """,
                 params=payload,
