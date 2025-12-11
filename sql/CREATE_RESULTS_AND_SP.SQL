@@ -9,6 +9,20 @@ CREATE TABLE IF NOT EXISTS DQ_RUN_RESULTS (
     ERROR_MSG STRING
 );
 
+CREATE TABLE IF NOT EXISTS ZEUS_ANALYTICS_SIMU.DISCOVERY.DQ_RUN_RESULT_DETAIL (
+    RUN_ID STRING,
+    CONFIG_ID STRING,
+    TABLE_FQN STRING,
+    COLUMN_NAME STRING,
+    RULE_CODE STRING,
+    RULE_CATEGORY STRING,
+    STATUS STRING,
+    FAILURE_COUNT NUMBER,
+    DETAIL VARIANT,
+    EXECUTED_AT TIMESTAMP_LTZ DEFAULT CURRENT_TIMESTAMP(),
+    SQL_SNIPPET STRING
+);
+
 CREATE OR REPLACE PROCEDURE DQ_RUN_CONFIG(CONFIG_ID STRING)
 RETURNS STRING
 LANGUAGE PYTHON
@@ -20,9 +34,21 @@ AS
 $$
 import json
 import uuid
+from typing import Any, Dict
 from snowflake.snowpark import Session
 
 AGG_PREFIX = "AGG:"
+
+
+def _safe_json_loads(text):
+    if not text:
+        return None
+    if not isinstance(text, str):
+        return None
+    try:
+        return json.loads(text)
+    except Exception:
+        return None
 
 
 def _compiled_from_json(text):
@@ -90,11 +116,114 @@ def _normalize_bool(value):
     return False
 
 
+def _rowcount_anomaly_stats(session: Session, table_fqn: str, params: Dict[str, Any]):
+    if not session or not table_fqn or not params:
+        return None
+
+    ts_col = (params.get("timestamp_column") or "").strip()
+    if not ts_col:
+        return None
+
+    lookback_days = params.get("lookback_days") or 0
+    sensitivity = params.get("sensitivity") or 0
+    min_history_days = params.get("min_history_days") or 0
+
+    sql = f"""
+        WITH DAY_COUNTS AS (
+            SELECT DATE_TRUNC('DAY', {ts_col}) AS DAY_KEY, COUNT(*) AS ROW_COUNT
+            FROM {table_fqn}
+            WHERE {ts_col} IS NOT NULL
+            GROUP BY 1
+        ),
+        LATEST_DAY AS (
+            SELECT DAY_KEY, ROW_COUNT
+            FROM DAY_COUNTS
+            QUALIFY ROW_NUMBER() OVER (ORDER BY DAY_KEY DESC) = 1
+        ),
+        WINDOWED AS (
+            SELECT d.ROW_COUNT
+            FROM DAY_COUNTS d
+            CROSS JOIN (SELECT COALESCE(MAX(DAY_KEY), CURRENT_DATE()) AS MAX_DAY FROM DAY_COUNTS) m
+            WHERE d.DAY_KEY >= DATEADD('DAY', -?, m.MAX_DAY)
+        ),
+        METRICS AS (
+            SELECT
+                (SELECT ROW_COUNT FROM LATEST_DAY) AS OBSERVED,
+                AVG(ROW_COUNT) AS MEAN_VAL,
+                STDDEV_SAMP(ROW_COUNT) AS STDDEV_VAL,
+                COUNT(*) AS HISTORY_POINTS
+            FROM WINDOWED
+        )
+        SELECT
+            OBSERVED,
+            MEAN_VAL,
+            STDDEV_VAL,
+            HISTORY_POINTS,
+            (MEAN_VAL - (? * COALESCE(STDDEV_VAL, 0))) AS EXPECTED_MIN,
+            (MEAN_VAL + (? * COALESCE(STDDEV_VAL, 0))) AS EXPECTED_MAX
+        FROM METRICS
+    """
+
+    try:
+        stats_row = session.sql(sql, params=[lookback_days, sensitivity, sensitivity]).collect()
+    except Exception:
+        return None
+
+    if not stats_row:
+        return None
+
+    data = stats_row[0].as_dict()
+    observed = data.get("OBSERVED")
+    mean_val = data.get("MEAN_VAL")
+    stddev_val = data.get("STDDEV_VAL")
+    history_points = data.get("HISTORY_POINTS")
+    expected_min = data.get("EXPECTED_MIN")
+    expected_max = data.get("EXPECTED_MAX")
+
+    if history_points is None or history_points < max(1, int(min_history_days or 0)):
+        return {
+            "observed": observed,
+            "mean": mean_val,
+            "stddev": stddev_val,
+            "expected_min": expected_min,
+            "expected_max": expected_max,
+            "history_points": history_points,
+            "ok": None,
+        }
+
+    ok = None
+    if observed is not None and expected_min is not None and expected_max is not None:
+        ok = expected_min <= observed <= expected_max
+
+    return {
+        "observed": observed,
+        "mean": mean_val,
+        "stddev": stddev_val,
+        "expected_min": expected_min,
+        "expected_max": expected_max,
+        "history_points": history_points,
+        "ok": ok,
+    }
+
+
 def run_dq_config(session: Session, CONFIG_ID: str) -> str:
     run_id = str(uuid.uuid4())
+    rule_categories = {}
+    try:
+        for row in session.sql(
+            """
+            SELECT RULE_CODE, CATEGORY
+            FROM ZEUS_ANALYTICS_SIMU.DISCOVERY.DQ_RULE_LIBRARY
+            WHERE RULE_CODE IS NOT NULL
+            """
+        ).collect():
+            data = row.as_dict()
+            rule_categories[data.get("RULE_CODE")] = data.get("CATEGORY")
+    except Exception:
+        rule_categories = {}
     checks = session.sql(
         """
-        SELECT CONFIG_ID, CHECK_ID, CHECK_TYPE, TABLE_FQN, RULE_EXPR, COMPILED_RULE
+        SELECT CONFIG_ID, CHECK_ID, CHECK_TYPE, TABLE_FQN, COLUMN_NAME, RULE_EXPR, RULE_CODE, RULE_PARAMS, PARAMS_JSON, COMPILED_RULE
         FROM DQ_CHECK
         WHERE CONFIG_ID = ?
         ORDER BY CHECK_ID
@@ -110,13 +239,32 @@ def run_dq_config(session: Session, CONFIG_ID: str) -> str:
         check_id = data.get("CHECK_ID")
         check_type = (data.get("CHECK_TYPE") or "").strip()
         table_fqn = data.get("TABLE_FQN")
+        column_name = data.get("COLUMN_NAME")
         rule_expr_raw = (data.get("RULE_EXPR") or "").strip()
+        rule_code = (data.get("RULE_CODE") or check_type or "").strip()
+        rule_category = rule_categories.get(rule_code)
+        params = (
+            _safe_json_loads(data.get("RULE_PARAMS"))
+            or _safe_json_loads(data.get("PARAMS_JSON"))
+            or {}
+        )
         compiled_rule = data.get("COMPILED_RULE")
         rule_expr_upper = rule_expr_raw.upper()
 
         ok = False
         failures = 0
         error_msg = None
+        detail = {
+            "rule_code": rule_code,
+            "rule_category": rule_category,
+            "parameters": params,
+            "observed": None,
+            "expected_min": None,
+            "expected_max": None,
+            "mean": None,
+            "stddev": None,
+            "samples": [],
+        }
 
         agg_sql = None
         failure_sql = None
@@ -137,6 +285,22 @@ def run_dq_config(session: Session, CONFIG_ID: str) -> str:
                 first_value = result_rows[0][0] if result_rows else False
                 ok = _normalize_bool(first_value)
                 failures = 0 if ok else 1
+            elif rule_code.upper() == "TABLE_ROWCOUNT_ANOMALY":
+                stats = _rowcount_anomaly_stats(session, table_fqn, params)
+                if stats:
+                    detail.update({
+                        "observed": stats.get("observed"),
+                        "expected_min": stats.get("expected_min"),
+                        "expected_max": stats.get("expected_max"),
+                        "mean": stats.get("mean"),
+                        "stddev": stats.get("stddev"),
+                        "history_points": stats.get("history_points"),
+                    })
+                    ok = stats.get("ok") if stats.get("ok") is not None else False
+                    failures = 0 if ok else 1
+                else:
+                    failures = 1
+                    ok = False
             else:
                 if not table_fqn:
                     raise ValueError("TABLE_FQN is required for row checks")
@@ -147,6 +311,16 @@ def run_dq_config(session: Session, CONFIG_ID: str) -> str:
                 failure_count = session.sql(failure_sql).collect()[0][0]
                 failures = int(failure_count or 0)
                 ok = failures == 0
+                detail["observed"] = failures
+                detail["expected_min"] = 0
+                detail["expected_max"] = 0
+                if failures > 0 and column_name:
+                    try:
+                        sample_sql = f"SELECT {column_name} FROM {table_fqn} AS T WHERE NOT ({predicate}) LIMIT 5"
+                        sample_rows = session.sql(sample_sql).collect()
+                        detail["samples"] = [r[0] for r in sample_rows]
+                    except Exception:
+                        detail["samples"] = []
         except Exception as exc:
             ok = False
             failures = 0
@@ -158,10 +332,10 @@ def run_dq_config(session: Session, CONFIG_ID: str) -> str:
 
         if not ok and not error_msg:
             context_sql = agg_sql or failure_sql or rule_expr_raw
-            detail = context_sql[:200] if context_sql else ""
+            detail_msg = context_sql[:200] if context_sql else ""
             error_msg = (
                 f"{check_type or 'Check'} evaluated to FALSE"
-                + (f" | SQL[:200]={detail}" if detail else "")
+                + (f" | SQL[:200]={detail_msg}" if detail_msg else "")
             )
 
         session.sql(
@@ -171,6 +345,33 @@ def run_dq_config(session: Session, CONFIG_ID: str) -> str:
             """,
             params=[run_id, CONFIG_ID, check_id, check_type, failures, ok, error_msg],
         ).collect()
+
+        context_sql = agg_sql or failure_sql or rule_expr_raw
+        status_text = "PASS" if ok else "FAIL"
+        try:
+            session.sql(
+                """
+                INSERT INTO ZEUS_ANALYTICS_SIMU.DISCOVERY.DQ_RUN_RESULT_DETAIL (
+                    RUN_ID, CONFIG_ID, TABLE_FQN, COLUMN_NAME, RULE_CODE, RULE_CATEGORY, STATUS, FAILURE_COUNT, DETAIL, EXECUTED_AT, SQL_SNIPPET
+                )
+                SELECT ?, ?, ?, ?, ?, ?, ?, ?, PARSE_JSON(?), CURRENT_TIMESTAMP(), ?
+                """,
+                params=[
+                    run_id,
+                    CONFIG_ID,
+                    table_fqn,
+                    column_name,
+                    rule_code,
+                    rule_category,
+                    status_text,
+                    failures,
+                    json.dumps(detail, default=str),
+                    context_sql[:500] if context_sql else None,
+                ],
+            ).collect()
+        except Exception:
+            # Diagnostics should not break the main run log
+            pass
 
     return f"OK run_id={run_id} checks={total_checks}"
 $$;
