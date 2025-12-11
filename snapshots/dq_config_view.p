@@ -1800,77 +1800,128 @@ def render_config_editor():
                             )
                         )
 
-                row_defaults = existing_table_params.get(rowcount_anomaly_key, {}) or {}
-                try:
-                    lookback_days = int(row_defaults.get("lookback_days", 28))
-                except (TypeError, ValueError):
-                    lookback_days = 28
-                try:
-                    sensitivity = float(row_defaults.get("sensitivity", 3.0))
-                except (TypeError, ValueError):
-                    sensitivity = 3.0
-                try:
-                    min_history_days = int(row_defaults.get("min_history_days", 7))
-                except (TypeError, ValueError):
-                    min_history_days = 7
-                anomaly_params = {
-                    "timestamp_column": ts_col or row_defaults.get("timestamp_column") or ts_default,
-                    "lookback_days": lookback_days,
-                    "sensitivity": sensitivity,
-                    "min_history_days": min_history_days,
-                }
-                logging.info(
-                    "dq_config: building row count anomaly for %s with params=%s (timestamp_missing=%s)",
-                    target_table,
-                    anomaly_params,
-                    timestamp_missing,
+                existing_anomaly = existing_table_checks.get(rowcount_anomaly_key) or {}
+                stored_anomaly_params = existing_table_params.get(rowcount_anomaly_key) or {}
+                serialized_anomaly_params = (
+                    json.dumps(stored_anomaly_params, default=str)
+                    if isinstance(stored_anomaly_params, dict)
+                    else stored_anomaly_params
                 )
-                try:
-                    anomaly_rule, anomaly_is_agg = build_rule_for_table_check(
-                        target_table, _builder_key(rowcount_anomaly_key, "ROW_COUNT_ANOMALY"), anomaly_params
-                    )
-                except ValueError as exc:
-                    table_check_error = f"Invalid row count anomaly configuration: {exc}"
-                    logging.warning("dq_config: row count anomaly build failed: %s", exc)
-                else:
-                    existing_anomaly = existing_table_checks.get(rowcount_anomaly_key) or {}
-                    anomaly_template = table_templates_by_key.get(rowcount_anomaly_key)
-                    rule_code_value = (
-                        anomaly_template.rule_code
-                        if anomaly_template
-                        else TABLE_ROWCOUNT_RULE_CODE
-                    )
-                    check_rows.append(
-                        DQCheck(
-                            config_id=(cfg.config_id if cfg else "temp"),
-                            check_id=(
-                                existing_anomaly.get("check_id")
-                                or "TABLE_ROW_COUNT_ANOMALY"
-                            ),
-                            table_fqn=target_table,
-                            column_name=None,
-                            rule_expr=(
-                                f"AGG: {anomaly_rule}" if anomaly_is_agg else anomaly_rule
-                            ),
-                            severity=(
-                                existing_anomaly.get("severity")
-                                or "ERROR"
-                            ),
-                            sample_rows=0,
-                            check_type=_builder_key(rowcount_anomaly_key, "ROW_COUNT_ANOMALY"),
-                            params_json=json.dumps(anomaly_params),
-                            rule_code=rule_code_value.upper(),
-                            rule_params=json.dumps(anomaly_params),
-                            rule_version=(
-                                anomaly_template.version
-                                if anomaly_template
-                                else existing_anomaly.get("rule_version")
-                            ),
-                            compiled_rule=(
-                                f"AGG: {anomaly_rule}" if anomaly_is_agg else anomaly_rule
-                            ),
+
+                if timestamp_missing:
+                    if existing_anomaly:
+                        fallback_rule = (
+                            existing_anomaly.get("compiled_rule")
+                            or existing_anomaly.get("rule_expr")
+                            or ""
                         )
+                        fallback_rule_code = (
+                            (existing_anomaly.get("rule_code") or "").upper()
+                            or (
+                                table_templates_by_key[rowcount_anomaly_key].rule_code
+                                if table_templates_by_key.get(rowcount_anomaly_key)
+                                else TABLE_ROWCOUNT_RULE_CODE
+                            )
+                        )
+                        check_rows.append(
+                            DQCheck(
+                                config_id=(cfg.config_id if cfg else "temp"),
+                                check_id=(
+                                    existing_anomaly.get("check_id")
+                                    or "TABLE_ROW_COUNT_ANOMALY"
+                                ),
+                                table_fqn=target_table,
+                                column_name=None,
+                                rule_expr=fallback_rule,
+                                severity=existing_anomaly.get("severity")
+                                or "ERROR",
+                                sample_rows=0,
+                                check_type=_builder_key(rowcount_anomaly_key, "ROW_COUNT_ANOMALY"),
+                                params_json=serialized_anomaly_params,
+                                rule_code=fallback_rule_code.upper(),
+                                rule_params=serialized_anomaly_params,
+                                rule_version=existing_anomaly.get("rule_version"),
+                                compiled_rule=fallback_rule,
+                            )
+                        )
+                    else:
+                        st.warning(
+                            "Select a timestamp column to keep the row count anomaly check.",
+                            icon="⚠️",
+                        )
+                else:
+                    row_defaults = existing_table_params.get(rowcount_anomaly_key, {}) or {}
+                    try:
+                        lookback_days = int(row_defaults.get("lookback_days", 28))
+                    except (TypeError, ValueError):
+                        lookback_days = 28
+                    try:
+                        sensitivity = float(row_defaults.get("sensitivity", 3.0))
+                    except (TypeError, ValueError):
+                        sensitivity = 3.0
+                    try:
+                        min_history_days = int(row_defaults.get("min_history_days", 7))
+                    except (TypeError, ValueError):
+                        min_history_days = 7
+                    anomaly_params = {
+                        "timestamp_column": ts_col,
+                        "lookback_days": lookback_days,
+                        "sensitivity": sensitivity,
+                        "min_history_days": min_history_days,
+                    }
+                    logging.info(
+                        "dq_config: building row count anomaly for %s with params=%s (timestamp_missing=%s)",
+                        target_table,
+                        anomaly_params,
+                        timestamp_missing,
                     )
+                    try:
+                        anomaly_rule, anomaly_is_agg = build_rule_for_table_check(
+                            target_table,
+                            _builder_key(rowcount_anomaly_key, "ROW_COUNT_ANOMALY"),
+                            anomaly_params,
+                        )
+                    except ValueError as exc:
+                        table_check_error = f"Invalid row count anomaly configuration: {exc}"
+                        logging.warning("dq_config: row count anomaly build failed: %s", exc)
+                    else:
+                        anomaly_template = table_templates_by_key.get(rowcount_anomaly_key)
+                        rule_code_value = (
+                            anomaly_template.rule_code
+                            if anomaly_template
+                            else TABLE_ROWCOUNT_RULE_CODE
+                        )
+                        check_rows.append(
+                            DQCheck(
+                                config_id=(cfg.config_id if cfg else "temp"),
+                                check_id=(
+                                    existing_anomaly.get("check_id")
+                                    or "TABLE_ROW_COUNT_ANOMALY"
+                                ),
+                                table_fqn=target_table,
+                                column_name=None,
+                                rule_expr=(
+                                    f"AGG: {anomaly_rule}" if anomaly_is_agg else anomaly_rule
+                                ),
+                                severity=(
+                                    existing_anomaly.get("severity")
+                                    or "ERROR"
+                                ),
+                                sample_rows=0,
+                                check_type=_builder_key(rowcount_anomaly_key, "ROW_COUNT_ANOMALY"),
+                                params_json=json.dumps(anomaly_params),
+                                rule_code=rule_code_value.upper(),
+                                rule_params=json.dumps(anomaly_params),
+                                rule_version=(
+                                    anomaly_template.version
+                                    if anomaly_template
+                                    else existing_anomaly.get("rule_version")
+                                ),
+                                compiled_rule=(
+                                    f"AGG: {anomaly_rule}" if anomaly_is_agg else anomaly_rule
+                                ),
+                            )
+                        )
     
             st.markdown("### Schedule")
             existing_cron = getattr(cfg, "schedule_cron", None) if cfg else None
