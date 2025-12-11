@@ -1062,7 +1062,12 @@ def render_config_editor():
         sel_id = draft_id
     cfg = get_config(session, sel_id) if sel_id else None
     existing_checks = get_checks(session, sel_id) if sel_id else []
-    library_checks = get_library_checks(session, sel_id) if sel_id else []
+    column_library_checks = (
+        get_library_checks(session, sel_id, scope="COLUMN") if sel_id else []
+    )
+    table_library_checks = (
+        get_library_checks(session, sel_id, scope="TABLE") if sel_id else []
+    )
 
     rule_templates = load_rule_library(
         session, METADATA_DB, METADATA_SCHEMA, include_inactive=True
@@ -1096,6 +1101,12 @@ def render_config_editor():
     def _builder_key(rule_id: str, fallback: str) -> str:
         template = active_rules.get(rule_id) or all_rules_map.get(rule_id)
         return (template.check_type or template.rule_id) if template else fallback
+
+    table_templates_by_key: Dict[str, RuleTemplate] = {}
+    for tmpl in rule_templates:
+        key = _rule_key(tmpl.rule_id or tmpl.rule_code or "")
+        if (tmpl.scope or "").upper() == "TABLE" and key:
+            table_templates_by_key[key] = tmpl
 
     for chk in existing_checks:
         legacy_key = _rule_key(chk.check_type or "")
@@ -1239,7 +1250,7 @@ def render_config_editor():
         return "||".join([str(check_id or ""), column_part, (rule_code or "").upper()])
 
     excluded_table_rules = {"FRESHNESS", "ROW_COUNT"}
-    for rule in library_checks:
+    for rule in column_library_checks:
         rule_code_key = (rule.get("rule_code") or rule.get("rule_id") or "").upper()
         if rule_code_key in excluded_table_rules:
             continue
@@ -1293,21 +1304,21 @@ def render_config_editor():
         )
 
         filter_col, filter_code, filter_sev = st.columns(3)
-        rule_columns = sorted({chk.get("column_name") for chk in library_checks if chk.get("column_name")})
+        rule_columns = sorted({chk.get("column_name") for chk in column_library_checks if chk.get("column_name")})
         filter_column = filter_col.selectbox(
             "Filter by column",
             options=["All"] + rule_columns,
             index=0,
             key="rule_filter_column",
         )
-        rule_codes = sorted({(chk.get("rule_code") or "").upper() for chk in library_checks if chk.get("rule_code")})
+        rule_codes = sorted({(chk.get("rule_code") or "").upper() for chk in column_library_checks if chk.get("rule_code")})
         filter_rule_code = filter_code.selectbox(
             "Filter by rule",
             options=["All"] + rule_codes,
             index=0,
             key="rule_filter_code",
         )
-        severities = sorted({(chk.get("severity") or chk.get("rule_severity") or "ERROR") for chk in library_checks})
+        severities = sorted({(chk.get("severity") or chk.get("rule_severity") or "ERROR") for chk in column_library_checks})
         filter_severity = filter_sev.selectbox(
             "Filter by severity",
             options=["All"] + severities,
@@ -1385,7 +1396,7 @@ def render_config_editor():
                 table_suggestions=table_suggestions,
                 column_lookup=column_lookup,
                 rule_templates=rule_templates,
-                existing_library_checks=library_checks,
+                existing_library_checks=column_library_checks,
                 key_prefix=st.session_state.get("rule_add_key", "add_rule"),
                 state_keys_to_clear=["rule_add_mode", "rule_add_key"],
                 config_id=active_config_id,
@@ -1479,22 +1490,34 @@ def render_config_editor():
         # -------- Form --------
         # Pre-populate table-level defaults from existing checks / state
         existing_table_params: Dict[str, Dict[str, Any]] = {}
-        existing_table_checks: Dict[str, DQCheck] = {}
+        existing_table_checks: Dict[str, Dict[str, Any]] = {}
         legacy_row_count_params: Dict[str, object] = {}
-        for ec in existing_checks:
-            if not ec.column_name and ec.params_json:
-                key = _rule_key(ec.check_type or "")
-                try:
-                    parsed_params = json.loads(ec.params_json)
-                except Exception:
-                    parsed_params = {}
+        for rule in table_library_checks:
+            key = _rule_key(
+                rule.get("rule_code")
+                or rule.get("rule_id")
+                or rule.get("check_type")
+                or ""
+            )
+            params = _parse_params(rule.get("rule_params") or rule.get("params_json"))
+            parsed_params = params if isinstance(params, dict) else {}
 
-                if key == "ROW_COUNT":
-                    legacy_row_count_params = parsed_params or {}
-                    continue
+            if key == "ROW_COUNT":
+                legacy_row_count_params = parsed_params or {}
+                continue
 
-                existing_table_params[key] = parsed_params or {}
-                existing_table_checks.setdefault(key, ec)
+            existing_table_params[key] = parsed_params or {}
+            existing_table_checks.setdefault(
+                key,
+                {
+                    "check_id": rule.get("check_id"),
+                    "severity": rule.get("severity")
+                    or rule.get("rule_severity")
+                    or "ERROR",
+                    "rule_code": rule.get("rule_code"),
+                    "rule_version": rule.get("rule_version") or rule.get("version"),
+                },
+            )
     
         freshness_key = _rule_key("FRESHNESS")
         rowcount_anomaly_key = _rule_key("ROW_COUNT_ANOMALY")
@@ -1648,15 +1671,36 @@ def render_config_editor():
                     except ValueError as exc:
                         table_check_error = f"Invalid freshness configuration: {exc}"
                     else:
-                        existing_freshness = existing_table_checks.get(freshness_key)
-                        check_rows.append(DQCheck(
-                            config_id=(cfg.config_id if cfg else "temp"),
-                            check_id=(existing_freshness.check_id if existing_freshness else "TABLE_FRESHNESS"),
-                            table_fqn=target_table, column_name=None,
-                            rule_expr=(f"AGG: {fr_rule}" if fr_is_agg else fr_rule), severity=(existing_freshness.severity if existing_freshness else "ERROR"),
-                            sample_rows=0, check_type=freshness_key,
-                            params_json=json.dumps(fr_params)
-                        ))
+                        existing_freshness = existing_table_checks.get(freshness_key) or {}
+                        fr_template = table_templates_by_key.get(freshness_key)
+                        check_rows.append(
+                            DQCheck(
+                                config_id=(cfg.config_id if cfg else "temp"),
+                                check_id=(
+                                    existing_freshness.get("check_id")
+                                    or "TABLE_FRESHNESS"
+                                ),
+                                table_fqn=target_table,
+                                column_name=None,
+                                rule_expr=(f"AGG: {fr_rule}" if fr_is_agg else fr_rule),
+                                severity=(
+                                    existing_freshness.get("severity")
+                                    or "ERROR"
+                                ),
+                                sample_rows=0,
+                                check_type=freshness_key,
+                                params_json=json.dumps(fr_params),
+                                rule_code=(
+                                    (existing_freshness.get("rule_code") or "").upper()
+                                    or (fr_template.rule_code if fr_template else None)
+                                ),
+                                rule_params=json.dumps(fr_params),
+                                rule_version=(
+                                    fr_template.version if fr_template else existing_freshness.get("rule_version")
+                                ),
+                                compiled_rule=(f"AGG: {fr_rule}" if fr_is_agg else fr_rule),
+                            )
+                        )
 
                 row_defaults = existing_table_params.get(rowcount_anomaly_key, {}) or {}
                 try:
@@ -1684,15 +1728,42 @@ def render_config_editor():
                 except ValueError as exc:
                     table_check_error = f"Invalid row count anomaly configuration: {exc}"
                 else:
-                    existing_anomaly = existing_table_checks.get(rowcount_anomaly_key)
-                    check_rows.append(DQCheck(
-                        config_id=(cfg.config_id if cfg else "temp"),
-                        check_id=(existing_anomaly.check_id if existing_anomaly else "TABLE_ROW_COUNT_ANOMALY"),
-                        table_fqn=target_table, column_name=None,
-                        rule_expr=(f"AGG: {anomaly_rule}" if anomaly_is_agg else anomaly_rule), severity=(existing_anomaly.severity if existing_anomaly else "ERROR"),
-                        sample_rows=0, check_type=rowcount_anomaly_key,
-                        params_json=json.dumps(anomaly_params)
-                    ))
+                    existing_anomaly = existing_table_checks.get(rowcount_anomaly_key) or {}
+                    anomaly_template = table_templates_by_key.get(rowcount_anomaly_key)
+                    check_rows.append(
+                        DQCheck(
+                            config_id=(cfg.config_id if cfg else "temp"),
+                            check_id=(
+                                existing_anomaly.get("check_id")
+                                or "TABLE_ROW_COUNT_ANOMALY"
+                            ),
+                            table_fqn=target_table,
+                            column_name=None,
+                            rule_expr=(
+                                f"AGG: {anomaly_rule}" if anomaly_is_agg else anomaly_rule
+                            ),
+                            severity=(
+                                existing_anomaly.get("severity")
+                                or "ERROR"
+                            ),
+                            sample_rows=0,
+                            check_type=rowcount_anomaly_key,
+                            params_json=json.dumps(anomaly_params),
+                            rule_code=(
+                                (existing_anomaly.get("rule_code") or "").upper()
+                                or (anomaly_template.rule_code if anomaly_template else None)
+                            ),
+                            rule_params=json.dumps(anomaly_params),
+                            rule_version=(
+                                anomaly_template.version
+                                if anomaly_template
+                                else existing_anomaly.get("rule_version")
+                            ),
+                            compiled_rule=(
+                                f"AGG: {anomaly_rule}" if anomaly_is_agg else anomaly_rule
+                            ),
+                        )
+                    )
     
             st.markdown("### Schedule")
             existing_cron = getattr(cfg, "schedule_cron", None) if cfg else None
@@ -1836,7 +1907,7 @@ def render_config_editor():
                     return
             # Preserve existing column-level rules and rebind to the active config
             existing_column_checks: List[DQCheck] = []
-            for rule in library_checks:
+            for rule in column_library_checks:
                 column_name = rule.get("column_name")
                 if not column_name:
                     continue

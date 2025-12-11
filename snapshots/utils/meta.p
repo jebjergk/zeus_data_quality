@@ -398,13 +398,26 @@ def delete_config(session: Session, config_id: str):
     session.sql(f"DELETE FROM {_q(DQ_CONFIG_TBL)} WHERE CONFIG_ID = ?", params=[config_id]).collect()
 
 
-def get_library_checks(session: Session, config_id: str) -> List[Dict[str, Any]]:
-    """Load DQ_CHECK rows joined to the rule library for a config."""
+def get_library_checks(
+    session: Session, config_id: str, *, scope: Optional[str] = None
+) -> List[Dict[str, Any]]:
+    """Load DQ_CHECK rows joined to the rule library for a config.
+
+    Optionally filters by rule scope (TABLE/COLUMN) to keep table-level
+    checks out of the rule grid while still allowing dedicated loading for
+    the configuration header.
+    """
 
     if not session or not config_id:
         return []
 
     rule_table = _q(f"{METADATA_DB}.{METADATA_SCHEMA}.DQ_RULE_LIBRARY")
+    scope_clause = ""
+    params = [config_id]
+    if scope:
+        scope_clause = " AND COALESCE(UPPER(r.SCOPE), '') = UPPER(?)"
+        params.append(scope)
+
     df = session.sql(
         f"""
         SELECT
@@ -431,9 +444,9 @@ def get_library_checks(session: Session, config_id: str) -> List[Dict[str, Any]]
         FROM {_q(DQ_CHECK_TBL)} c
         LEFT JOIN {rule_table} r
           ON c.RULE_CODE = r.RULE_CODE
-        WHERE c.CONFIG_ID = ?
+        WHERE c.CONFIG_ID = ?{scope_clause}
         """,
-        params=[config_id],
+        params=params,
     )
     out: List[Dict[str, Any]] = []
     for row in df.collect():
@@ -526,23 +539,112 @@ def delete_check_by_id(session: Session, check_id: str):
     ).collect()
 
 def upsert_checks(session: Session, checks: List[DQCheck]):
-    if not session or not checks: return
+    if not session or not checks:
+        return
+
     ensure_meta_tables(session)
     cfg_id = checks[0].config_id
-    session.sql(f"DELETE FROM {_q(DQ_CHECK_TBL)} WHERE CONFIG_ID = ?", params=[cfg_id]).collect()
+
+    existing_df = session.sql(
+        f"""
+        SELECT CHECK_ID, COLUMN_NAME, RULE_CODE, CHECK_TYPE
+        FROM {_q(DQ_CHECK_TBL)}
+        WHERE CONFIG_ID = ?
+        """,
+        params=[cfg_id],
+    )
+    existing_map: Dict[Tuple[str, str], str] = {}
+    for row in existing_df.collect():
+        norm_col = (row["COLUMN_NAME"] or "").upper()
+        norm_rule = (row["RULE_CODE"] or row["CHECK_TYPE"] or "").upper()
+        existing_map[(norm_col, norm_rule)] = row["CHECK_ID"]
+
+    seen_ids: set[str] = set()
+
     for c in checks:
-        session.sql(f"""
-            INSERT INTO {_q(DQ_CHECK_TBL)} (
-              CONFIG_ID, CHECK_ID, TABLE_FQN, COLUMN_NAME, RULE_EXPR, SEVERITY,
-              SAMPLE_ROWS, CHECK_TYPE, PARAMS_JSON, RULE_CODE, RULE_PARAMS,
-              RULE_VERSION, COMPILED_RULE
-            )
-            SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
-        """, params=[
-            c.config_id, c.check_id, c.table_fqn, c.column_name, c.rule_expr,
-            c.severity, int(c.sample_rows), c.check_type, c.params_json,
-            c.rule_code, c.rule_params, c.rule_version, c.compiled_rule
-        ]).collect()
+        norm_col = (c.column_name or "").upper()
+        norm_rule = (c.rule_code or c.check_type or "").upper()
+        serialized_params = c.rule_params
+        if isinstance(serialized_params, dict):
+            serialized_params = json.dumps(serialized_params, default=str)
+        params_json = c.params_json
+        if isinstance(params_json, dict):
+            params_json = json.dumps(params_json, default=str)
+        serialized_params = serialized_params or params_json
+
+        existing_id = existing_map.get((norm_col, norm_rule))
+        check_id = existing_id or c.check_id or str(uuid4())
+        seen_ids.add(check_id)
+
+        if existing_id:
+            session.sql(
+                f"""
+                UPDATE {_q(DQ_CHECK_TBL)}
+                SET TABLE_FQN = :1,
+                    RULE_EXPR = :2,
+                    SEVERITY = :3,
+                    SAMPLE_ROWS = :4,
+                    CHECK_TYPE = :5,
+                    PARAMS_JSON = :6,
+                    RULE_CODE = :7,
+                    RULE_PARAMS = :8,
+                    RULE_VERSION = :9,
+                    COMPILED_RULE = :10,
+                    UPDATED_AT = CURRENT_TIMESTAMP()
+                WHERE CHECK_ID = :11
+                  AND CONFIG_ID = :12
+                """,
+                params=[
+                    c.table_fqn,
+                    c.rule_expr,
+                    c.severity,
+                    int(c.sample_rows),
+                    c.check_type,
+                    params_json,
+                    c.rule_code,
+                    serialized_params,
+                    c.rule_version,
+                    c.compiled_rule,
+                    check_id,
+                    cfg_id,
+                ],
+            ).collect()
+        else:
+            session.sql(
+                f"""
+                INSERT INTO {_q(DQ_CHECK_TBL)} (
+                  CONFIG_ID, CHECK_ID, TABLE_FQN, COLUMN_NAME, RULE_EXPR, SEVERITY,
+                  SAMPLE_ROWS, CHECK_TYPE, PARAMS_JSON, RULE_CODE, RULE_PARAMS,
+                  RULE_VERSION, COMPILED_RULE, UPDATED_AT
+                )
+                SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP()
+                """,
+                params=[
+                    c.config_id,
+                    check_id,
+                    c.table_fqn,
+                    c.column_name,
+                    c.rule_expr,
+                    c.severity,
+                    int(c.sample_rows),
+                    c.check_type,
+                    params_json,
+                    c.rule_code,
+                    serialized_params,
+                    c.rule_version,
+                    c.compiled_rule,
+                ],
+            ).collect()
+
+    if seen_ids:
+        session.sql(
+            f"""
+            DELETE FROM {_q(DQ_CHECK_TBL)}
+            WHERE CONFIG_ID = :1
+              AND CHECK_ID NOT IN ({', '.join(['?' for _ in seen_ids])})
+            """,
+            params=[cfg_id, *seen_ids],
+        ).collect()
 
 def get_checks(session: Session, config_id: str) -> List[DQCheck]:
     if not session: return []
