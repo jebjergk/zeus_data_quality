@@ -162,6 +162,8 @@ from utils.meta import (
     list_configs, get_config, get_checks,
     get_library_checks, update_library_check, insert_library_check, delete_check_by_id,
     list_columns, list_columns_with_types, list_tables,
+    TABLE_FRESHNESS_RULE_CODE,
+    TABLE_ROWCOUNT_RULE_CODE,
 )
 from utils import schedules
 from services.configs import save_config_and_checks, delete_config_full
@@ -1249,7 +1251,12 @@ def render_config_editor():
         column_part = column_name or "table"
         return "||".join([str(check_id or ""), column_part, (rule_code or "").upper()])
 
-    excluded_table_rules = {"FRESHNESS", "ROW_COUNT"}
+    excluded_table_rules = {
+        "FRESHNESS",
+        "ROW_COUNT",
+        TABLE_FRESHNESS_RULE_CODE,
+        TABLE_ROWCOUNT_RULE_CODE,
+    }
     for rule in column_library_checks:
         rule_code_key = (rule.get("rule_code") or rule.get("rule_id") or "").upper()
         if rule_code_key in excluded_table_rules:
@@ -1664,6 +1671,7 @@ def render_config_editor():
             )
 
             if target_table:
+                fr_template = table_templates_by_key.get(freshness_key)
                 existing_freshness = existing_table_checks.get(freshness_key) or {}
                 if timestamp_missing:
                     stored_params = existing_table_params.get(freshness_key) or {}
@@ -1678,6 +1686,10 @@ def render_config_editor():
                             or existing_freshness.get("rule_expr")
                             or ""
                         )
+                        fallback_rule_code = (
+                            (existing_freshness.get("rule_code") or "").upper()
+                            or (fr_template.rule_code if fr_template else TABLE_FRESHNESS_RULE_CODE)
+                        )
                         check_rows.append(
                             DQCheck(
                                 config_id=(cfg.config_id if cfg else "temp"),
@@ -1687,9 +1699,9 @@ def render_config_editor():
                                 rule_expr=fallback_rule,
                                 severity=existing_freshness.get("severity") or "ERROR",
                                 sample_rows=0,
-                                check_type=freshness_key,
+                                check_type=_builder_key(freshness_key, "FRESHNESS"),
                                 params_json=serialized_params,
-                                rule_code=(existing_freshness.get("rule_code") or "").upper(),
+                                rule_code=fallback_rule_code,
                                 rule_params=serialized_params,
                                 rule_version=existing_freshness.get("rule_version"),
                                 compiled_rule=fallback_rule,
@@ -1726,11 +1738,11 @@ def render_config_editor():
                                     or "ERROR"
                                 ),
                                 sample_rows=0,
-                                check_type=freshness_key,
+                                check_type=_builder_key(freshness_key, "FRESHNESS"),
                                 params_json=json.dumps(fr_params),
                                 rule_code=(
                                     (existing_freshness.get("rule_code") or "").upper()
-                                    or (fr_template.rule_code if fr_template else None)
+                                    or (fr_template.rule_code if fr_template else TABLE_FRESHNESS_RULE_CODE)
                                 ),
                                 rule_params=json.dumps(fr_params),
                                 rule_version=(
@@ -1785,11 +1797,15 @@ def render_config_editor():
                                 or "ERROR"
                             ),
                             sample_rows=0,
-                            check_type=rowcount_anomaly_key,
+                            check_type=_builder_key(rowcount_anomaly_key, "ROW_COUNT_ANOMALY"),
                             params_json=json.dumps(anomaly_params),
                             rule_code=(
                                 (existing_anomaly.get("rule_code") or "").upper()
-                                or (anomaly_template.rule_code if anomaly_template else None)
+                                or (
+                                    anomaly_template.rule_code
+                                    if anomaly_template
+                                    else TABLE_ROWCOUNT_RULE_CODE
+                                )
                             ),
                             rule_params=json.dumps(anomaly_params),
                             rule_version=(
@@ -1987,10 +2003,11 @@ def render_config_editor():
                 # Keep the latest instance for each table/column/check_type trio to avoid duplicates
                 deduped: Dict[Tuple[str, str, str], DQCheck] = {}
                 for chk in checks:
+                    rule_identity = _rule_key((chk.rule_code or chk.check_type or ""))
                     key = (
                         chk.table_fqn or "",
                         (chk.column_name or "").lower(),
-                        _rule_key(chk.check_type or ""),
+                        rule_identity,
                     )
                     deduped[key] = chk
                 return list(deduped.values())
