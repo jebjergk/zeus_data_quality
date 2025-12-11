@@ -466,21 +466,21 @@ def _render_rule_edit_form(
                 )
             except Exception as exc:
                 st.error(f"Rule compile failed: {exc}")
-                else:
-                    update_library_check(
-                        session,
-                        check_id=str(entry.get("check_id")),
-                        rule_params=rendered_params,
+            else:
+                update_library_check(
+                    session,
+                    check_id=str(entry.get("check_id")),
+                    rule_params=rendered_params,
                     rule_version=entry.get("rule_version"),
-                        compiled_rule=compiled_rule,
-                        rule_expr=compiled_rule,
-                        severity=entry.get("severity"),
-                    )
-                    # IMPORTANT: field-rule save must not modify table-level checks (COLUMN_NAME IS NULL).
-                    st.success("Rule updated.")
-                    for key in state_keys_to_clear or []:
-                        st.session_state.pop(key, None)
-                    st.rerun()
+                    compiled_rule=compiled_rule,
+                    rule_expr=compiled_rule,
+                    severity=entry.get("severity"),
+                )
+                # IMPORTANT: field-rule save must not modify table-level checks (COLUMN_NAME IS NULL).
+                st.success("Rule updated.")
+                for key in state_keys_to_clear or []:
+                    st.session_state.pop(key, None)
+                st.rerun()
     if col_cancel.button("Cancel", key=f"{key_prefix}_cancel"):
         if inline_mode:
             st.session_state.pop("inline_edit_entry", None)
