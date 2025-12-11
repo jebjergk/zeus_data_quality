@@ -1516,6 +1516,9 @@ def render_config_editor():
                     or "ERROR",
                     "rule_code": rule.get("rule_code"),
                     "rule_version": rule.get("rule_version") or rule.get("version"),
+                    "rule_expr": rule.get("rule_expr"),
+                    "compiled_rule": rule.get("compiled_rule"),
+                    "params_json": rule.get("params_json") or rule.get("rule_params"),
                 },
             )
     
@@ -1661,7 +1664,43 @@ def render_config_editor():
             )
 
             if target_table:
-                if not timestamp_missing:
+                existing_freshness = existing_table_checks.get(freshness_key) or {}
+                if timestamp_missing:
+                    stored_params = existing_table_params.get(freshness_key) or {}
+                    serialized_params = (
+                        json.dumps(stored_params, default=str)
+                        if isinstance(stored_params, dict)
+                        else stored_params
+                    )
+                    if existing_freshness:
+                        fallback_rule = (
+                            existing_freshness.get("compiled_rule")
+                            or existing_freshness.get("rule_expr")
+                            or ""
+                        )
+                        check_rows.append(
+                            DQCheck(
+                                config_id=(cfg.config_id if cfg else "temp"),
+                                check_id=existing_freshness.get("check_id") or "TABLE_FRESHNESS",
+                                table_fqn=target_table,
+                                column_name=None,
+                                rule_expr=fallback_rule,
+                                severity=existing_freshness.get("severity") or "ERROR",
+                                sample_rows=0,
+                                check_type=freshness_key,
+                                params_json=serialized_params,
+                                rule_code=(existing_freshness.get("rule_code") or "").upper(),
+                                rule_params=serialized_params,
+                                rule_version=existing_freshness.get("rule_version"),
+                                compiled_rule=fallback_rule,
+                            )
+                        )
+                    else:
+                        st.warning(
+                            "Select a timestamp column to keep the freshness check.",
+                            icon="⚠️",
+                        )
+                else:
                     fr_params = {"timestamp_column": ts_col, "max_age_minutes": int(fr_max_age)}
 
                     try:
@@ -1671,7 +1710,6 @@ def render_config_editor():
                     except ValueError as exc:
                         table_check_error = f"Invalid freshness configuration: {exc}"
                     else:
-                        existing_freshness = existing_table_checks.get(freshness_key) or {}
                         fr_template = table_templates_by_key.get(freshness_key)
                         check_rows.append(
                             DQCheck(
