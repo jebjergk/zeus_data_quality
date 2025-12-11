@@ -104,9 +104,40 @@ def _upsert_table_check(session: Any, check: DQCheck) -> None:
     if not session or not CHECKS_TBL:
         return
 
+    rule_code_lookup = {
+        "FRESHNESS": TABLE_FRESHNESS_RULE_CODE,
+        TABLE_FRESHNESS_RULE_CODE: TABLE_FRESHNESS_RULE_CODE,
+        "ROW_COUNT": TABLE_ROWCOUNT_RULE_CODE,
+        "ROW_COUNT_ANOMALY": TABLE_ROWCOUNT_RULE_CODE,
+        TABLE_ROWCOUNT_RULE_CODE: TABLE_ROWCOUNT_RULE_CODE,
+    }
+
     rule_code = (check.rule_code or check.check_type or "").upper()
+    rule_code = rule_code_lookup.get(rule_code, rule_code)
     if rule_code not in {TABLE_FRESHNESS_RULE_CODE, TABLE_ROWCOUNT_RULE_CODE}:
         return
+
+    check.rule_code = rule_code
+    if not check.rule_version:
+        rules_table = (
+            _q(f"{METADATA_DB}.{METADATA_SCHEMA}.DQ_RULE_LIBRARY")
+            if METADATA_DB and METADATA_SCHEMA
+            else _q("DQ_RULE_LIBRARY")
+        )
+        try:
+            version_rows = session.sql(
+                f"""
+                SELECT VERSION
+                FROM {rules_table}
+                WHERE RULE_CODE = :1
+                  AND SCOPE = 'TABLE'
+                """,
+                params=[rule_code],
+            ).collect()
+        except Exception:
+            version_rows = []
+        if version_rows:
+            check.rule_version = version_rows[0].get("VERSION")
 
     serialized_params = _serialize_params(check.rule_params) or _serialize_params(check.params_json)
     existing_id: Optional[str] = None
@@ -1754,12 +1785,9 @@ def render_config_editor():
                     existing_anomaly = existing_table_checks.get(rowcount_anomaly_key) or {}
                     anomaly_template = table_templates_by_key.get(rowcount_anomaly_key)
                     rule_code_value = (
-                        (existing_anomaly.get("rule_code") or "").upper()
-                        or (
-                            anomaly_template.rule_code
-                            if anomaly_template
-                            else TABLE_ROWCOUNT_RULE_CODE
-                        )
+                        anomaly_template.rule_code
+                        if anomaly_template
+                        else TABLE_ROWCOUNT_RULE_CODE
                     )
                     check_rows.append(
                         DQCheck(
