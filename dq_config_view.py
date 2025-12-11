@@ -91,6 +91,89 @@ CONFIGS_TBL: Optional[str] = None
 CHECKS_TBL: Optional[str] = None
 session: Any = None
 
+
+def _serialize_params(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return value
+    return json.dumps(value, default=str)
+
+
+def _upsert_table_check(session: Any, check: DQCheck) -> None:
+    if not session or not CHECKS_TBL:
+        return
+
+    rule_code = (check.rule_code or check.check_type or "").upper()
+    if rule_code not in {TABLE_FRESHNESS_RULE_CODE, TABLE_ROWCOUNT_RULE_CODE}:
+        return
+
+    serialized_params = _serialize_params(check.rule_params) or _serialize_params(check.params_json)
+    existing_id: Optional[str] = None
+    try:
+        result = session.sql(
+            f"""
+            SELECT CHECK_ID
+            FROM {_q(CHECKS_TBL)}
+            WHERE CONFIG_ID = :1
+              AND COLUMN_NAME IS NULL
+              AND RULE_CODE = :2
+            QUALIFY ROW_NUMBER() OVER (ORDER BY UPDATED_AT DESC, CHECK_ID) = 1
+            """,
+            params=[check.config_id, rule_code],
+        ).collect()
+        if result:
+            existing_id = result[0]["CHECK_ID"]
+    except Exception:
+        existing_id = None
+
+    check_id = existing_id or check.check_id or str(uuid4())
+    check.check_id = check_id
+
+    session.sql(
+        f"""
+        MERGE INTO {_q(CHECKS_TBL)} AS target
+        USING (
+            SELECT :1 AS CONFIG_ID, :2 AS RULE_CODE, :3 AS CHECK_ID
+        ) AS source
+        ON target.CONFIG_ID = source.CONFIG_ID
+           AND target.RULE_CODE = source.RULE_CODE
+           AND target.COLUMN_NAME IS NULL
+        WHEN MATCHED THEN UPDATE SET
+            TABLE_FQN = :4,
+            RULE_EXPR = :5,
+            SEVERITY = :6,
+            SAMPLE_ROWS = :7,
+            CHECK_TYPE = :8,
+            PARAMS_JSON = :9,
+            RULE_PARAMS = :10,
+            RULE_VERSION = :11,
+            COMPILED_RULE = :12,
+            UPDATED_AT = CURRENT_TIMESTAMP()
+        WHEN NOT MATCHED THEN INSERT (
+            CONFIG_ID, CHECK_ID, TABLE_FQN, COLUMN_NAME, RULE_EXPR, SEVERITY,
+            SAMPLE_ROWS, CHECK_TYPE, PARAMS_JSON, RULE_CODE, RULE_PARAMS,
+            RULE_VERSION, COMPILED_RULE, UPDATED_AT
+        ) VALUES (
+            :1, :3, :4, NULL, :5, :6, :7, :8, :9, :2, :10, :11, :12, CURRENT_TIMESTAMP()
+        )
+        """,
+        params=[
+            check.config_id,
+            rule_code,
+            check_id,
+            check.table_fqn,
+            check.rule_expr,
+            check.severity,
+            int(check.sample_rows),
+            check.check_type,
+            _serialize_params(check.params_json),
+            serialized_params,
+            check.rule_version,
+            check.compiled_rule,
+        ],
+    ).collect()
+
 def _resolve_modal_factory():
     """Return a callable that creates a context-managed modal/dialog if available."""
 
@@ -1867,6 +1950,9 @@ def render_config_editor():
                 if not rule_identity:
                     continue
                 table_checks[rule_identity] = cr
+
+            for chk in table_checks.values():
+                _upsert_table_check(session, chk)
 
             field_checks: List[DQCheck] = []
             for rule in column_library_checks:
