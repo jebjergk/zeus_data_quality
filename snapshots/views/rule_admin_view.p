@@ -59,6 +59,18 @@ def _parse_json_text(raw_text: str, *, expected_type: str) -> Any:
     return parsed
 
 
+def _parse_applicability_tags(raw_text: str) -> List[str]:
+    text = (raw_text or "").strip()
+    if not text:
+        return []
+    if text.lstrip().startswith("["):
+        parsed = _parse_json_text(text, expected_type="array")
+        if not all(isinstance(item, (str, int, float)) for item in parsed):
+            raise ValueError("Applicability tags must be an array of strings.")
+        return [str(item).strip() for item in parsed if str(item).strip()]
+    return [tag.strip() for tag in text.split(",") if tag.strip()]
+
+
 def _normalize_param_schema(raw_schema: Any) -> List[Dict[str, Any]]:
     if raw_schema is None:
         return []
@@ -117,6 +129,10 @@ def _load_rules(session: Session, table: str) -> pd.DataFrame:
             EXPRESSION,
             PARAM_SCHEMA,
             DEFAULT_PARAMS,
+            DATA_TYPE_FAMILY,
+            APPLICABILITY_TAGS,
+            DEFAULT_SUGGEST,
+            SUGGESTION_PRIORITY,
             ENABLED,
             VERSION,
             UPDATED_AT
@@ -170,6 +186,10 @@ def _rule_defaults() -> dict[str, Any]:
         "EXPRESSION": "",
         "PARAM_SCHEMA": "[]",
         "DEFAULT_PARAMS": "{}",
+        "DATA_TYPE_FAMILY": "ANY",
+        "APPLICABILITY_TAGS": "[]",
+        "DEFAULT_SUGGEST": True,
+        "SUGGESTION_PRIORITY": 50,
         "ENABLED": True,
         "VERSION": "",
     }
@@ -195,6 +215,10 @@ def _load_single_rule(session: Session, table_name: str, rule_uid: Any) -> Optio
                 EXPRESSION,
                 PARAM_SCHEMA,
                 DEFAULT_PARAMS,
+                DATA_TYPE_FAMILY,
+                APPLICABILITY_TAGS,
+                DEFAULT_SUGGEST,
+                SUGGESTION_PRIORITY,
                 ENABLED,
                 VERSION
             FROM {table_name}
@@ -293,6 +317,12 @@ def _render_rule_edit_page(session: Session, metadata_db: str, metadata_schema: 
                 "DEFAULT_PARAMS": _normalize_json_field(
                     record.get("DEFAULT_PARAMS"), empty_default="{}"
                 ),
+                "DATA_TYPE_FAMILY": record.get("DATA_TYPE_FAMILY", "ANY") or "ANY",
+                "APPLICABILITY_TAGS": _normalize_json_field(
+                    record.get("APPLICABILITY_TAGS"), empty_default="[]"
+                ),
+                "DEFAULT_SUGGEST": bool(record.get("DEFAULT_SUGGEST", True)),
+                "SUGGESTION_PRIORITY": record.get("SUGGESTION_PRIORITY", 50) or 50,
                 "ENABLED": bool(record.get("ENABLED", True)),
                 "VERSION": record.get("VERSION", ""),
             }
@@ -357,6 +387,43 @@ def _render_rule_edit_page(session: Session, metadata_db: str, metadata_schema: 
                 value=rule_defaults["ENGINE_TYPE"],
                 disabled=True,
             )
+
+        col_data_type, col_default_suggest = st.columns(2)
+        with col_data_type:
+            data_type_family = st.selectbox(
+                "Data type family",
+                options=["ANY", "NUMERIC", "STRING", "DATE", "BOOLEAN"],
+                index=max(
+                    0,
+                    ["ANY", "NUMERIC", "STRING", "DATE", "BOOLEAN"].index(
+                        (rule_defaults.get("DATA_TYPE_FAMILY") or "ANY").upper()
+                    )
+                    if (rule_defaults.get("DATA_TYPE_FAMILY") or "ANY").upper()
+                    in ["ANY", "NUMERIC", "STRING", "DATE", "BOOLEAN"]
+                    else 0,
+                ),
+                help="Column type family this rule targets for suggestions.",
+            )
+        with col_default_suggest:
+            default_suggest = st.checkbox(
+                "Use this rule in automatic suggestions",
+                value=bool(rule_defaults.get("DEFAULT_SUGGEST", True)),
+                help="Disable to exclude this rule from default suggestion generation.",
+            )
+
+        applicability_tags_text = st.text_input(
+            "Applicability tags (JSON array or comma-separated)",
+            value=rule_defaults["APPLICABILITY_TAGS"],
+            help="Tags like ID, COUNTRY_CODE, CURRENCY_CODE. Stored as JSON array.",
+        )
+
+        suggestion_priority_val = st.number_input(
+            "Suggestion priority (1-100)",
+            min_value=1,
+            max_value=100,
+            value=int(rule_defaults.get("SUGGESTION_PRIORITY", 50) or 50),
+            help="Higher values are suggested first.",
+        )
 
         expression = st.text_area(
             "Expression (DSL)",
@@ -463,6 +530,12 @@ def _render_rule_edit_page(session: Session, metadata_db: str, metadata_schema: 
         errors.append(f"Default parameters: {exc}")
         parsed_default_params = {}
 
+    try:
+        parsed_applicability_tags = _parse_applicability_tags(applicability_tags_text)
+    except ValueError as exc:
+        errors.append(f"Applicability tags: {exc}")
+        parsed_applicability_tags = []
+
     version_val: Optional[int]
     version_text_clean = (version_text or "").strip()
     if version_text_clean:
@@ -480,6 +553,8 @@ def _render_rule_edit_page(session: Session, metadata_db: str, metadata_schema: 
 
     param_schema_value = json.dumps(parsed_param_schema)
     default_params_value = json.dumps(parsed_default_params)
+    applicability_tags_value = json.dumps(parsed_applicability_tags)
+    suggestion_priority_value = int(suggestion_priority_val)
 
     if action == "test":
         _run_test_compile(
@@ -524,10 +599,14 @@ def _render_rule_edit_page(session: Session, metadata_db: str, metadata_schema: 
                     EXPRESSION = :6,
                     PARAM_SCHEMA = PARSE_JSON(:7),
                     DEFAULT_PARAMS = PARSE_JSON(:8),
-                    ENABLED = :9,
-                    VERSION = :10,
+                    DATA_TYPE_FAMILY = :9,
+                    APPLICABILITY_TAGS = PARSE_JSON(:10),
+                    DEFAULT_SUGGEST = :11,
+                    SUGGESTION_PRIORITY = :12,
+                    ENABLED = :13,
+                    VERSION = :14,
                     UPDATED_AT = CURRENT_TIMESTAMP()
-                WHERE RULE_UID = :11
+                WHERE RULE_UID = :15
                 """,
                 params=[
                     rule_id_val,
@@ -538,6 +617,10 @@ def _render_rule_edit_page(session: Session, metadata_db: str, metadata_schema: 
                     expression_val,
                     param_schema_value,
                     default_params_value,
+                    data_type_family,
+                    applicability_tags_value,
+                    default_suggest,
+                    suggestion_priority_value,
                     enabled,
                     version_val,
                     selected_uid,
@@ -556,6 +639,10 @@ def _render_rule_edit_page(session: Session, metadata_db: str, metadata_schema: 
                     EXPRESSION,
                     PARAM_SCHEMA,
                     DEFAULT_PARAMS,
+                    DATA_TYPE_FAMILY,
+                    APPLICABILITY_TAGS,
+                    DEFAULT_SUGGEST,
+                    SUGGESTION_PRIORITY,
                     ENABLED,
                     VERSION,
                     CREATED_AT,
@@ -572,7 +659,11 @@ def _render_rule_edit_page(session: Session, metadata_db: str, metadata_schema: 
                     PARSE_JSON(:8),
                     PARSE_JSON(:9),
                     :10,
-                    :11,
+                    PARSE_JSON(:11),
+                    :12,
+                    :13,
+                    :14,
+                    :15,
                     CURRENT_TIMESTAMP(),
                     CURRENT_TIMESTAMP()
                 """,
@@ -586,6 +677,10 @@ def _render_rule_edit_page(session: Session, metadata_db: str, metadata_schema: 
                     expression_val,
                     param_schema_value,
                     default_params_value,
+                    data_type_family,
+                    applicability_tags_value,
+                    default_suggest,
+                    suggestion_priority_value,
                     enabled,
                     version_val,
                 ],
