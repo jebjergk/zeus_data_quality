@@ -998,7 +998,49 @@ def render_config_list():
             )
             st.markdown(metrics_html, unsafe_allow_html=True)
         with action_col:
-            edit_col, delete_col = st.columns(2)
+            run_col, edit_col, delete_col = st.columns(3)
+            with run_col:
+                if st.button("▶️ Execute", key=f"run_{cfg.config_id}"):
+                    if not session:
+                        st.error("No active Snowpark session — unable to execute configuration.")
+                    else:
+                        try:
+                            db, schema, _ = _parse_relation_name(cfg.target_table_fqn or "")
+                        except Exception as exc:
+                            st.error(f"Failed to determine target table location: {exc}")
+                        else:
+                            if not db or not schema:
+                                st.warning(
+                                    "Execute requires a fully qualified target table (database and schema)."
+                                )
+                            else:
+                                try:
+                                    result_df = run_task_now(
+                                        session,
+                                        METADATA_DB,
+                                        METADATA_SCHEMA,
+                                        cfg.config_id,
+                                        proc_name=PROC_NAME,
+                                    )
+                                except Exception as exc:
+                                    st.error(
+                                        f"Failed to execute config {cfg.name or cfg.config_id}: {exc}"
+                                    )
+                                else:
+                                    result_details = None
+                                    if result_df is not None and not result_df.empty:
+                                        first_row = result_df.iloc[0]
+                                        for value in first_row.tolist():
+                                            if value:
+                                                result_details = str(value)
+                                                break
+                                    success_msg = (
+                                        f"Ran `{PROC_NAME}` for config `{cfg.config_id}`."
+                                    )
+                                    if result_details:
+                                        success_msg = f"{success_msg} Result: {result_details}"
+                                    st.success(success_msg)
+                                    st.info("Check the Monitor page for detailed results.")
             with edit_col:
                 if st.button("✏️ Edit", key=f"edit_{cfg.config_id}"):
                     open_config_editor(cfg.config_id, cfg.target_table_fqn)
