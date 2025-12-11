@@ -132,7 +132,7 @@ def _reset_table_level_checks(
             WHERE CONFIG_ID = :config_id
               AND COLUMN_NAME IS NULL
             """,
-            params={"config_id": config_id},
+            params=[{"config_id": config_id}],
         ).collect()
     except Exception as exc:
         logging.exception(
@@ -181,7 +181,7 @@ def _reset_table_level_checks(
                 WHERE r.RULE_CODE = :rule_code
                   AND COALESCE(UPPER(r.SCOPE), 'TABLE') = 'TABLE'
                 """,
-                params=payload,
+                params=[payload],
             ).collect()
         except Exception as exc:
             logging.exception(
