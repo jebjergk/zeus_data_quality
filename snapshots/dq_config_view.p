@@ -816,6 +816,9 @@ def render_config_list():
     cfgs = list_configs(session)
     results_table = _q(RUN_RESULTS_TBL)
     checks_table = _q(CHECKS_TBL)
+    execution_status_by_config: Dict[str, str] = st.session_state.setdefault(
+        "execution_status_by_config", {}
+    )
 
     last_run_by_config: Dict[str, Dict[str, Any]] = {}
     last_run_available = True
@@ -1000,18 +1003,41 @@ def render_config_list():
         with action_col:
             run_col, edit_col, delete_col = st.columns(3)
             with run_col:
+                status_label = execution_status_by_config.get(cfg.config_id)
+                if status_label:
+                    status_display = {
+                        "PASS": "✅ PASS",
+                        "FAIL": "❌ FAIL",
+                        "RUNNING": "⏳ RUNNING",
+                    }.get(status_label, status_label)
+                    st.caption(status_display)
+
                 if st.button("▶️ Execute", key=f"run_{cfg.config_id}"):
+                    def _record_execution(status: str, message: str) -> None:
+                        st.session_state["last_execution_status"] = status
+                        st.session_state["last_execution_result"] = message
+                        st.session_state["last_execution_config_id"] = cfg.config_id
+                        execution_status_by_config[cfg.config_id] = status
+
+                    _record_execution("RUNNING", f"Executing config `{cfg.config_id}`…")
+
                     if not session:
-                        st.error("No active Snowpark session — unable to execute configuration.")
+                        _record_execution(
+                            "FAIL",
+                            "No active Snowpark session — unable to execute configuration.",
+                        )
                     else:
                         try:
                             db, schema, _ = _parse_relation_name(cfg.target_table_fqn or "")
                         except Exception as exc:
-                            st.error(f"Failed to determine target table location: {exc}")
+                            _record_execution(
+                                "FAIL", f"Failed to determine target table location: {exc}"
+                            )
                         else:
                             if not db or not schema:
-                                st.warning(
-                                    "Execute requires a fully qualified target table (database and schema)."
+                                _record_execution(
+                                    "FAIL",
+                                    "Execute requires a fully qualified target table (database and schema).",
                                 )
                             else:
                                 try:
@@ -1023,8 +1049,9 @@ def render_config_list():
                                         proc_name=PROC_NAME,
                                     )
                                 except Exception as exc:
-                                    st.error(
-                                        f"Failed to execute config {cfg.name or cfg.config_id}: {exc}"
+                                    _record_execution(
+                                        "FAIL",
+                                        f"Failed to execute config {cfg.name or cfg.config_id}: {exc}",
                                     )
                                 else:
                                     result_details = None
@@ -1039,8 +1066,8 @@ def render_config_list():
                                     )
                                     if result_details:
                                         success_msg = f"{success_msg} Result: {result_details}"
-                                    st.success(success_msg)
-                                    st.info("Check the Monitor page for detailed results.")
+                                    success_msg = f"{success_msg} Check the Monitor page for detailed results."
+                                    _record_execution("PASS", success_msg)
             with edit_col:
                 if st.button("✏️ Edit", key=f"edit_{cfg.config_id}"):
                     open_config_editor(cfg.config_id, cfg.target_table_fqn)
@@ -1054,6 +1081,12 @@ def render_config_list():
         st.markdown("</div>", unsafe_allow_html=True)
         if i < len(cfgs) - 1:
             st.markdown("<div class='sf-hr'></div>", unsafe_allow_html=True)
+
+    if "last_execution_result" in st.session_state:
+        if st.session_state.get("last_execution_status") == "PASS":
+            st.success(st.session_state["last_execution_result"])
+        else:
+            st.error(st.session_state["last_execution_result"])
 
 def render_config_editor():
     # which config?
