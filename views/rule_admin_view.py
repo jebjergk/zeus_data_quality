@@ -276,7 +276,16 @@ def _apply_template_to_form_state(template_key: str, *, form_state_key: str) -> 
     new_state["PARAM_SCHEMA"] = json.dumps(
         template.get("param_schema", []), indent=2
     )
-    new_state.setdefault("DEFAULT_PARAMS", "{}")
+
+    default_params_raw = defaults.get("DEFAULT_PARAMS")
+    if default_params_raw is None:
+        default_params_raw = {}
+    if isinstance(default_params_raw, str):
+        try:
+            default_params_raw = json.loads(default_params_raw)
+        except json.JSONDecodeError:
+            default_params_raw = {}
+    new_state["DEFAULT_PARAMS"] = json.dumps(default_params_raw or {}, indent=2)
 
     st.session_state[form_state_key] = new_state
 
@@ -909,11 +918,11 @@ def _render_rule_edit_page(session: Session, metadata_db: str, metadata_schema: 
                     :5,
                     :6,
                     :7,
-                    PARSE_JSON(:8),
+                    :8,
                     PARSE_JSON(:9),
-                    :10,
-                    PARSE_JSON(:11),
-                    :12,
+                    PARSE_JSON(:10),
+                    :11,
+                    PARSE_JSON(:12),
                     :13,
                     :14,
                     :15,
