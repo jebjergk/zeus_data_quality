@@ -670,7 +670,11 @@ def render_config_editor():
         c1, c2, c3, c4 = st.columns(4)
         with c1: apply_now = st.form_submit_button("Save & Apply")
         with c2: save_draft = st.form_submit_button("Save as Draft")
-        with c3: run_now_btn = st.form_submit_button("Run Now")
+        with c3:
+            run_now_btn = st.form_submit_button("Run Now")
+            last_status = st.session_state.get("last_execution_status")
+            if last_status:
+                st.caption(f"Status: {last_status}")
         with c4: delete_btn = st.form_submit_button("Delete", type="secondary")
 
     if table_check_error:
@@ -728,6 +732,8 @@ def render_config_editor():
             st.session_state["cfg_mode"] = "list"; st.rerun(); return
 
         post_submit_notices: List[Dict[str, str]] = []
+        execution_status: Optional[str] = None
+        execution_result: Optional[str] = None
 
         def remember(kind: str, message: str) -> None:
             if message:
@@ -797,17 +803,19 @@ def render_config_editor():
                 remember("info", info_msg)
 
         if run_now_btn:
+            st.session_state["last_execution_status"] = "RUNNING"
+            st.session_state["last_execution_result"] = "Executing configuration..."
             try:
                 db, schema, _ = _parse_relation_name(dq_cfg.target_table_fqn or "")
             except Exception as exc:
                 err_msg = f"Failed to determine task location: {exc}"
-                st.error(err_msg)
-                remember("error", err_msg)
+                execution_status = "FAIL"
+                execution_result = err_msg
             else:
                 if not db or not schema:
                     warn_msg = "Run Now requires a fully qualified target table (database and schema)."
-                    st.warning(warn_msg)
-                    remember("warning", warn_msg)
+                    execution_status = "FAIL"
+                    execution_result = warn_msg
                 else:
                     try:
                         result_df = run_task_now(
@@ -819,8 +827,8 @@ def render_config_editor():
                         )
                     except Exception as exc:
                         err_msg = f"Failed to trigger task run: {exc}"
-                        st.error(err_msg)
-                        remember("error", err_msg)
+                        execution_status = "FAIL"
+                        execution_result = err_msg
                     else:
                         result_details = None
                         if result_df is not None and not result_df.empty:
@@ -834,8 +842,16 @@ def render_config_editor():
                         )
                         if result_details:
                             success_msg = f"{success_msg} Result: {result_details}"
-                        st.success(success_msg)
-                        remember("success", success_msg)
+                        execution_status = "PASS"
+                        execution_result = success_msg
+
+        if execution_status and execution_result:
+            st.session_state["last_execution_status"] = execution_status
+            st.session_state["last_execution_result"] = execution_result
+            remember(
+                "success" if execution_status == "PASS" else "error",
+                execution_result,
+            )
 
         if apply_now and status == 'ACTIVE':
             st.caption(f"Namespace: {METADATA_DB}.{METADATA_SCHEMA}, Proc: {PROC_NAME}")
@@ -1010,6 +1026,12 @@ def render_config_editor():
 
         st.session_state["last_notices"] = post_submit_notices
         st.session_state["cfg_mode"] = "list"; st.rerun()
+
+    if "last_execution_result" in st.session_state:
+        if st.session_state.get("last_execution_status") == "PASS":
+            st.success(st.session_state["last_execution_result"])
+        else:
+            st.error(st.session_state["last_execution_result"])
 
 def render_monitor():
     st.header("📊 Monitor")
