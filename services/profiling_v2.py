@@ -78,6 +78,28 @@ def _friendly_error_message(exc: Exception) -> str:
     return message
 
 
+def _require_feature_rows(session: Any, table_fqn: str) -> None:
+    """Ensure column features were written for *table_fqn*.
+
+    Raises :class:`ProfilingError` when no feature rows exist so the UI can
+    surface actionable feedback instead of silently succeeding.
+    """
+
+    sql = f"SELECT COUNT(*) AS ROW_COUNT FROM {COLUMN_FEATURES_TABLE} WHERE TABLE_FQN = ?"
+    counts = _fetch_dataframe(session, sql, params=[table_fqn])
+    feature_count = int(counts.iloc[0]["ROW_COUNT"]) if not counts.empty else 0
+    if feature_count <= 0:
+        message = (
+            "Profiling completed but no feature rows were persisted. "
+            "Ensure the table exists, contains readable columns, and that "
+            "your role has SELECT privileges."
+        )
+        LOGGER.warning(
+            "profiling_v2:no_features_persisted target=%s", table_fqn
+        )
+        raise ProfilingError(message)
+
+
 def run_profiling_v2(session: Any, table_fqn: str) -> None:
     """Execute the Profiling v2 stored procedure for *table_fqn*."""
 
@@ -88,6 +110,7 @@ def run_profiling_v2(session: Any, table_fqn: str) -> None:
     LOGGER.info("profiling_v2:call proc target=%s", normalized)
     try:
         _execute_sql(session, f"CALL {PROFILE_PROC}(?)", params=[normalized]).collect()
+        _require_feature_rows(session, normalized)
     except Exception as exc:  # pragma: no cover - Snowflake specific failures
         message = _friendly_error_message(exc)
         LOGGER.exception("profiling_v2:proc_failed target=%s", normalized)

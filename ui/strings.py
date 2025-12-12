@@ -20,6 +20,10 @@ PROFILE_V2_LOAD_SPINNER = "Loading profiling metadata..."
 PROFILE_V2_RUN_SPINNER = "Running DQ_PROFILE_FULL for {table}..."
 PROFILE_V2_RUN_ERROR = "Failed to profile table: {error}"
 PROFILE_V2_RUN_SUCCESS = "Profiling completed for {table}."
+PROFILE_V2_NO_FEATURES = (
+    "Profiling completed but no column metrics were saved for {table}. "
+    "Ensure the table exists, has columns, and that your role can SELECT it."
+)
 PROFILE_V2_CLASSIFY_SPINNER = "Re-running classification for {table}..."
 PROFILE_V2_CLASSIFY_ERROR = "Classification run failed: {error}"
 PROFILE_V2_CLASSIFY_SUCCESS = "Classification completed for {table}."

@@ -30,6 +30,7 @@ DECLARE
     v_details STRING := NULL;
     v_profile_run_id NUMBER := NULL;
     v_feature_sql STRING := '';
+    v_feature_count NUMBER := 0;
     v_is_string BOOLEAN;
     v_col_ident STRING;
     v_union_prefix STRING := '';
@@ -200,6 +201,16 @@ BEGIN
         v_union_prefix := CHR(10) || 'UNION ALL';
     END FOR;
   
+    IF (:v_feature_sql = '') THEN
+        v_details := 'No columns found to profile for ' || :v_table_fqn;
+        RAISE STATEMENT_ERROR WITH MESSAGE = v_details;
+    END IF;
+
+    EXECUTE IMMEDIATE
+        'DELETE FROM ZEUS_ANALYTICS_SIMU.DISCOVERY.DQ_COLUMN_FEATURES
+         WHERE TABLE_FQN = ?'
+        USING (:v_table_fqn);
+
     EXECUTE IMMEDIATE 'INSERT INTO ZEUS_ANALYTICS_SIMU.DISCOVERY.DQ_COLUMN_FEATURES (
             PROFILE_RUN_ID,
             DATABASE_NAME,
@@ -221,6 +232,19 @@ BEGIN
             CREATED_AT,
             UPDATED_AT
         ) ' || v_feature_sql;
+
+    EXECUTE IMMEDIATE
+        'SELECT COUNT(*)
+           FROM ZEUS_ANALYTICS_SIMU.DISCOVERY.DQ_COLUMN_FEATURES
+          WHERE TABLE_FQN = ?'
+        INTO :v_feature_count
+        USING (:v_table_fqn);
+
+    IF (:v_feature_count = 0) THEN
+        v_details := 'Profiling completed but no feature rows were persisted for '
+                     || :v_table_fqn;
+        RAISE STATEMENT_ERROR WITH MESSAGE = v_details;
+    END IF;
 
     v_finished_at := CURRENT_TIMESTAMP();
     v_status := 'SUCCESS';
