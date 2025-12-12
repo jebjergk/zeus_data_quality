@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Any, Dict, Iterable, List, Optional, TYPE_CHECKING
 
 import pandas as pd
@@ -553,18 +554,17 @@ def _render_rule_edit_page(session: Session, metadata_db: str, metadata_schema: 
         {*(tag_codes), *(_coerce_tag_list(form_state.get("APPLICABILITY_TAGS", [])))}
     )
 
+    rule_id_value = form_state.get("RULE_ID", rule_defaults["RULE_ID"])
+
     with st.form("dq_rule_form"):
         rule_code = st.text_input(
-            "Rule code",
+            "Rule Identifier (Rule Code)",
             value=form_state.get("RULE_CODE", rule_defaults["RULE_CODE"]),
             help="Unique identifier for the rule template.",
             disabled=mode == "edit_existing",
         )
-        rule_id = st.text_input(
-            "Rule ID",
-            value=form_state.get("RULE_ID", rule_defaults["RULE_ID"]),
-            help="Human-friendly rule identifier shown in listings.",
-        )
+        if mode == "edit_existing":
+            st.caption("Rule Identifier cannot be changed after creation.")
 
         col_category, col_severity = st.columns(2)
         with col_category:
@@ -734,7 +734,7 @@ def _render_rule_edit_page(session: Session, metadata_db: str, metadata_schema: 
 
     st.session_state[form_state_key] = {
         "RULE_CODE": rule_code,
-        "RULE_ID": rule_id,
+        "RULE_ID": rule_id_value,
         "CATEGORY_CODE": category_code,
         "CATEGORY": category_code,
         "SEVERITY": severity,
@@ -777,7 +777,7 @@ def _render_rule_edit_page(session: Session, metadata_db: str, metadata_schema: 
 
     errors: List[str] = []
     rule_code_val = (rule_code or "").strip()
-    rule_id_val = (rule_id or "").strip()
+    rule_id_val = (rule_id_value or rule_code_val).strip()
     category_val = (category_code or "").strip()
     severity_val = (severity or "").strip()
     scope_val = (scope_value or "").strip()
@@ -785,9 +785,11 @@ def _render_rule_edit_page(session: Session, metadata_db: str, metadata_schema: 
     expression_val = (expression or "").strip()
 
     if not rule_code_val:
-        errors.append("Rule code is required.")
-    if not rule_id_val:
-        errors.append("Rule ID is required.")
+        errors.append("Rule Identifier is required.")
+    elif not re.match(r"^[A-Z][A-Z0-9_]{2,63}$", rule_code_val):
+        errors.append(
+            "Rule Identifier must start with a letter and contain only A-Z, 0-9, or _ (3-64 characters)."
+        )
     if engine_val.upper() == "DSL" and not expression_val:
         errors.append("Expression is required for DSL rules.")
     if mode == "create_new" and not scope_val:
@@ -827,21 +829,25 @@ def _render_rule_edit_page(session: Session, metadata_db: str, metadata_schema: 
         )
         return
 
-    if mode == "create_new":
+    if enabled:
+        dup_sql = f"""
+            SELECT COUNT(*) AS DUP_COUNT
+            FROM {table_name}
+            WHERE ENABLED = TRUE
+              AND UPPER(RULE_CODE) = UPPER(:1)
+        """
+        dup_params: List[Any] = [rule_code_val]
+        if mode == "edit_existing":
+            dup_sql += " AND RULE_UID <> :2"
+            dup_params.append(selected_uid)
         try:
-            dup_check = session.sql(
-                f"""
-                SELECT 1 FROM {table_name}
-                WHERE UPPER(RULE_CODE) = UPPER(:1)
-                FETCH FIRST 1 ROW ONLY
-                """,
-                params=[rule_code_val],
-            ).to_pandas()
+            dup_check = session.sql(dup_sql, params=dup_params).to_pandas()
+            dup_count = int(dup_check.iloc[0].get("DUP_COUNT", dup_check.iloc[0, 0]))
         except Exception as exc:  # pragma: no cover - surface Snowflake errors to UI
-            st.error(f"Unable to validate rule code: {exc}")
+            st.error(f"Unable to validate rule identifier uniqueness: {exc}")
             return
-        if not dup_check.empty:
-            st.error("Rule code must be unique.")
+        if dup_count > 0:
+            st.error("Rule Identifier must be unique among enabled rules.")
             return
 
     try:
