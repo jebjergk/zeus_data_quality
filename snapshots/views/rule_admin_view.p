@@ -25,6 +25,10 @@ def _fq_test_table(database: str, schema: str) -> str:
     return f"{_q(database)}.{_q(schema)}.{_q('DQ_RULE_TEST_TARGET')}"
 
 
+def _fq_tag_table(database: str, schema: str) -> str:
+    return f"{_q(database)}.{_q(schema)}.{_q('DQ_TAG_DIM')}"
+
+
 def _normalize_json_field(value: Any, *, empty_default: str) -> str:
     if value is None or value == "":
         return empty_default
@@ -116,6 +120,167 @@ def _validate_param_value(value: Any, type_name: str, name: str) -> None:
         raise ValueError(f"Unsupported parameter type {type_name} for '{name}'")
 
 
+def _coerce_tag_list(value: Any) -> List[str]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return [str(item).strip() for item in value if str(item).strip()]
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return []
+        try:
+            parsed = json.loads(text)
+            return _coerce_tag_list(parsed)
+        except json.JSONDecodeError:
+            return [tag.strip() for tag in text.split(",") if tag.strip()]
+    return []
+
+
+CATEGORY_CHOICES: List[Dict[str, str]] = [
+    {"code": "COMPLETENESS", "label": "Completeness"},
+    {"code": "VALIDITY", "label": "Validity"},
+    {"code": "ACCURACY", "label": "Accuracy"},
+    {"code": "CONSISTENCY", "label": "Consistency"},
+    {"code": "UNIQUENESS", "label": "Uniqueness"},
+    {"code": "TIMELINESS", "label": "Timeliness"},
+    {"code": "REFERENTIAL_INTEGRITY", "label": "Referential Integrity"},
+    {"code": "ANOMALY", "label": "Anomaly"},
+]
+
+
+RULE_TEMPLATES: Dict[str, Dict[str, Any]] = {
+    "NOT_NULL": {
+        "name": "Not Null",
+        "defaults": {
+            "CATEGORY_CODE": "COMPLETENESS",
+            "DEFAULT_SUGGEST": True,
+            "SUGGESTION_PRIORITY": 100,
+            "APPLICABILITY_TAGS": [],
+        },
+        "param_schema": [],
+        "dsl_expression": ":col IS NOT NULL",
+    },
+    "RANGE_BETWEEN": {
+        "name": "Range Between",
+        "defaults": {
+            "CATEGORY_CODE": "VALIDITY",
+            "DEFAULT_SUGGEST": True,
+            "SUGGESTION_PRIORITY": 80,
+            "APPLICABILITY_TAGS": ["AMOUNT"],
+        },
+        "param_schema": [
+            {"name": "min_value", "type": "NUMBER", "required": True},
+            {"name": "max_value", "type": "NUMBER", "required": True},
+        ],
+        "dsl_expression": ":col BETWEEN :min_value AND :max_value",
+    },
+    "REGEX_PATTERN": {
+        "name": "Regex Pattern",
+        "defaults": {
+            "CATEGORY_CODE": "VALIDITY",
+            "DEFAULT_SUGGEST": True,
+            "SUGGESTION_PRIORITY": 85,
+            "APPLICABILITY_TAGS": ["COUNTRY_CODE"],
+        },
+        "param_schema": [
+            {"name": "pattern", "type": "STRING", "required": True},
+        ],
+        "dsl_expression": "REGEXP_LIKE(:col, :pattern)",
+    },
+    "IN_LIST": {
+        "name": "In List",
+        "defaults": {
+            "CATEGORY_CODE": "VALIDITY",
+            "DEFAULT_SUGGEST": True,
+            "SUGGESTION_PRIORITY": 75,
+            "APPLICABILITY_TAGS": [],
+        },
+        "param_schema": [
+            {"name": "allowed_values", "type": "STRING_LIST", "required": True},
+        ],
+        "dsl_expression": ":col IN (:allowed_values)",
+    },
+    "LOOKUP_EXISTS_SINGLE_KEY": {
+        "name": "Lookup Exists (single key)",
+        "defaults": {
+            "CATEGORY_CODE": "REFERENTIAL_INTEGRITY",
+            "DEFAULT_SUGGEST": True,
+            "SUGGESTION_PRIORITY": 90,
+            "APPLICABILITY_TAGS": [],
+        },
+        "param_schema": [
+            {"name": "ref_table", "type": "FQN_TABLE", "required": True},
+            {"name": "ref_value_col", "type": "COLUMN_NAME", "required": True},
+        ],
+        "dsl_expression": "EXISTS (SELECT 1 FROM :ref_table R WHERE R.:ref_value_col = :col)",
+    },
+    "LOOKUP_EXISTS_TWO_KEYS": {
+        "name": "Lookup Exists (two keys)",
+        "defaults": {
+            "CATEGORY_CODE": "REFERENTIAL_INTEGRITY",
+            "DEFAULT_SUGGEST": True,
+            "SUGGESTION_PRIORITY": 92,
+            "APPLICABILITY_TAGS": [],
+        },
+        "param_schema": [
+            {"name": "ref_table", "type": "FQN_TABLE", "required": True},
+            {"name": "ref_name_col", "type": "COLUMN_NAME", "required": True},
+            {"name": "ref_value_col", "type": "COLUMN_NAME", "required": True},
+        ],
+        "dsl_expression": (
+            "EXISTS (SELECT 1 FROM :ref_table R WHERE R.:ref_name_col = :col_name "
+            "AND R.:ref_value_col = :col)"
+        ),
+    },
+}
+
+
+def _load_active_tags(session: Session, database: str, schema: str) -> List[Dict[str, str]]:
+    tag_table = _fq_tag_table(database, schema)
+    try:
+        tag_df = session.sql(
+            f"""
+            SELECT TAG_CODE, COALESCE(TAG_LABEL, TAG_CODE) AS TAG_LABEL
+            FROM {tag_table}
+            WHERE IS_ACTIVE IS NULL OR IS_ACTIVE = TRUE
+            """
+        ).to_pandas()
+    except Exception:  # pragma: no cover - errors surfaced elsewhere
+        return []
+
+    return [
+        {"code": str(row.TAG_CODE), "label": str(row.TAG_LABEL)}
+        for row in tag_df.itertuples()
+        if str(row.TAG_CODE).strip()
+    ]
+
+
+def _apply_template_to_form_state(template_key: str, *, form_state_key: str) -> None:
+    template = RULE_TEMPLATES.get(template_key)
+    if not template:
+        return
+
+    state = st.session_state.get(form_state_key, {})
+    new_state = dict(state)
+    defaults = template.get("defaults", {})
+
+    for key, value in defaults.items():
+        new_state[key] = value
+        if key == "CATEGORY_CODE":
+            new_state["CATEGORY"] = value
+
+    new_state["EXPRESSION"] = template.get(
+        "dsl_expression", state.get("EXPRESSION", "")
+    )
+    new_state["PARAM_SCHEMA"] = json.dumps(
+        template.get("param_schema", []), indent=2
+    )
+    new_state.setdefault("DEFAULT_PARAMS", "{}")
+
+    st.session_state[form_state_key] = new_state
+
+
 def _load_rules(session: Session, table: str) -> pd.DataFrame:
     sql = f"""
         SELECT
@@ -124,6 +289,7 @@ def _load_rules(session: Session, table: str) -> pd.DataFrame:
             RULE_ID,
             SCOPE,
             CATEGORY,
+            CATEGORY_CODE,
             SEVERITY,
             ENGINE_TYPE,
             EXPRESSION,
@@ -140,6 +306,10 @@ def _load_rules(session: Session, table: str) -> pd.DataFrame:
     """
     df = session.sql(sql).to_pandas()
     df.columns = [col.upper() for col in df.columns]
+    if "CATEGORY_CODE" in df.columns:
+        df["CATEGORY"] = df.get("CATEGORY").where(
+            pd.notna(df.get("CATEGORY")), df.get("CATEGORY_CODE")
+        )
     if "UPDATED_AT" in df.columns:
         df["UPDATED_AT"] = pd.to_datetime(
             df["UPDATED_AT"], errors="coerce", utc=True
@@ -179,6 +349,7 @@ def _rule_defaults() -> dict[str, Any]:
     return {
         "RULE_CODE": "",
         "RULE_ID": "",
+        "CATEGORY_CODE": "VALIDITY",
         "CATEGORY": "",
         "SEVERITY": "",
         "SCOPE": "",
@@ -187,11 +358,11 @@ def _rule_defaults() -> dict[str, Any]:
         "PARAM_SCHEMA": "[]",
         "DEFAULT_PARAMS": "{}",
         "DATA_TYPE_FAMILY": "ANY",
-        "APPLICABILITY_TAGS": "[]",
+        "APPLICABILITY_TAGS": [],
         "DEFAULT_SUGGEST": True,
         "SUGGESTION_PRIORITY": 50,
         "ENABLED": True,
-        "VERSION": "",
+        "VERSION": 1,
     }
 
 
@@ -210,6 +381,7 @@ def _load_single_rule(session: Session, table_name: str, rule_uid: Any) -> Optio
                 RULE_ID,
                 SCOPE,
                 CATEGORY,
+                CATEGORY_CODE,
                 SEVERITY,
                 ENGINE_TYPE,
                 EXPRESSION,
@@ -306,6 +478,9 @@ def _render_rule_edit_page(session: Session, metadata_db: str, metadata_schema: 
             {
                 "RULE_CODE": record.get("RULE_CODE", ""),
                 "RULE_ID": record.get("RULE_ID", ""),
+                "CATEGORY_CODE": record.get("CATEGORY_CODE")
+                or record.get("CATEGORY")
+                or "VALIDITY",
                 "CATEGORY": record.get("CATEGORY", ""),
                 "SEVERITY": record.get("SEVERITY", ""),
                 "SCOPE": record.get("SCOPE", ""),
@@ -318,13 +493,13 @@ def _render_rule_edit_page(session: Session, metadata_db: str, metadata_schema: 
                     record.get("DEFAULT_PARAMS"), empty_default="{}"
                 ),
                 "DATA_TYPE_FAMILY": record.get("DATA_TYPE_FAMILY", "ANY") or "ANY",
-                "APPLICABILITY_TAGS": _normalize_json_field(
-                    record.get("APPLICABILITY_TAGS"), empty_default="[]"
+                "APPLICABILITY_TAGS": _coerce_tag_list(
+                    record.get("APPLICABILITY_TAGS")
                 ),
                 "DEFAULT_SUGGEST": bool(record.get("DEFAULT_SUGGEST", True)),
                 "SUGGESTION_PRIORITY": record.get("SUGGESTION_PRIORITY", 50) or 50,
                 "ENABLED": bool(record.get("ENABLED", True)),
-                "VERSION": record.get("VERSION", ""),
+                "VERSION": record.get("VERSION", 1) or 1,
             }
         )
         header_rule_code = rule_defaults.get("RULE_CODE", "").strip()
@@ -348,22 +523,57 @@ def _render_rule_edit_page(session: Session, metadata_db: str, metadata_schema: 
         else 0
     )
 
+    form_state_key = "dq_rule_form_state"
+    current_form_uid = selected_uid or "create_new"
+    if (
+        form_state_key not in st.session_state
+        or st.session_state.get("dq_rule_form_state_uid") != current_form_uid
+    ):
+        st.session_state[form_state_key] = dict(rule_defaults)
+        st.session_state["dq_rule_form_state_uid"] = current_form_uid
+
+    tag_options = _load_active_tags(session, metadata_db, metadata_schema)
+    tag_labels = {tag["code"]: tag.get("label", tag["code"]) for tag in tag_options}
+    tag_codes = [tag["code"] for tag in tag_options]
+    tag_codes = sorted(
+        {*(tag_codes), *(_coerce_tag_list(form_state.get("APPLICABILITY_TAGS", [])))}
+    )
+
+    form_state = st.session_state[form_state_key]
+    severity_default = form_state.get("SEVERITY") or severity_default
+    if form_state.get("SCOPE") in scope_choices:
+        scope_default_index = scope_choices.index(form_state.get("SCOPE"))
+
     with st.form("dq_rule_form"):
         rule_code = st.text_input(
             "Rule code",
-            value=rule_defaults["RULE_CODE"],
+            value=form_state.get("RULE_CODE", rule_defaults["RULE_CODE"]),
             help="Unique identifier for the rule template.",
             disabled=mode == "edit_existing",
         )
         rule_id = st.text_input(
             "Rule ID",
-            value=rule_defaults["RULE_ID"],
+            value=form_state.get("RULE_ID", rule_defaults["RULE_ID"]),
             help="Human-friendly rule identifier shown in listings.",
         )
 
         col_category, col_severity = st.columns(2)
         with col_category:
-            category = st.text_input("Category", value=rule_defaults["CATEGORY"])
+            category_codes = [choice["code"] for choice in CATEGORY_CHOICES]
+            category_labels = {
+                choice["code"]: choice.get("label", choice["code"])
+                for choice in CATEGORY_CHOICES
+            }
+            category_code = st.selectbox(
+                "Category",
+                options=category_codes,
+                index=category_codes.index(
+                    form_state.get("CATEGORY_CODE", "VALIDITY")
+                )
+                if form_state.get("CATEGORY_CODE", "VALIDITY") in category_codes
+                else 1,
+                format_func=lambda code: category_labels.get(code, code),
+            )
         with col_severity:
             severity = st.selectbox(
                 "Severity",
@@ -384,8 +594,9 @@ def _render_rule_edit_page(session: Session, metadata_db: str, metadata_schema: 
         with col_engine:
             engine_type = st.text_input(
                 "Engine type",
-                value=rule_defaults["ENGINE_TYPE"],
+                value=form_state.get("ENGINE_TYPE", "DSL"),
                 disabled=True,
+                help="Only DSL engine is supported in v1.",
             )
 
         col_data_type, col_default_suggest = st.columns(2)
@@ -396,9 +607,9 @@ def _render_rule_edit_page(session: Session, metadata_db: str, metadata_schema: 
                 index=max(
                     0,
                     ["ANY", "NUMERIC", "STRING", "DATE", "BOOLEAN"].index(
-                        (rule_defaults.get("DATA_TYPE_FAMILY") or "ANY").upper()
+                        (form_state.get("DATA_TYPE_FAMILY") or "ANY").upper()
                     )
-                    if (rule_defaults.get("DATA_TYPE_FAMILY") or "ANY").upper()
+                    if (form_state.get("DATA_TYPE_FAMILY") or "ANY").upper()
                     in ["ANY", "NUMERIC", "STRING", "DATE", "BOOLEAN"]
                     else 0,
                 ),
@@ -407,54 +618,77 @@ def _render_rule_edit_page(session: Session, metadata_db: str, metadata_schema: 
         with col_default_suggest:
             default_suggest = st.checkbox(
                 "Use this rule in automatic suggestions",
-                value=bool(rule_defaults.get("DEFAULT_SUGGEST", True)),
+                value=bool(form_state.get("DEFAULT_SUGGEST", True)),
                 help="Disable to exclude this rule from default suggestion generation.",
             )
 
-        applicability_tags_text = st.text_input(
-            "Applicability tags (JSON array or comma-separated)",
-            value=rule_defaults["APPLICABILITY_TAGS"],
-            help="Tags like ID, COUNTRY_CODE, CURRENCY_CODE. Stored as JSON array.",
+        selected_tags = st.multiselect(
+            "Applicability tags",
+            options=tag_codes,
+            default=form_state.get("APPLICABILITY_TAGS", []),
+            format_func=lambda code: tag_labels.get(code, code),
+            help="Choose which controlled tags this rule applies to.",
         )
 
         suggestion_priority_val = st.number_input(
             "Suggestion priority (1-100)",
             min_value=1,
             max_value=100,
-            value=int(rule_defaults.get("SUGGESTION_PRIORITY", 50) or 50),
+            value=int(form_state.get("SUGGESTION_PRIORITY", 50) or 50),
             help="Higher values are suggested first.",
+        )
+
+        template_choice = st.selectbox(
+            "Template",
+            options=["(None)"] + list(RULE_TEMPLATES.keys()),
+            format_func=lambda key: RULE_TEMPLATES.get(key, {}).get("name", key)
+            if key != "(None)"
+            else "— Select a template —",
+            key="dq_rule_template_choice",
+            help="Use a template to prefill DSL, parameters, and metadata.",
+        )
+        apply_template_clicked = st.form_submit_button(
+            "Apply template",
+            type="secondary",
+            use_container_width=False,
         )
 
         expression = st.text_area(
             "Expression (DSL)",
-            value=rule_defaults["EXPRESSION"],
+            value=form_state.get("EXPRESSION", ""),
             height=200,
             help="Provide the DSL expression for this rule (e.g. ASSERT ...).",
         )
-        with st.expander("DSL reference (quick guide)"):
+        with st.expander("DSL Reference"):
             st.markdown(
                 """
-                **DQ DSL v1 – Cheat Sheet**
+                **Macros**
 
-                * Basic rule shape: `ASSERT <predicate>`
-                * Operators: `AND`, `OR`, `NOT`, `IN`, `BETWEEN`, comparison operators (`=`, `!=`, `<`, `<=`, `>`, `>=`)
-                * Null checks: `IS NULL`, `IS NOT NULL`
-                * String helpers: `LEN(x)`, `LOWER(x)`, `UPPER(x)`, `CONTAINS(x, substring)`, `LIKE(pattern)`
-                * Number helpers: `ABS(x)`, `ROUND(x, decimals)`, `BETWEEN low AND high`
-                * Column/param references: use column names directly (quoted if needed) and parameters as `${param_name}`
-                * Implication: `A -> B` expands to `NOT (A) OR (B)`
-                * Lists: `IN (${list_param})` where `list_param` is `STRING_LIST`
-                * Table/column params: `FQN_TABLE` for fully-qualified tables, `COLUMN_NAME` for single column names
-                * Examples:
-                    * `ASSERT NOT (price IS NULL) AND price > 0`
-                    * `ASSERT amount BETWEEN ${min_amt} AND ${max_amt}`
-                    * `ASSERT LOWER(email) LIKE '%@example.com'`
+                * `:col` → column value expression (uses alias `T`).
+                * `:col_name` → string literal of the column name (for lookup patterns).
+                * `:param_name` → parameters defined in the schema (for example `:min_value`).
+                * `:table` → table macro when available in your DSL context.
+
+                **Supported constructs (examples)**
+
+                * Null checks: `:col IS NULL`, `:col IS NOT NULL`
+                * Regex: `REGEXP_LIKE(:col, :pattern)`
+                * Range: `:col BETWEEN :min_value AND :max_value`
+                * IN list: `:col IN (:allowed_values)`
+                * Exists lookup: `EXISTS (SELECT 1 FROM :ref_table R WHERE R.:ref_value_col = :col)`
+                * String helpers: `TRIM(:col)`, `UPPER(:col)`, `LOWER(:col)`, `LENGTH(:col)`
+
+                **Common mistakes**
+
+                * Snowflake uses `IS NULL` / `IS NOT NULL` (not `ISNULL()`).
+                * Quote literals, not macros. Macros like `:col` and `:param_name` should stay unquoted.
+                * Table aliases: expressions expect column references to use alias `T` if needed.
                 """
             )
 
         param_schema_text = st.text_area(
             "Parameter schema (JSON array)",
-            value=rule_defaults["PARAM_SCHEMA"],
+            value=form_state.get("PARAM_SCHEMA", "[]"),
             height=140,
         )
         st.caption(
@@ -467,14 +701,18 @@ def _render_rule_edit_page(session: Session, metadata_db: str, metadata_schema: 
         )
         default_params_text = st.text_area(
             "Default parameters (JSON object)",
-            value=rule_defaults["DEFAULT_PARAMS"],
+            value=form_state.get("DEFAULT_PARAMS", "{}"),
             height=140,
         )
-        enabled = st.checkbox("Enabled", value=rule_defaults["ENABLED"])
-        version_text = st.text_input(
+        enabled = st.checkbox(
+            "Enabled", value=bool(form_state.get("ENABLED", True))
+        )
+        version_value = st.number_input(
             "Version",
-            value=str(rule_defaults.get("VERSION") or ""),
+            min_value=1,
+            value=int(form_state.get("VERSION", 1) or 1),
             help="Optional version number for the rule template.",
+            disabled=True,
         )
 
         action_col1, action_col2, action_col3 = st.columns(3)
@@ -484,6 +722,33 @@ def _render_rule_edit_page(session: Session, metadata_db: str, metadata_schema: 
             cancel_clicked = st.form_submit_button("Cancel", type="secondary")
         with action_col3:
             test_compile_clicked = st.form_submit_button("Test Compile")
+
+    st.session_state[form_state_key] = {
+        "RULE_CODE": rule_code,
+        "RULE_ID": rule_id,
+        "CATEGORY_CODE": category_code,
+        "CATEGORY": category_code,
+        "SEVERITY": severity,
+        "SCOPE": scope_value,
+        "ENGINE_TYPE": engine_type,
+        "EXPRESSION": expression,
+        "PARAM_SCHEMA": param_schema_text,
+        "DEFAULT_PARAMS": default_params_text,
+        "DATA_TYPE_FAMILY": data_type_family,
+        "APPLICABILITY_TAGS": selected_tags,
+        "DEFAULT_SUGGEST": default_suggest,
+        "SUGGESTION_PRIORITY": suggestion_priority_val,
+        "ENABLED": enabled,
+        "VERSION": int(version_value),
+    }
+
+    if apply_template_clicked and template_choice != "(None)":
+        _apply_template_to_form_state(
+            template_choice,
+            form_state_key=form_state_key,
+        )
+        st.info("Template applied. Review the prefilled values before saving.")
+        st.rerun()
 
     if cancel_clicked:
         _reset_rule_state()
@@ -504,7 +769,7 @@ def _render_rule_edit_page(session: Session, metadata_db: str, metadata_schema: 
     errors: List[str] = []
     rule_code_val = (rule_code or "").strip()
     rule_id_val = (rule_id or "").strip()
-    category_val = (category or "").strip()
+    category_val = (category_code or "").strip()
     severity_val = (severity or "").strip()
     scope_val = (scope_value or "").strip()
     engine_val = (engine_type or "").strip()
@@ -529,23 +794,8 @@ def _render_rule_edit_page(session: Session, metadata_db: str, metadata_schema: 
     except ValueError as exc:
         errors.append(f"Default parameters: {exc}")
         parsed_default_params = {}
-
-    try:
-        parsed_applicability_tags = _parse_applicability_tags(applicability_tags_text)
-    except ValueError as exc:
-        errors.append(f"Applicability tags: {exc}")
-        parsed_applicability_tags = []
-
-    version_val: Optional[int]
-    version_text_clean = (version_text or "").strip()
-    if version_text_clean:
-        try:
-            version_val = int(version_text_clean)
-        except ValueError:
-            errors.append("Version must be a whole number if provided.")
-            version_val = None
-    else:
-        version_val = None
+    parsed_applicability_tags = [tag for tag in selected_tags if tag]
+    version_val: Optional[int] = int(version_value)
 
     if errors:
         st.error("\n".join(errors))
@@ -593,23 +843,25 @@ def _render_rule_edit_page(session: Session, metadata_db: str, metadata_schema: 
                 SET
                     RULE_ID = :1,
                     CATEGORY = :2,
-                    SEVERITY = :3,
-                    SCOPE = :4,
-                    ENGINE_TYPE = :5,
-                    EXPRESSION = :6,
-                    PARAM_SCHEMA = PARSE_JSON(:7),
-                    DEFAULT_PARAMS = PARSE_JSON(:8),
-                    DATA_TYPE_FAMILY = :9,
-                    APPLICABILITY_TAGS = PARSE_JSON(:10),
-                    DEFAULT_SUGGEST = :11,
-                    SUGGESTION_PRIORITY = :12,
-                    ENABLED = :13,
-                    VERSION = :14,
+                    CATEGORY_CODE = :3,
+                    SEVERITY = :4,
+                    SCOPE = :5,
+                    ENGINE_TYPE = :6,
+                    EXPRESSION = :7,
+                    PARAM_SCHEMA = PARSE_JSON(:8),
+                    DEFAULT_PARAMS = PARSE_JSON(:9),
+                    DATA_TYPE_FAMILY = :10,
+                    APPLICABILITY_TAGS = PARSE_JSON(:11),
+                    DEFAULT_SUGGEST = :12,
+                    SUGGESTION_PRIORITY = :13,
+                    ENABLED = :14,
+                    VERSION = :15,
                     UPDATED_AT = CURRENT_TIMESTAMP()
-                WHERE RULE_UID = :15
+                WHERE RULE_UID = :16
                 """,
                 params=[
                     rule_id_val,
+                    category_val or None,
                     category_val or None,
                     severity_val or None,
                     scope_val,
@@ -633,6 +885,7 @@ def _render_rule_edit_page(session: Session, metadata_db: str, metadata_schema: 
                     RULE_CODE,
                     RULE_ID,
                     CATEGORY,
+                    CATEGORY_CODE,
                     SEVERITY,
                     SCOPE,
                     ENGINE_TYPE,
@@ -664,12 +917,14 @@ def _render_rule_edit_page(session: Session, metadata_db: str, metadata_schema: 
                     :13,
                     :14,
                     :15,
+                    :16,
                     CURRENT_TIMESTAMP(),
                     CURRENT_TIMESTAMP()
                 """,
                 params=[
                     rule_code_val,
                     rule_id_val,
+                    category_val or None,
                     category_val or None,
                     severity_val or None,
                     scope_val,
