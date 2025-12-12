@@ -532,17 +532,17 @@ def _render_rule_edit_page(session: Session, metadata_db: str, metadata_schema: 
         st.session_state[form_state_key] = dict(rule_defaults)
         st.session_state["dq_rule_form_state_uid"] = current_form_uid
 
+    form_state = st.session_state[form_state_key]
+    severity_default = form_state.get("SEVERITY") or severity_default
+    if form_state.get("SCOPE") in scope_choices:
+        scope_default_index = scope_choices.index(form_state.get("SCOPE"))
+
     tag_options = _load_active_tags(session, metadata_db, metadata_schema)
     tag_labels = {tag["code"]: tag.get("label", tag["code"]) for tag in tag_options}
     tag_codes = [tag["code"] for tag in tag_options]
     tag_codes = sorted(
         {*(tag_codes), *(_coerce_tag_list(form_state.get("APPLICABILITY_TAGS", [])))}
     )
-
-    form_state = st.session_state[form_state_key]
-    severity_default = form_state.get("SEVERITY") or severity_default
-    if form_state.get("SCOPE") in scope_choices:
-        scope_default_index = scope_choices.index(form_state.get("SCOPE"))
 
     with st.form("dq_rule_form"):
         rule_code = st.text_input(
