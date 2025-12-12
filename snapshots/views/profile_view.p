@@ -1011,13 +1011,32 @@ def _run_table_profile(helpers: Any, session: Any, table_fqn: str) -> Dict[str, 
         }
 
     with st.spinner(ui_strings.PROFILE_V2_RUN_SPINNER.format(table=table_fqn)):
-        run_fn(session, table_fqn)
+        try:
+            run_fn(session, table_fqn)
+        except Exception as exc:  # pragma: no cover - UI feedback only
+            logging.exception("profiling:run_failed")
+            return {
+                "ok": False,
+                "summary": None,
+                "column_rows": [],
+                "err": ui_strings.PROFILE_V2_RUN_ERROR.format(error=str(exc)),
+            }
 
     summary = summary_fn(session, table_fqn) if callable(summary_fn) else None
     overview = overview_fn(session, table_fqn) if callable(overview_fn) else pd.DataFrame()
     column_rows = (
         overview.to_dict("records") if isinstance(overview, pd.DataFrame) else []
     )
+
+    if isinstance(overview, pd.DataFrame) and overview.empty:
+        warning = ui_strings.PROFILE_V2_NO_FEATURES.format(table=table_fqn)
+        logging.warning("profiling:no_features target=%s", table_fqn)
+        return {
+            "ok": False,
+            "summary": summary,
+            "column_rows": [],
+            "err": warning,
+        }
     return {
         "ok": True,
         "summary": summary,
