@@ -105,10 +105,10 @@ def _delete_existing_classifications(session: Any, table_fqn: str) -> None:
 
     sql = f"""
         DELETE FROM {COLUMN_CLASSIFICATION_TABLE}
-        WHERE TABLE_FQN = :table_fqn
+        WHERE TABLE_FQN = ?
           AND (SOURCE IS NULL OR SOURCE <> 'MANUAL')
     """
-    _execute_sql(session, sql, params={"table_fqn": table_fqn}).collect()
+    _execute_sql(session, sql, params=[table_fqn]).collect()
 
 
 def _guard_duplicate_classifications(session: Any, table_fqn: str) -> None:
@@ -117,12 +117,12 @@ def _guard_duplicate_classifications(session: Any, table_fqn: str) -> None:
     sql = f"""
         SELECT COLUMN_NAME, COUNT(*) AS ROW_COUNT
         FROM {COLUMN_CLASSIFICATION_TABLE}
-        WHERE TABLE_FQN = :table_fqn
+        WHERE TABLE_FQN = ?
           AND (SOURCE IS NULL OR SOURCE <> 'MANUAL')
         GROUP BY 1
         HAVING COUNT(*) > 1
     """
-    duplicates = _fetch_dataframe(session, sql, params={"table_fqn": table_fqn})
+    duplicates = _fetch_dataframe(session, sql, params=[table_fqn])
     if duplicates.empty:
         return
 
@@ -486,11 +486,11 @@ def get_column_classification(session: Any, table_fqn: str) -> pd.DataFrame:
     sql = f"""
         SELECT *
         FROM {COLUMN_CLASSIFICATION_TABLE}
-        WHERE TABLE_FQN = :table_fqn
+        WHERE TABLE_FQN = ?
         ORDER BY COLUMN_NAME, SOURCE DESC, CLASSIFIED_AT DESC
     """
     try:
-        return _fetch_dataframe(session, sql, params={"table_fqn": normalized})
+        return _fetch_dataframe(session, sql, params=[normalized])
     except Exception as exc:  # pragma: no cover - Snowflake specific failures
         LOGGER.exception(
             "profiling_v2:column_classification_failed target=%s", normalized
