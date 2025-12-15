@@ -100,6 +100,43 @@ def _require_feature_rows(session: Any, table_fqn: str) -> None:
         raise ProfilingError(message)
 
 
+def _delete_existing_classifications(session: Any, table_fqn: str) -> None:
+    """Remove prior heuristic classifications for *table_fqn* before rewrite."""
+
+    sql = f"""
+        DELETE FROM {COLUMN_CLASSIFICATION_TABLE}
+        WHERE TABLE_FQN = :table_fqn
+          AND (SOURCE IS NULL OR SOURCE <> 'MANUAL')
+    """
+    _execute_sql(session, sql, params={"table_fqn": table_fqn}).collect()
+
+
+def _guard_duplicate_classifications(session: Any, table_fqn: str) -> None:
+    """Raise if more than one heuristic classification exists per column."""
+
+    sql = f"""
+        SELECT COLUMN_NAME, COUNT(*) AS ROW_COUNT
+        FROM {COLUMN_CLASSIFICATION_TABLE}
+        WHERE TABLE_FQN = :table_fqn
+          AND (SOURCE IS NULL OR SOURCE <> 'MANUAL')
+        GROUP BY 1
+        HAVING COUNT(*) > 1
+    """
+    duplicates = _fetch_dataframe(session, sql, params={"table_fqn": table_fqn})
+    if duplicates.empty:
+        return
+
+    columns = sorted(
+        str(value)
+        for value in duplicates["COLUMN_NAME"].tolist()
+        if value is not None
+    )
+    column_list = ", ".join(columns) if columns else "unknown columns"
+    raise ProfilingError(
+        f"Duplicate classification rows detected for {column_list} on {table_fqn}"
+    )
+
+
 def run_profiling_v2(session: Any, table_fqn: str) -> None:
     """Execute the Profiling v2 stored procedure for *table_fqn*."""
 
@@ -109,8 +146,10 @@ def run_profiling_v2(session: Any, table_fqn: str) -> None:
 
     LOGGER.info("profiling_v2:call proc target=%s", normalized)
     try:
+        _delete_existing_classifications(session, normalized)
         _execute_sql(session, f"CALL {PROFILE_PROC}(?)", params=[normalized]).collect()
         _require_feature_rows(session, normalized)
+        _guard_duplicate_classifications(session, normalized)
     except Exception as exc:  # pragma: no cover - Snowflake specific failures
         message = _friendly_error_message(exc)
         LOGGER.exception("profiling_v2:proc_failed target=%s", normalized)
@@ -151,12 +190,18 @@ def _run_single_stage(
 def run_classification_only(session: Any, table_fqn: str) -> None:
     """Re-run only the column classification stage for *table_fqn*."""
 
+    normalized = _normalize_table_fqn(table_fqn)
+    if not normalized:
+        raise ProfilingError("Fully-qualified table name is required")
+
+    _delete_existing_classifications(session, normalized)
     _run_single_stage(
         session,
-        table_fqn,
+        normalized,
         CLASSIFY_PROC,
         "Classification run failed",
     )
+    _guard_duplicate_classifications(session, normalized)
 
 
 def run_suggestions_only(session: Any, table_fqn: str) -> None:
