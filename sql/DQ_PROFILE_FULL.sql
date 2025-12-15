@@ -44,6 +44,7 @@ DECLARE
     v_rs resultset;
     e_table_error exception (-20001,'Table identifier is required');
     e_no_profile_id exception (-20002,'Failed to capture PROFILE_RUN_ID');
+    e_no_col exception (-20003,'no col');
 BEGIN
     IF (:v_table_fqn = '' AND (v_database_name IS NULL OR v_schema_name IS NULL OR v_table_name IS NULL)) THEN
 --        RAISE STATEMENT_ERROR WITH MESSAGE = 'Table identifier is required';
@@ -145,11 +146,6 @@ BEGIN
         RAISE e_no_profile_id;
     END IF;
 
-    
-    v_rs := (EXECUTE IMMEDIATE
-            'SELECT COLUMN_NAME, DATA_TYPE FROM identifier(?) where TABLE_SCHEMA = ? AND TABLE_NAME = ? ORDER BY ORDINAL_POSITION'
-            USING (v_info_schema_columns, v_schema_name, v_table_name));
-
     v_database_literal := IFF(v_database_name IS NULL, 'NULL', '\'' || REPLACE(v_database_name, '\'', '\'\'\'') || '\'');
     v_schema_literal := IFF(v_schema_name IS NULL, 'NULL', '\'' || REPLACE(v_schema_name, '\'', '\'\'\'') || '\'');
     v_table_literal := IFF(v_table_name IS NULL, 'NULL', '\'' || REPLACE(v_table_name, '\'', '\'\'\'') || '\'');
@@ -163,6 +159,10 @@ BEGIN
         ORDER BY ORDINAL_POSITION
     ) DO*/
 
+    v_rs := (EXECUTE IMMEDIATE
+            'SELECT COLUMN_NAME, DATA_TYPE FROM identifier(?) where TABLE_SCHEMA = ? AND TABLE_NAME = ? ORDER BY ORDINAL_POSITION'
+            USING (v_info_schema_columns, v_schema_name, v_table_name));
+    
     FOR rec in v_rs DO
         v_col_ident := '"' || REPLACE(rec.COLUMN_NAME, '"', '""') || '"';
         v_is_string := REGEXP_LIKE(UPPER(rec.DATA_TYPE), 'CHAR|TEXT|STRING');
@@ -200,17 +200,18 @@ BEGIN
             '          FROM ' || :v_from_clause || ')';
         v_union_prefix := CHR(10) || 'UNION ALL';
     END FOR;
-  
+
     IF (:v_feature_sql = '') THEN
         v_details := 'No columns found to profile for ' || :v_table_fqn;
-        RAISE STATEMENT_ERROR WITH MESSAGE = v_details;
+        --RAISE STATEMENT_ERROR WITH MESSAGE = v_details;
+        raise e_no_col;
     END IF;
 
     EXECUTE IMMEDIATE
         'DELETE FROM ZEUS_ANALYTICS_SIMU.DISCOVERY.DQ_COLUMN_FEATURES
          WHERE TABLE_FQN = ?'
-        USING (:v_table_fqn);
-
+        USING (v_table_fqn);
+        
     EXECUTE IMMEDIATE 'INSERT INTO ZEUS_ANALYTICS_SIMU.DISCOVERY.DQ_COLUMN_FEATURES (
             PROFILE_RUN_ID,
             DATABASE_NAME,
@@ -232,18 +233,20 @@ BEGIN
             CREATED_AT,
             UPDATED_AT
         ) ' || v_feature_sql;
-
-    EXECUTE IMMEDIATE
-        'SELECT COUNT(*)
-           FROM ZEUS_ANALYTICS_SIMU.DISCOVERY.DQ_COLUMN_FEATURES
-          WHERE TABLE_FQN = ?'
-        INTO :v_feature_count
-        USING (:v_table_fqn);
-
+        
+    v_rs := (EXECUTE IMMEDIATE
+            'SELECT COUNT(*) as feature_count
+                FROM ZEUS_ANALYTICS_SIMU.DISCOVERY.DQ_COLUMN_FEATURES
+            WHERE TABLE_FQN = ?'
+        --INTO :v_feature_count
+        USING (v_table_fqn));
+    
+    for rec in v_rs do v_feature_count := rec.feature_count; end for;    
     IF (:v_feature_count = 0) THEN
         v_details := 'Profiling completed but no feature rows were persisted for '
                      || :v_table_fqn;
-        RAISE STATEMENT_ERROR WITH MESSAGE = v_details;
+        --RAISE STATEMENT_ERROR WITH MESSAGE = v_details;
+        RAISE e_no_col;
     END IF;
 
     v_finished_at := CURRENT_TIMESTAMP();
