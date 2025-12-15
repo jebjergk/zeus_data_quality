@@ -637,6 +637,28 @@ def _render_suggest_config_action(
     _render_suggest_config_summary(summary or {}, table_fqn, config_name)
 
 
+def _render_overview_debug(overview: pd.DataFrame) -> None:
+    debug_counts = {}
+    if isinstance(overview, pd.DataFrame):
+        debug_counts = overview.attrs.get("dq_debug_counts", {}) or {}
+
+    feature_count = debug_counts.get("feature_row_count")
+    classification_count = debug_counts.get("classification_row_count")
+    rendered_count = debug_counts.get("columns_rendered")
+
+    with st.expander("Profiling debug", expanded=False):
+        st.caption("Profiling grid source counts")
+        st.text(f"feature_row_count: {feature_count if feature_count is not None else 0}")
+        st.text(
+            "classification_row_count: "
+            f"{classification_count if classification_count is not None else 0}"
+        )
+        fallback_rendered = len(overview) if isinstance(overview, pd.DataFrame) else 0
+        st.text(
+            f"columns_rendered: {rendered_count if rendered_count is not None else fallback_rendered}"
+        )
+
+
 def _suggestion_selection_key(
     table_fqn: str, column_name: str, rule_id: Any, check_type: Any
 ) -> str:
@@ -1341,6 +1363,7 @@ def render_profile(
     )
 
     with tab_overview:
+        _render_overview_debug(overview_grid)
         _render_suggest_config_action(
             overview_grid,
             target_fqn,

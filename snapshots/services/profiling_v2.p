@@ -454,7 +454,7 @@ def get_column_features(session: Any, table_fqn: str) -> pd.DataFrame:
         SELECT *
         FROM {COLUMN_FEATURES_TABLE}
         WHERE TABLE_FQN = ?
-        ORDER BY COLUMN_NAME
+        ORDER BY ORDINAL_POSITION
     """
     try:
         df = _fetch_dataframe(session, sql, params=[normalized])
@@ -677,16 +677,48 @@ def get_overview_grid(session: Session, table_fqn: str) -> pd.DataFrame:
         except Exception:
             return str(value)
 
-    features = _latest_column_features(
-        _normalize_dataframe_columns(get_column_features(session, normalized))
+    classification_cte = f"""
+        SELECT *
+        FROM {COLUMN_CLASSIFICATION_TABLE}
+        WHERE TABLE_FQN = ?
+        QUALIFY ROW_NUMBER() OVER (
+            PARTITION BY TABLE_FQN, COLUMN_NAME
+            ORDER BY UPDATED_AT DESC NULLS LAST
+        ) = 1
+    """
+
+    features_sql = f"""
+        WITH class_dedup AS (
+            {classification_cte}
+        )
+        SELECT f.*, c.CONTENT_TYPE, c.SEMANTIC_ROLE, c.SOURCE, c.CONFIDENCE, c.CLASSIFIED_AT
+        FROM {COLUMN_FEATURES_TABLE} f
+        LEFT JOIN class_dedup c
+          ON f.TABLE_FQN = c.TABLE_FQN
+         AND f.COLUMN_NAME = c.COLUMN_NAME
+        WHERE f.TABLE_FQN = ?
+        ORDER BY f.ORDINAL_POSITION
+    """
+
+    features = _normalize_dataframe_columns(
+        _fetch_dataframe(session, features_sql, params=[normalized, normalized])
     )
+    classification = _normalize_dataframe_columns(
+        _fetch_dataframe(session, classification_cte, params=[normalized])
+    )
+    feature_row_count = len(features)
+    classification_row_count = len(classification)
+
     if features.empty:
-        return pd.DataFrame(columns=overview_columns)
+        empty_df = pd.DataFrame(columns=overview_columns)
+        empty_df.attrs["dq_debug_counts"] = {
+            "feature_row_count": feature_row_count,
+            "classification_row_count": classification_row_count,
+            "columns_rendered": 0,
+        }
+        return empty_df
 
     suggestions = _normalize_dataframe_columns(get_suggested_checks(session, normalized))
-    classification = _normalize_dataframe_columns(
-        get_column_classification(session, normalized)
-    )
 
     suggestion_lookup: Dict[str, Dict[str, Any]] = {}
     if not suggestions.empty and "COLUMN_NAME" in suggestions.columns:
@@ -753,6 +785,11 @@ def get_overview_grid(session: Session, table_fqn: str) -> pd.DataFrame:
         )
 
     overview = pd.DataFrame.from_records(overview_rows, columns=overview_columns)
+    overview.attrs["dq_debug_counts"] = {
+        "feature_row_count": feature_row_count,
+        "classification_row_count": classification_row_count,
+        "columns_rendered": len(overview_rows),
+    }
     return overview
 
 
