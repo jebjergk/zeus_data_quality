@@ -568,6 +568,8 @@ def _render_suggest_config_action(
     helpers: Any,
     session: Any,
     profile_run_id: Optional[str],
+    metadata_db: str,
+    metadata_schema: str,
 ):
     suggest_fn = getattr(helpers, "suggest_config_from_profile", None)
     if not callable(suggest_fn):
@@ -611,12 +613,15 @@ def _render_suggest_config_action(
         ui_strings.PROFILE_V2_SUGGEST_CONFIG_SPINNER.format(table=table_fqn)
     ):
         try:
-            summary = suggest_fn(
+            summary = _call_helper_with_metadata(
+                suggest_fn,
                 session,
                 table_fqn,
                 profile_run_id,
                 included_columns,
                 config_name,
+                metadata_db=metadata_db,
+                metadata_schema=metadata_schema,
             )
         except Exception as exc:  # pragma: no cover - UI feedback only
             st.error(
@@ -645,6 +650,12 @@ def _render_overview_debug(overview: pd.DataFrame) -> None:
     feature_count = debug_counts.get("feature_row_count")
     classification_count = debug_counts.get("classification_row_count")
     rendered_count = debug_counts.get("columns_rendered")
+    metadata_db = debug_counts.get("metadata_db")
+    metadata_schema = debug_counts.get("metadata_schema")
+    features_table_fqn = debug_counts.get("features_table_fqn")
+    class_table_fqn = debug_counts.get("class_table_fqn")
+    table_fqn_filter = debug_counts.get("table_fqn_filter")
+    feature_sample_columns = debug_counts.get("feature_sample_columns") or []
 
     with st.expander("Profiling debug", expanded=False):
         st.caption("Profiling grid source counts")
@@ -657,6 +668,14 @@ def _render_overview_debug(overview: pd.DataFrame) -> None:
         st.text(
             f"columns_rendered: {rendered_count if rendered_count is not None else fallback_rendered}"
         )
+        st.caption("Resolved metadata sources")
+        st.text(f"metadata_db: {metadata_db or '-'}")
+        st.text(f"metadata_schema: {metadata_schema or '-'}")
+        st.text(f"features_table_fqn: {features_table_fqn or '-'}")
+        st.text(f"class_table_fqn: {class_table_fqn or '-'}")
+        st.text(f"table_fqn_filter: {table_fqn_filter or '-'}")
+        sample_text = ", ".join(feature_sample_columns) if feature_sample_columns else "-"
+        st.text(f"feature_sample_columns: {sample_text}")
 
 
 def _suggestion_selection_key(
@@ -768,6 +787,8 @@ def _render_classification_grid(
     table_fqn: str,
     helpers: Any,
     session: Any,
+    metadata_db: str,
+    metadata_schema: str,
 ) -> None:
     if not isinstance(classification, pd.DataFrame) or classification.empty:
         st.info(ui_strings.PROFILE_V2_COLUMNS_EDIT_EMPTY)
@@ -858,12 +879,15 @@ def _render_classification_grid(
     for change in changes:
         column_name = change["column"]
         try:
-            save_fn(
+            _call_helper_with_metadata(
+                save_fn,
                 session,
                 table_fqn,
                 column_name,
                 change["content"] or None,
                 change["semantic"] or None,
+                metadata_db=metadata_db,
+                metadata_schema=metadata_schema,
             )
         except Exception as exc:  # pragma: no cover - UI feedback only
             st.error(
@@ -897,6 +921,8 @@ def _render_column_editors(
     table_fqn: str,
     helpers: Any,
     session: Any,
+    metadata_db: str,
+    metadata_schema: str,
 ) -> None:
     if not isinstance(classification, pd.DataFrame) or classification.empty:
         st.info(ui_strings.PROFILE_V2_COLUMNS_EDIT_EMPTY)
@@ -914,7 +940,9 @@ def _render_column_editors(
     st.markdown(f"**{ui_strings.PROFILE_V2_COLUMNS_EDIT_HEADER}**")
     st.caption(ui_strings.PROFILE_V2_COLUMNS_EDIT_HELP)
     for record in working.to_dict("records"):
-        _render_column_editor_form(record, table_fqn, session, save_fn)
+        _render_column_editor_form(
+            record, table_fqn, session, save_fn, metadata_db, metadata_schema
+        )
 
 
 def _render_column_editor_form(
@@ -922,6 +950,8 @@ def _render_column_editor_form(
     table_fqn: str,
     session: Any,
     save_fn: Any,
+    metadata_db: str,
+    metadata_schema: str,
 ) -> None:
     column_name = str(record.get("COLUMN_NAME") or "").strip()
     if not column_name:
@@ -965,6 +995,8 @@ def _render_column_editor_form(
                 column_name,
                 content_value,
                 semantic_value,
+                metadata_db,
+                metadata_schema,
             )
 
 
@@ -987,18 +1019,23 @@ def _handle_manual_classification_save(
     column_name: str,
     content_value: Optional[str],
     semantic_value: Optional[str],
+    metadata_db: str,
+    metadata_schema: str,
 ) -> None:
     content_clean = (content_value or "").strip() or None
     semantic_clean = (semantic_value or "").strip() or None
     spinner = ui_strings.PROFILE_V2_COLUMN_EDIT_SPINNER.format(column=column_name)
     with st.spinner(spinner):
         try:
-            save_fn(
+            _call_helper_with_metadata(
+                save_fn,
                 session,
                 table_fqn,
                 column_name,
                 content_clean,
                 semantic_clean,
+                metadata_db=metadata_db,
+                metadata_schema=metadata_schema,
             )
         except Exception as exc:  # pragma: no cover - UI feedback only
             st.error(
@@ -1020,7 +1057,34 @@ def _resolve_helpers(profiling_helpers: Optional[Any]):
     return profiling_helpers or profiling_service
 
 
-def _run_table_profile(helpers: Any, session: Any, table_fqn: str) -> Dict[str, Any]:
+def _call_helper_with_metadata(
+    fn: Any,
+    *args,
+    metadata_db: str,
+    metadata_schema: str,
+    **kwargs,
+):
+    try:
+        return fn(
+            *args,
+            metadata_db=metadata_db,
+            metadata_schema=metadata_schema,
+            **kwargs,
+        )
+    except TypeError as exc:
+        message = str(exc)
+        if "metadata_db" in message or "metadata_schema" in message:
+            return fn(*args, **kwargs)
+        raise
+
+
+def _run_table_profile(
+    helpers: Any,
+    session: Any,
+    table_fqn: str,
+    metadata_db: str,
+    metadata_schema: str,
+) -> Dict[str, Any]:
     run_fn = getattr(helpers, "run_profiling_v2", None)
     summary_fn = getattr(helpers, "fetch_table_summary", None)
     overview_fn = getattr(helpers, "get_overview_grid", None)
@@ -1034,7 +1098,13 @@ def _run_table_profile(helpers: Any, session: Any, table_fqn: str) -> Dict[str, 
 
     with st.spinner(ui_strings.PROFILE_V2_RUN_SPINNER.format(table=table_fqn)):
         try:
-            run_fn(session, table_fqn)
+            _call_helper_with_metadata(
+                run_fn,
+                session,
+                table_fqn,
+                metadata_db=metadata_db,
+                metadata_schema=metadata_schema,
+            )
         except Exception as exc:  # pragma: no cover - UI feedback only
             logging.exception("profiling:run_failed")
             return {
@@ -1044,8 +1114,24 @@ def _run_table_profile(helpers: Any, session: Any, table_fqn: str) -> Dict[str, 
                 "err": ui_strings.PROFILE_V2_RUN_ERROR.format(error=str(exc)),
             }
 
-    summary = summary_fn(session, table_fqn) if callable(summary_fn) else None
-    overview = overview_fn(session, table_fqn) if callable(overview_fn) else pd.DataFrame()
+    summary = None
+    if callable(summary_fn):
+        summary = _call_helper_with_metadata(
+            summary_fn,
+            session,
+            table_fqn,
+            metadata_db=metadata_db,
+            metadata_schema=metadata_schema,
+        )
+    overview = pd.DataFrame()
+    if callable(overview_fn):
+        overview = _call_helper_with_metadata(
+            overview_fn,
+            session,
+            table_fqn,
+            metadata_db=metadata_db,
+            metadata_schema=metadata_schema,
+        )
     column_rows = (
         overview.to_dict("records") if isinstance(overview, pd.DataFrame) else []
     )
@@ -1086,6 +1172,8 @@ def _load_metadata(
     helpers: Any,
     session: Any,
     table_fqn: str,
+    metadata_db: str,
+    metadata_schema: str,
 ) -> _ProfilingData:
     overview_grid: pd.DataFrame = pd.DataFrame()
     suggested_checks: pd.DataFrame = pd.DataFrame()
@@ -1095,7 +1183,13 @@ def _load_metadata(
     overview_fn = getattr(helpers, "get_overview_grid", None)
     if callable(overview_fn):
         try:
-            overview_grid = overview_fn(session, table_fqn)
+            overview_grid = _call_helper_with_metadata(
+                overview_fn,
+                session,
+                table_fqn,
+                metadata_db=metadata_db,
+                metadata_schema=metadata_schema,
+            )
         except Exception:  # pragma: no cover - Snowflake/IO failures
             logging.exception("profiling:overview_metadata_failed table=%s", table_fqn)
             overview_grid = pd.DataFrame()
@@ -1105,7 +1199,13 @@ def _load_metadata(
     classification_fn = effective_class_fn if callable(effective_class_fn) else column_class_fn
     if callable(classification_fn):
         try:
-            column_classification = classification_fn(session, table_fqn)
+            column_classification = _call_helper_with_metadata(
+                classification_fn,
+                session,
+                table_fqn,
+                metadata_db=metadata_db,
+                metadata_schema=metadata_schema,
+            )
         except Exception:  # pragma: no cover - Snowflake/IO failures
             logging.exception(
                 "profiling:classification_metadata_failed table=%s", table_fqn
@@ -1115,7 +1215,13 @@ def _load_metadata(
     suggestions_fn = getattr(helpers, "get_suggested_checks", None)
     if callable(suggestions_fn):
         try:
-            suggested_checks = suggestions_fn(session, table_fqn)
+            suggested_checks = _call_helper_with_metadata(
+                suggestions_fn,
+                session,
+                table_fqn,
+                metadata_db=metadata_db,
+                metadata_schema=metadata_schema,
+            )
         except Exception:  # pragma: no cover - Snowflake/IO failures
             logging.exception(
                 "profiling:suggestions_metadata_failed table=%s", table_fqn
@@ -1125,7 +1231,13 @@ def _load_metadata(
     run_history_fn = getattr(helpers, "fetch_recent_runs", None)
     if callable(run_history_fn):
         try:
-            recent_runs = run_history_fn(session, table_fqn)
+            recent_runs = _call_helper_with_metadata(
+                run_history_fn,
+                session,
+                table_fqn,
+                metadata_db=metadata_db,
+                metadata_schema=metadata_schema,
+            )
         except Exception:  # pragma: no cover - Snowflake/IO failures
             logging.exception("profiling:recent_runs_failed table=%s", table_fqn)
             recent_runs = pd.DataFrame()
@@ -1218,7 +1330,13 @@ def render_profile(
             st.session_state["busy_profiling"] = True
             st.session_state["freeze_view"] = True
             try:
-                res = _run_table_profile(helpers, session, fqn)
+                res = _run_table_profile(
+                    helpers,
+                    session,
+                    fqn,
+                    metadata_db,
+                    metadata_schema,
+                )
                 if res.get("ok"):
                     st.session_state["last_profile_summary"] = res.get("summary")
                     st.session_state["last_profile_rows"] = (
@@ -1254,7 +1372,13 @@ def render_profile(
                 ui_strings.PROFILE_V2_CLASSIFY_SPINNER.format(table=target_fqn)
             ):
                 try:
-                    classify_fn(session, target_fqn)
+                    _call_helper_with_metadata(
+                        classify_fn,
+                        session,
+                        target_fqn,
+                        metadata_db=metadata_db,
+                        metadata_schema=metadata_schema,
+                    )
                 except Exception as exc:
                     status_placeholder.error(
                         ui_strings.PROFILE_V2_CLASSIFY_ERROR.format(error=str(exc))
@@ -1275,8 +1399,17 @@ def render_profile(
             with st.spinner(
                 ui_strings.PROFILE_V2_SUGGESTIONS_SPINNER.format(table=target_fqn)
             ):
+                def _suggestions_runner(sess, fqn):
+                    return _call_helper_with_metadata(
+                        suggestions_fn,
+                        sess,
+                        fqn,
+                        metadata_db=metadata_db,
+                        metadata_schema=metadata_schema,
+                    )
+
                 _, error = _call_with_timeout(
-                    suggestions_fn,
+                    _suggestions_runner,
                     SUGGESTIONS_TIMEOUT_SECONDS,
                     session,
                     target_fqn,
@@ -1321,7 +1454,13 @@ def render_profile(
 
     with st.spinner(ui_strings.PROFILE_V2_LOAD_SPINNER):
         try:
-            data = _load_metadata(helpers, session, target_fqn)
+            data = _load_metadata(
+                helpers,
+                session,
+                target_fqn,
+                metadata_db,
+                metadata_schema,
+            )
         except Exception as exc:
             logging.exception(
                 "profiling:metadata_load_failed table=%s", target_fqn
@@ -1370,6 +1509,8 @@ def render_profile(
             helpers,
             session,
             st.session_state.get("profile_last_run_id"),
+            metadata_db,
+            metadata_schema,
         )
         _render_suggestion_sections(
             overview_grid,
@@ -1384,4 +1525,6 @@ def render_profile(
             target_fqn,
             helpers,
             session,
+            metadata_db,
+            metadata_schema,
         )
