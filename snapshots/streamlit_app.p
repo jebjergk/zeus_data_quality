@@ -31,6 +31,7 @@ from typing import Dict, List, Optional
 
 ALLOWED_PAGES = {"home", "cfg", "profile", "monitor", "monitor_v3", "docs", "rules"}
 
+
 if st.session_state["_rerun_count"] == 1:
     logging.info("route:init %s", current_view)
 
@@ -71,7 +72,12 @@ except Exception:
 from dq_config_view import open_config_editor, render_dq_config_v2
 from services import profiling_v2
 from services.state import get_state, set_state
-from utils.configs import get_metadata_namespace, get_proc_name
+from utils.configs import (
+    DEFAULT_METADATA_DB,
+    DEFAULT_METADATA_SCHEMA,
+    get_metadata_namespace,
+    get_proc_name,
+)
 from utils.flags import DEBUG_PROFILING
 from utils.meta import _q, list_configs
 from utils.version import build_sha, build_time
@@ -80,7 +86,24 @@ from views.monitor_v3_view import render_monitor_v3
 from views.profile_view import render_profile as render_profiling_view
 from views.rule_admin_view import render_rule_admin
 
-METADATA_DB, METADATA_SCHEMA = get_metadata_namespace()
+
+def _clean_namespace_value(value: Optional[str]) -> str:
+    if value is None:
+        return ""
+    return str(value).strip()
+
+
+def _resolve_metadata_namespace(metadata_db: Optional[str], metadata_schema: Optional[str]) -> tuple[str, str]:
+    cleaned_db = _clean_namespace_value(metadata_db)
+    cleaned_schema = _clean_namespace_value(metadata_schema)
+    return cleaned_db or DEFAULT_METADATA_DB, cleaned_schema or DEFAULT_METADATA_SCHEMA
+
+
+_initial_metadata_db, _initial_metadata_schema = get_metadata_namespace()
+METADATA_DB, METADATA_SCHEMA = _resolve_metadata_namespace(
+    _initial_metadata_db,
+    _initial_metadata_schema,
+)
 PROC_NAME = get_proc_name()
 RUN_RESULTS_TBL = f"{METADATA_DB}.{METADATA_SCHEMA}.DQ_RUN_RESULTS"
 # Derive metadata table FQNs locally to avoid NameError
@@ -102,9 +125,7 @@ if st.session_state.get("freeze_view"):
     logging.info("dispatch:hard-freeze → profile")
     st.session_state["active_view"] = "profile"
     st.session_state["page"] = "profile"  # keep router key in sync
-    from views.profile_view import render_profile
-
-    render_profile()
+    render_profiling_view(session, METADATA_DB, METADATA_SCHEMA, profiling_v2)
     st.stop()  # end this rerun so no later code can change view
 
 if DEBUG_PROFILING:
