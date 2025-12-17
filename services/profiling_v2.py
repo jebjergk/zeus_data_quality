@@ -101,24 +101,22 @@ def _require_feature_rows(session: Any, table_fqn: str) -> None:
 
 
 def _delete_existing_classifications(session: Any, table_fqn: str) -> None:
-    """Remove prior heuristic classifications for *table_fqn* before rewrite."""
+    """Remove prior classifications for *table_fqn* before rewrite."""
 
     sql = f"""
         DELETE FROM {COLUMN_CLASSIFICATION_TABLE}
         WHERE TABLE_FQN = ?
-          AND (SOURCE IS NULL OR SOURCE <> 'MANUAL')
     """
     _execute_sql(session, sql, params=[table_fqn]).collect()
 
 
 def _guard_duplicate_classifications(session: Any, table_fqn: str) -> None:
-    """Raise if more than one heuristic classification exists per column."""
+    """Raise if more than one classification exists per column."""
 
     sql = f"""
         SELECT COLUMN_NAME, COUNT(*) AS ROW_COUNT
         FROM {COLUMN_CLASSIFICATION_TABLE}
         WHERE TABLE_FQN = ?
-          AND (SOURCE IS NULL OR SOURCE <> 'MANUAL')
         GROUP BY 1
         HAVING COUNT(*) > 1
     """
