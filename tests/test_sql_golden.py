@@ -34,8 +34,9 @@ def test_run_profiling_v2_invokes_procedure():
     profiling_v2.run_profiling_v2(session, 'DB.SCHEMA.TABLE')
 
     assert session.calls, "Stored procedure call was not recorded"
-    sql, params = session.calls[0]
-    assert "DQ_PROFILE_FULL" in sql
+    proc_calls = [call for call in session.calls if "DQ_PROFILE_FULL" in call[0]]
+    assert proc_calls, "Profiling stored procedure call was not recorded"
+    sql, params = proc_calls[0]
     assert params == ["DB.SCHEMA.TABLE"]
     assert session.responses == []  # responses consumed
 

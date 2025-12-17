@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import pandas as pd
 from snowflake.snowpark import Session
@@ -15,15 +15,40 @@ DISCOVERY_DB = "ZEUS_ANALYTICS_SIMU"
 DISCOVERY_SCHEMA = "DISCOVERY"
 DISCOVERY_NAMESPACE = f"{DISCOVERY_DB}.{DISCOVERY_SCHEMA}"
 
-PROFILE_PROC = f"{DISCOVERY_NAMESPACE}.DQ_PROFILE_FULL"
-CLASSIFY_PROC = f"{DISCOVERY_NAMESPACE}.DQ_CLASSIFY_COLUMNS_HEURISTIC"
-SUGGESTIONS_PROC = f"{DISCOVERY_NAMESPACE}.DQ_APPLY_RULES"
-SUGGEST_CONFIG_PROC = f"{DISCOVERY_NAMESPACE}.DQ_SUGGEST_CONFIG_FROM_PROFILE"
-TABLE_SUMMARY_VIEW = f"{DISCOVERY_NAMESPACE}.DQ_TABLE_PROFILE_SUMMARY"
-COLUMN_FEATURES_TABLE = f"{DISCOVERY_NAMESPACE}.DQ_COLUMN_FEATURES"
-COLUMN_CLASSIFICATION_TABLE = f"{DISCOVERY_NAMESPACE}.DQ_COLUMN_CLASSIFICATION"
-SUGGESTED_CHECKS_TABLE = f"{DISCOVERY_NAMESPACE}.DQ_SUGGESTED_CHECKS"
-PROFILE_RUN_TABLE = f"{DISCOVERY_NAMESPACE}.DQ_PROFILE_RUN"
+
+def _clean_identifier(value: Optional[str]) -> str:
+    if value is None:
+        return ""
+    return str(value).strip()
+
+
+def _resolved_metadata(metadata_db: Optional[str], metadata_schema: Optional[str]) -> Tuple[str, str]:
+    db = _clean_identifier(metadata_db)
+    schema = _clean_identifier(metadata_schema)
+    if db and schema:
+        return db, schema
+    return DISCOVERY_DB, DISCOVERY_SCHEMA
+
+
+def _profiling_objects(
+    metadata_db: Optional[str] = None, metadata_schema: Optional[str] = None
+) -> Dict[str, str]:
+    db, schema = _resolved_metadata(metadata_db, metadata_schema)
+    namespace = f"{db}.{schema}"
+    return {
+        "metadata_db": db,
+        "metadata_schema": schema,
+        "namespace": namespace,
+        "profile_proc": f"{namespace}.DQ_PROFILE_FULL",
+        "classify_proc": f"{namespace}.DQ_CLASSIFY_COLUMNS_HEURISTIC",
+        "suggestions_proc": f"{namespace}.DQ_APPLY_RULES",
+        "suggest_config_proc": f"{namespace}.DQ_SUGGEST_CONFIG_FROM_PROFILE",
+        "table_summary_view": f"{namespace}.DQ_TABLE_PROFILE_SUMMARY",
+        "column_features_table": f"{namespace}.DQ_COLUMN_FEATURES",
+        "column_classification_table": f"{namespace}.DQ_COLUMN_CLASSIFICATION",
+        "suggested_checks_table": f"{namespace}.DQ_SUGGESTED_CHECKS",
+        "profile_run_table": f"{namespace}.DQ_PROFILE_RUN",
+    }
 
 
 class ProfilingError(RuntimeError):
@@ -78,14 +103,23 @@ def _friendly_error_message(exc: Exception) -> str:
     return message
 
 
-def _require_feature_rows(session: Any, table_fqn: str) -> None:
+def _require_feature_rows(
+    session: Any,
+    table_fqn: str,
+    metadata_db: Optional[str] = None,
+    metadata_schema: Optional[str] = None,
+) -> None:
     """Ensure column features were written for *table_fqn*.
 
     Raises :class:`ProfilingError` when no feature rows exist so the UI can
     surface actionable feedback instead of silently succeeding.
     """
 
-    sql = f"SELECT COUNT(*) AS ROW_COUNT FROM {COLUMN_FEATURES_TABLE} WHERE TABLE_FQN = ?"
+    tables = _profiling_objects(metadata_db, metadata_schema)
+    sql = (
+        f"SELECT COUNT(*) AS ROW_COUNT FROM {tables['column_features_table']} "
+        "WHERE TABLE_FQN = ?"
+    )
     counts = _fetch_dataframe(session, sql, params=[table_fqn])
     feature_count = int(counts.iloc[0]["ROW_COUNT"]) if not counts.empty else 0
     if feature_count <= 0:
@@ -100,22 +134,34 @@ def _require_feature_rows(session: Any, table_fqn: str) -> None:
         raise ProfilingError(message)
 
 
-def _delete_existing_classifications(session: Any, table_fqn: str) -> None:
+def _delete_existing_classifications(
+    session: Any,
+    table_fqn: str,
+    metadata_db: Optional[str] = None,
+    metadata_schema: Optional[str] = None,
+) -> None:
     """Remove prior classifications for *table_fqn* before rewrite."""
 
+    tables = _profiling_objects(metadata_db, metadata_schema)
     sql = f"""
-        DELETE FROM {COLUMN_CLASSIFICATION_TABLE}
+        DELETE FROM {tables['column_classification_table']}
         WHERE TABLE_FQN = ?
     """
     _execute_sql(session, sql, params=[table_fqn]).collect()
 
 
-def _guard_duplicate_classifications(session: Any, table_fqn: str) -> None:
+def _guard_duplicate_classifications(
+    session: Any,
+    table_fqn: str,
+    metadata_db: Optional[str] = None,
+    metadata_schema: Optional[str] = None,
+) -> None:
     """Raise if more than one classification exists per column."""
 
+    tables = _profiling_objects(metadata_db, metadata_schema)
     sql = f"""
         SELECT COLUMN_NAME, COUNT(*) AS ROW_COUNT
-        FROM {COLUMN_CLASSIFICATION_TABLE}
+        FROM {tables['column_classification_table']}
         WHERE TABLE_FQN = ?
         GROUP BY 1
         HAVING COUNT(*) > 1
@@ -135,19 +181,29 @@ def _guard_duplicate_classifications(session: Any, table_fqn: str) -> None:
     )
 
 
-def run_profiling_v2(session: Any, table_fqn: str) -> None:
+def run_profiling_v2(
+    session: Any,
+    table_fqn: str,
+    metadata_db: Optional[str] = None,
+    metadata_schema: Optional[str] = None,
+) -> None:
     """Execute the Profiling v2 stored procedure for *table_fqn*."""
 
     normalized = _normalize_table_fqn(table_fqn)
     if not normalized:
         raise ProfilingError("Fully-qualified table name is required")
 
+    tables = _profiling_objects(metadata_db, metadata_schema)
     LOGGER.info("profiling_v2:call proc target=%s", normalized)
     try:
-        _delete_existing_classifications(session, normalized)
-        _execute_sql(session, f"CALL {PROFILE_PROC}(?)", params=[normalized]).collect()
-        _require_feature_rows(session, normalized)
-        _guard_duplicate_classifications(session, normalized)
+        _delete_existing_classifications(session, normalized, metadata_db, metadata_schema)
+        _execute_sql(
+            session,
+            f"CALL {tables['profile_proc']}(?)",
+            params=[normalized],
+        ).collect()
+        _require_feature_rows(session, normalized, metadata_db, metadata_schema)
+        _guard_duplicate_classifications(session, normalized, metadata_db, metadata_schema)
     except Exception as exc:  # pragma: no cover - Snowflake specific failures
         message = _friendly_error_message(exc)
         LOGGER.exception("profiling_v2:proc_failed target=%s", normalized)
@@ -156,7 +212,12 @@ def run_profiling_v2(session: Any, table_fqn: str) -> None:
     # Ensure suggested checks are refreshed immediately after profiling so the
     # overview grid can surface rule metadata without requiring a separate
     # button click.
-    run_suggestions_only(session, normalized)
+    run_suggestions_only(
+        session,
+        normalized,
+        metadata_db=metadata_db,
+        metadata_schema=metadata_schema,
+    )
 
 
 # Backwards compatibility for earlier callers/tests.
@@ -168,6 +229,8 @@ def _run_single_stage(
     table_fqn: str,
     proc_name: str,
     failure_message: str,
+    metadata_db: Optional[str] = None,
+    metadata_schema: Optional[str] = None,
 ) -> None:
     normalized = _normalize_table_fqn(table_fqn)
     if not normalized:
@@ -185,33 +248,48 @@ def _run_single_stage(
         raise ProfilingError(f"{failure_message}: {message}") from exc
 
 
-def run_classification_only(session: Any, table_fqn: str) -> None:
+def run_classification_only(
+    session: Any,
+    table_fqn: str,
+    metadata_db: Optional[str] = None,
+    metadata_schema: Optional[str] = None,
+) -> None:
     """Re-run only the column classification stage for *table_fqn*."""
 
     normalized = _normalize_table_fqn(table_fqn)
     if not normalized:
         raise ProfilingError("Fully-qualified table name is required")
 
-    _delete_existing_classifications(session, normalized)
+    tables = _profiling_objects(metadata_db, metadata_schema)
+
+    _delete_existing_classifications(session, normalized, metadata_db, metadata_schema)
     _run_single_stage(
         session,
         normalized,
-        CLASSIFY_PROC,
+        tables["classify_proc"],
         "Classification run failed",
+        metadata_db=metadata_db,
+        metadata_schema=metadata_schema,
     )
-    _guard_duplicate_classifications(session, normalized)
+    _guard_duplicate_classifications(session, normalized, metadata_db, metadata_schema)
 
 
-def run_suggestions_only(session: Any, table_fqn: str) -> None:
+def run_suggestions_only(
+    session: Any,
+    table_fqn: str,
+    metadata_db: Optional[str] = None,
+    metadata_schema: Optional[str] = None,
+) -> None:
     """Execute only the DQ_APPLY_RULES stage for *table_fqn*."""
 
     normalized = _normalize_table_fqn(table_fqn)
     if not normalized:
         raise ProfilingError("Fully-qualified table name is required")
 
+    tables = _profiling_objects(metadata_db, metadata_schema)
     LOGGER.info("profiling_v2:call apply_rules target=%s", normalized)
     try:
-        sql = f"CALL {SUGGESTIONS_PROC}(?)"
+        sql = f"CALL {tables['suggestions_proc']}(?)"
         _execute_sql(session, sql, params=[normalized]).collect()
         LOGGER.info("profiling_v2:apply_rules_complete target=%s", normalized)
     except Exception as exc:  # pragma: no cover - Snowflake specific failures
@@ -226,6 +304,8 @@ def suggest_config_from_profile(
     profile_run_id: Any,
     included_columns: Iterable[str],
     config_name: Optional[str] = None,
+    metadata_db: Optional[str] = None,
+    metadata_schema: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Call ``DQ_SUGGEST_CONFIG_FROM_PROFILE`` using current profiling context."""
 
@@ -241,6 +321,8 @@ def suggest_config_from_profile(
         raise ProfilingError("At least one included column is required")
 
     params = [profile_run_id, normalized, json.dumps(columns), config_name]
+    tables = _profiling_objects(metadata_db, metadata_schema)
+
     LOGGER.info(
         "profiling_v2:suggest_config target=%s profile_run_id=%s columns=%s",
         normalized,
@@ -250,7 +332,7 @@ def suggest_config_from_profile(
     try:
         rows = _execute_sql(
             session,
-            f"CALL {SUGGEST_CONFIG_PROC}(?, ?, PARSE_JSON(?), ?)",
+            f"CALL {tables['suggest_config_proc']}(?, ?, PARSE_JSON(?), ?)",
             params=params,
         ).collect()
     except Exception as exc:  # pragma: no cover - Snowflake specific failures
@@ -412,14 +494,20 @@ def _sort_summary_frame(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def get_table_profile_summary(session: Any, table_fqn: str) -> pd.DataFrame:
+def get_table_profile_summary(
+    session: Any,
+    table_fqn: str,
+    metadata_db: Optional[str] = None,
+    metadata_schema: Optional[str] = None,
+) -> pd.DataFrame:
     """Return all profiling summary rows for the table."""
 
     normalized = _normalize_table_fqn(table_fqn)
     if not normalized:
         return pd.DataFrame()
 
-    sql = f"SELECT * FROM {TABLE_SUMMARY_VIEW} WHERE TABLE_FQN = ?"
+    tables = _profiling_objects(metadata_db, metadata_schema)
+    sql = f"SELECT * FROM {tables['table_summary_view']} WHERE TABLE_FQN = ?"
     try:
         return _fetch_dataframe(session, sql, params=[normalized])
     except Exception as exc:  # pragma: no cover - Snowflake specific failures
@@ -427,30 +515,41 @@ def get_table_profile_summary(session: Any, table_fqn: str) -> pd.DataFrame:
         return pd.DataFrame()
 
 
-def fetch_table_summary(session: Any, table_fqn: str) -> Dict[str, Any]:
+def fetch_table_summary(
+    session: Any,
+    table_fqn: str,
+    metadata_db: Optional[str] = None,
+    metadata_schema: Optional[str] = None,
+) -> Dict[str, Any]:
     """Return the most recent table-level profiling summary."""
 
     normalized = _normalize_table_fqn(table_fqn)
     if not normalized:
         return {}
 
-    df = get_table_profile_summary(session, normalized)
+    df = get_table_profile_summary(session, normalized, metadata_db, metadata_schema)
     if df.empty:
         return {}
     latest = _sort_summary_frame(df).iloc[0]
     return latest.to_dict()
 
 
-def get_column_features(session: Any, table_fqn: str) -> pd.DataFrame:
+def get_column_features(
+    session: Any,
+    table_fqn: str,
+    metadata_db: Optional[str] = None,
+    metadata_schema: Optional[str] = None,
+) -> pd.DataFrame:
     """Return profiling features for each column on *table_fqn*."""
 
     normalized = _normalize_table_fqn(table_fqn)
     if not normalized:
         return pd.DataFrame()
 
+    tables = _profiling_objects(metadata_db, metadata_schema)
     sql = f"""
         SELECT *
-        FROM {COLUMN_FEATURES_TABLE}
+        FROM {tables['column_features_table']}
         WHERE TABLE_FQN = ?
         ORDER BY ORDINAL_POSITION
     """
@@ -468,22 +567,33 @@ def get_column_features(session: Any, table_fqn: str) -> pd.DataFrame:
         return pd.DataFrame()
 
 
-def fetch_column_features(session: Any, table_fqn: str) -> pd.DataFrame:
+def fetch_column_features(
+    session: Any,
+    table_fqn: str,
+    metadata_db: Optional[str] = None,
+    metadata_schema: Optional[str] = None,
+) -> pd.DataFrame:
     """Backwards-compatible wrapper for :func:`get_column_features`."""
 
-    return get_column_features(session, table_fqn)
+    return get_column_features(session, table_fqn, metadata_db, metadata_schema)
 
 
-def get_column_classification(session: Any, table_fqn: str) -> pd.DataFrame:
+def get_column_classification(
+    session: Any,
+    table_fqn: str,
+    metadata_db: Optional[str] = None,
+    metadata_schema: Optional[str] = None,
+) -> pd.DataFrame:
     """Return semantic classification rows ordered for UI rendering."""
 
     normalized = _normalize_table_fqn(table_fqn)
     if not normalized:
         return pd.DataFrame()
 
+    tables = _profiling_objects(metadata_db, metadata_schema)
     sql = f"""
         SELECT *
-        FROM {COLUMN_CLASSIFICATION_TABLE}
+        FROM {tables['column_classification_table']}
         WHERE TABLE_FQN = ?
         ORDER BY COLUMN_NAME, SOURCE DESC, CLASSIFIED_AT DESC
     """
@@ -496,13 +606,23 @@ def get_column_classification(session: Any, table_fqn: str) -> pd.DataFrame:
         return pd.DataFrame()
 
 
-def fetch_column_classifications(session: Any, table_fqn: str) -> pd.DataFrame:
+def fetch_column_classifications(
+    session: Any,
+    table_fqn: str,
+    metadata_db: Optional[str] = None,
+    metadata_schema: Optional[str] = None,
+) -> pd.DataFrame:
     """Backwards-compatible wrapper for :func:`get_column_classification`."""
 
-    return get_column_classification(session, table_fqn)
+    return get_column_classification(session, table_fqn, metadata_db, metadata_schema)
 
 
-def get_effective_classification(session: Session, table_fqn: str) -> pd.DataFrame:
+def get_effective_classification(
+    session: Session,
+    table_fqn: str,
+    metadata_db: Optional[str] = None,
+    metadata_schema: Optional[str] = None,
+) -> pd.DataFrame:
     """
     Return one row per column for the latest classification (manual or heuristic).
     Used by the column editors in the Profiling v2 UI.
@@ -512,6 +632,7 @@ def get_effective_classification(session: Session, table_fqn: str) -> pd.DataFra
     if not normalized:
         return pd.DataFrame()
 
+    tables = _profiling_objects(metadata_db, metadata_schema)
     sql = f"""
         WITH ranked AS (
             SELECT
@@ -526,7 +647,7 @@ def get_effective_classification(session: Session, table_fqn: str) -> pd.DataFra
                     PARTITION BY TABLE_FQN, COLUMN_NAME
                     ORDER BY CLASSIFIED_AT DESC
                 ) AS RN
-            FROM {COLUMN_CLASSIFICATION_TABLE}
+            FROM {tables['column_classification_table']}
             WHERE TABLE_FQN = :1
         )
         SELECT
@@ -557,6 +678,8 @@ def save_manual_classification(
     content_type: Optional[str],
     semantic_role: Optional[str],
     actor: Optional[str] = None,
+    metadata_db: Optional[str] = None,
+    metadata_schema: Optional[str] = None,
 ) -> None:
     """Persist a manual classification override for *column_name*."""
 
@@ -576,8 +699,10 @@ def save_manual_classification(
             column,
         )
 
+    tables = _profiling_objects(metadata_db, metadata_schema)
+
     sql = f"""
-        INSERT INTO {COLUMN_CLASSIFICATION_TABLE} (
+        INSERT INTO {tables['column_classification_table']} (
             TABLE_FQN,
             COLUMN_NAME,
             CONTENT_TYPE,
@@ -612,16 +737,22 @@ def save_manual_classification(
         raise ProfilingError("Failed to save manual classification") from exc
 
 
-def get_suggested_checks(session: Any, table_fqn: str) -> pd.DataFrame:
+def get_suggested_checks(
+    session: Any,
+    table_fqn: str,
+    metadata_db: Optional[str] = None,
+    metadata_schema: Optional[str] = None,
+) -> pd.DataFrame:
     """Return suggested DQ checks for each column."""
 
     normalized = _normalize_table_fqn(table_fqn)
     if not normalized:
         return pd.DataFrame()
 
+    tables = _profiling_objects(metadata_db, metadata_schema)
     sql = f"""
         SELECT *
-        FROM {SUGGESTED_CHECKS_TABLE}
+        FROM {tables['suggested_checks_table']}
         WHERE TABLE_FQN = ?
         ORDER BY COLUMN_NAME, RULE_ID
     """
@@ -632,7 +763,12 @@ def get_suggested_checks(session: Any, table_fqn: str) -> pd.DataFrame:
         return pd.DataFrame()
 
 
-def get_overview_grid(session: Session, table_fqn: str) -> pd.DataFrame:
+def get_overview_grid(
+    session: Session,
+    table_fqn: str,
+    metadata_db: Optional[str] = None,
+    metadata_schema: Optional[str] = None,
+) -> pd.DataFrame:
     """
     Unified overview grid for Profiling v2:
     - One row per column
@@ -675,9 +811,11 @@ def get_overview_grid(session: Session, table_fqn: str) -> pd.DataFrame:
         except Exception:
             return str(value)
 
+    tables = _profiling_objects(metadata_db, metadata_schema)
+
     classification_cte = f"""
         SELECT *
-        FROM {COLUMN_CLASSIFICATION_TABLE}
+        FROM {tables['column_classification_table']}
         WHERE TABLE_FQN = ?
         QUALIFY ROW_NUMBER() OVER (
             PARTITION BY TABLE_FQN, COLUMN_NAME
@@ -690,7 +828,7 @@ def get_overview_grid(session: Session, table_fqn: str) -> pd.DataFrame:
             {classification_cte}
         )
         SELECT f.*, c.CONTENT_TYPE, c.SEMANTIC_ROLE, c.SOURCE, c.CONFIDENCE, c.CLASSIFIED_AT
-        FROM {COLUMN_FEATURES_TABLE} f
+        FROM {tables['column_features_table']} f
         LEFT JOIN class_dedup c
           ON f.TABLE_FQN = c.TABLE_FQN
          AND f.COLUMN_NAME = c.COLUMN_NAME
@@ -706,17 +844,32 @@ def get_overview_grid(session: Session, table_fqn: str) -> pd.DataFrame:
     )
     feature_row_count = len(features)
     classification_row_count = len(classification)
+    feature_sample = (
+        features["COLUMN_NAME"].dropna().astype(str).head(3).tolist()
+        if "COLUMN_NAME" in features.columns
+        else []
+    )
+
+    debug_counts = {
+        "feature_row_count": feature_row_count,
+        "classification_row_count": classification_row_count,
+        "columns_rendered": 0,
+        "metadata_db": tables["metadata_db"],
+        "metadata_schema": tables["metadata_schema"],
+        "features_table_fqn": tables["column_features_table"],
+        "class_table_fqn": tables["column_classification_table"],
+        "table_fqn_filter": normalized,
+        "feature_sample_columns": feature_sample,
+    }
 
     if features.empty:
         empty_df = pd.DataFrame(columns=overview_columns)
-        empty_df.attrs["dq_debug_counts"] = {
-            "feature_row_count": feature_row_count,
-            "classification_row_count": classification_row_count,
-            "columns_rendered": 0,
-        }
+        empty_df.attrs["dq_debug_counts"] = debug_counts
         return empty_df
 
-    suggestions = _normalize_dataframe_columns(get_suggested_checks(session, normalized))
+    suggestions = _normalize_dataframe_columns(
+        get_suggested_checks(session, normalized, metadata_db, metadata_schema)
+    )
 
     suggestion_lookup: Dict[str, Dict[str, Any]] = {}
     if not suggestions.empty and "COLUMN_NAME" in suggestions.columns:
@@ -783,18 +936,20 @@ def get_overview_grid(session: Session, table_fqn: str) -> pd.DataFrame:
         )
 
     overview = pd.DataFrame.from_records(overview_rows, columns=overview_columns)
-    overview.attrs["dq_debug_counts"] = {
-        "feature_row_count": feature_row_count,
-        "classification_row_count": classification_row_count,
-        "columns_rendered": len(overview_rows),
-    }
+    debug_counts["columns_rendered"] = len(overview_rows)
+    overview.attrs["dq_debug_counts"] = debug_counts
     return overview
 
 
-def fetch_suggested_checks(session: Any, table_fqn: str) -> pd.DataFrame:
+def fetch_suggested_checks(
+    session: Any,
+    table_fqn: str,
+    metadata_db: Optional[str] = None,
+    metadata_schema: Optional[str] = None,
+) -> pd.DataFrame:
     """Backwards-compatible wrapper for :func:`get_suggested_checks`."""
 
-    return get_suggested_checks(session, table_fqn)
+    return get_suggested_checks(session, table_fqn, metadata_db, metadata_schema)
 
 
 def _filter_column_records(df: pd.DataFrame, column_name: str) -> pd.DataFrame:
@@ -837,7 +992,13 @@ def _pluck_fields(record: Dict[str, Any], fields: Iterable[str]) -> Dict[str, An
     return result
 
 
-def get_column_detail(session: Any, table_fqn: str, column_name: str) -> Dict[str, Any]:
+def get_column_detail(
+    session: Any,
+    table_fqn: str,
+    column_name: str,
+    metadata_db: Optional[str] = None,
+    metadata_schema: Optional[str] = None,
+) -> Dict[str, Any]:
     """Return profiling, classification, and suggestion metadata for one column."""
 
     normalized = _normalize_table_fqn(table_fqn)
@@ -845,9 +1006,11 @@ def get_column_detail(session: Any, table_fqn: str, column_name: str) -> Dict[st
     if not normalized or not column:
         return {}
 
-    features = get_column_features(session, normalized)
-    classification = get_effective_classification(session, normalized)
-    suggestions = get_suggested_checks(session, normalized)
+    features = get_column_features(session, normalized, metadata_db, metadata_schema)
+    classification = get_effective_classification(
+        session, normalized, metadata_db, metadata_schema
+    )
+    suggestions = get_suggested_checks(session, normalized, metadata_db, metadata_schema)
     feature_record = _first_column_record(features, column)
     classification_record = _first_column_record(classification, column)
     suggestion_records = _suggested_checks_for_column(suggestions, column)
@@ -889,12 +1052,20 @@ def get_column_detail(session: Any, table_fqn: str, column_name: str) -> Dict[st
     return detail
 
 
-def fetch_recent_runs(session: Any, table_fqn: str, limit: int = 10) -> pd.DataFrame:
+def fetch_recent_runs(
+    session: Any,
+    table_fqn: str,
+    limit: int = 10,
+    metadata_db: Optional[str] = None,
+    metadata_schema: Optional[str] = None,
+) -> pd.DataFrame:
     """Return recent profiling runs for the table."""
 
     normalized = _normalize_table_fqn(table_fqn)
     if not normalized:
         return pd.DataFrame()
+
+    tables = _profiling_objects(metadata_db, metadata_schema)
 
     sql = f"""
         SELECT
@@ -913,7 +1084,7 @@ def fetch_recent_runs(session: Any, table_fqn: str, limit: int = 10) -> pd.DataF
             SAMPLE_EST_ROWS,
             CREATED_AT,
             UPDATED_AT
-        FROM {PROFILE_RUN_TABLE}
+        FROM {tables['profile_run_table']}
         WHERE TABLE_FQN = ?
         ORDER BY STARTED_AT DESC
         LIMIT {max(1, limit)}
