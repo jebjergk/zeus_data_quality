@@ -13,12 +13,14 @@ import streamlit as st, logging
 from services import profiling_v2 as profiling_service
 from ui import strings as ui_strings
 from views.table_picker import stateless_table_picker
+from utils.configs import DEFAULT_METADATA_DB, DEFAULT_METADATA_SCHEMA
 
 st.session_state.setdefault("busy_profiling", False)
 st.session_state.setdefault("freeze_view", False)
 st.session_state.setdefault("last_profile_summary", None)
 st.session_state.setdefault("last_profile_rows", [])
 st.session_state.setdefault("last_profile_err", None)
+st.session_state.setdefault("profile_debug_counts", {})
 
 SUGGESTIONS_TIMEOUT_SECONDS = 60
 
@@ -77,6 +79,14 @@ def _latest_classifications(class_df: pd.DataFrame) -> Dict[str, Dict[str, Any]]
         if column:
             result[str(column)] = record
     return result
+
+
+def _resolve_metadata_namespace(
+    metadata_db: Optional[str], metadata_schema: Optional[str]
+) -> tuple[str, str]:
+    db = str(metadata_db or "").strip()
+    schema = str(metadata_schema or "").strip()
+    return db or DEFAULT_METADATA_DB, schema or DEFAULT_METADATA_SCHEMA
 
 
 def _truncate_details(value: Any, max_length: int = 500) -> str:
@@ -642,20 +652,44 @@ def _render_suggest_config_action(
     _render_suggest_config_summary(summary or {}, table_fqn, config_name)
 
 
-def _render_overview_debug(overview: pd.DataFrame) -> None:
+def _render_overview_debug(
+    overview: pd.DataFrame,
+    metadata_db: str,
+    metadata_schema: str,
+    table_fqn: str,
+) -> None:
     debug_counts = {}
     if isinstance(overview, pd.DataFrame):
         debug_counts = overview.attrs.get("dq_debug_counts", {}) or {}
 
+    resolved_db, resolved_schema = _resolve_metadata_namespace(
+        debug_counts.get("metadata_db") or metadata_db,
+        debug_counts.get("metadata_schema") or metadata_schema,
+    )
+
     feature_count = debug_counts.get("feature_row_count")
+    if feature_count is None and isinstance(overview, pd.DataFrame):
+        feature_count = len(overview)
+
     classification_count = debug_counts.get("classification_row_count")
     rendered_count = debug_counts.get("columns_rendered")
-    metadata_db = debug_counts.get("metadata_db")
-    metadata_schema = debug_counts.get("metadata_schema")
-    features_table_fqn = debug_counts.get("features_table_fqn")
-    class_table_fqn = debug_counts.get("class_table_fqn")
-    table_fqn_filter = debug_counts.get("table_fqn_filter")
+    if rendered_count is None and isinstance(overview, pd.DataFrame):
+        rendered_count = len(overview)
+
+    features_table_fqn = debug_counts.get("features_table_fqn") or (
+        f"{resolved_db}.{resolved_schema}.DQ_COLUMN_FEATURES"
+    )
+    class_table_fqn = debug_counts.get("class_table_fqn") or (
+        f"{resolved_db}.{resolved_schema}.DQ_COLUMN_CLASSIFICATION"
+    )
+    table_fqn_filter = debug_counts.get("table_fqn_filter") or table_fqn
     feature_sample_columns = debug_counts.get("feature_sample_columns") or []
+
+    if not feature_sample_columns and isinstance(overview, pd.DataFrame):
+        if "column_name" in overview.columns:
+            feature_sample_columns = (
+                overview["column_name"].dropna().astype(str).head(3).tolist()
+            )
 
     with st.expander("Profiling debug", expanded=False):
         st.caption("Profiling grid source counts")
@@ -664,15 +698,12 @@ def _render_overview_debug(overview: pd.DataFrame) -> None:
             "classification_row_count: "
             f"{classification_count if classification_count is not None else 0}"
         )
-        fallback_rendered = len(overview) if isinstance(overview, pd.DataFrame) else 0
-        st.text(
-            f"columns_rendered: {rendered_count if rendered_count is not None else fallback_rendered}"
-        )
+        st.text(f"columns_rendered: {rendered_count if rendered_count is not None else 0}")
         st.caption("Resolved metadata sources")
-        st.text(f"metadata_db: {metadata_db or '-'}")
-        st.text(f"metadata_schema: {metadata_schema or '-'}")
-        st.text(f"features_table_fqn: {features_table_fqn or '-'}")
-        st.text(f"class_table_fqn: {class_table_fqn or '-'}")
+        st.text(f"metadata_db: {resolved_db}")
+        st.text(f"metadata_schema: {resolved_schema}")
+        st.text(f"features_table_fqn: {features_table_fqn}")
+        st.text(f"class_table_fqn: {class_table_fqn}")
         st.text(f"table_fqn_filter: {table_fqn_filter or '-'}")
         sample_text = ", ".join(feature_sample_columns) if feature_sample_columns else "-"
         st.text(f"feature_sample_columns: {sample_text}")
@@ -1123,6 +1154,7 @@ def _run_table_profile(
             metadata_db=metadata_db,
             metadata_schema=metadata_schema,
         )
+    debug_counts: Dict[str, Any] = {}
     overview = pd.DataFrame()
     if callable(overview_fn):
         overview = _call_helper_with_metadata(
@@ -1132,6 +1164,8 @@ def _run_table_profile(
             metadata_db=metadata_db,
             metadata_schema=metadata_schema,
         )
+    if isinstance(overview, pd.DataFrame):
+        debug_counts = overview.attrs.get("dq_debug_counts", {}) or {}
     column_rows = (
         overview.to_dict("records") if isinstance(overview, pd.DataFrame) else []
     )
@@ -1143,12 +1177,14 @@ def _run_table_profile(
             "ok": False,
             "summary": summary,
             "column_rows": [],
+            "debug_counts": debug_counts,
             "err": warning,
         }
     return {
         "ok": True,
         "summary": summary,
         "column_rows": column_rows,
+        "debug_counts": debug_counts,
         "err": None,
     }
 
@@ -1270,6 +1306,10 @@ def render_profile(
 ) -> None:
     """Render the Profiling v2 UI."""
 
+    metadata_db, metadata_schema = _resolve_metadata_namespace(
+        metadata_db, metadata_schema
+    )
+
     st.session_state.setdefault("busy_profiling", False)
     st.session_state.setdefault("freeze_view", False)
 
@@ -1342,6 +1382,9 @@ def render_profile(
                     st.session_state["last_profile_rows"] = (
                         res.get("column_rows") or []
                     )
+                    st.session_state["profile_debug_counts"] = (
+                        res.get("debug_counts") or {}
+                    )
                     st.session_state["last_profile_err"] = None
                     st.session_state["profile_data_nonce"] += 1
                     st.session_state["profile_last_table"] = fqn
@@ -1353,6 +1396,9 @@ def render_profile(
                     st.session_state["last_profile_summary"] = None
                     st.session_state["last_profile_rows"] = []
                     st.session_state["last_profile_err"] = res.get("err")
+                    st.session_state["profile_debug_counts"] = (
+                        res.get("debug_counts") or {}
+                    )
             except Exception as e:
                 logging.exception("profiling:unhandled")
                 st.session_state["last_profile_summary"] = None
@@ -1480,12 +1526,21 @@ def render_profile(
     st.session_state["profile_last_run_id"] = _extract_last_run_id(data.recent_runs)
     st.session_state["profile_last_run_info"] = data.run_info
 
+    debug_counts_cache = st.session_state.get("profile_debug_counts") or {}
+    if isinstance(data.overview_grid, pd.DataFrame):
+        data_debug_counts = data.overview_grid.attrs.get("dq_debug_counts", {}) or {}
+        if data_debug_counts:
+            debug_counts_cache = data_debug_counts
+    st.session_state["profile_debug_counts"] = debug_counts_cache
+
     cached_rows = st.session_state.get("last_profile_rows") or []
     overview_grid = (
         pd.DataFrame(cached_rows)
         if cached_rows
         else data.overview_grid
     )
+    if cached_rows and debug_counts_cache:
+        overview_grid.attrs["dq_debug_counts"] = debug_counts_cache
     cached_run_info = st.session_state.get("last_profile_summary")
     run_info = (
         cached_run_info
@@ -1502,7 +1557,7 @@ def render_profile(
     )
 
     with tab_overview:
-        _render_overview_debug(overview_grid)
+        _render_overview_debug(overview_grid, metadata_db, metadata_schema, target_fqn)
         _render_suggest_config_action(
             overview_grid,
             target_fqn,
