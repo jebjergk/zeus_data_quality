@@ -681,7 +681,7 @@ def get_overview_grid(session: Session, table_fqn: str) -> pd.DataFrame:
         WHERE TABLE_FQN = ?
         QUALIFY ROW_NUMBER() OVER (
             PARTITION BY TABLE_FQN, COLUMN_NAME
-            ORDER BY UPDATED_AT DESC NULLS LAST
+            ORDER BY CLASSIFIED_AT DESC NULLS LAST
         ) = 1
     """
 
