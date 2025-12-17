@@ -160,7 +160,7 @@ BEGIN
     ) DO*/
 
     v_rs := (EXECUTE IMMEDIATE
-            'SELECT COLUMN_NAME, DATA_TYPE FROM identifier(?) where TABLE_SCHEMA = ? AND TABLE_NAME = ? ORDER BY ORDINAL_POSITION'
+            'SELECT COLUMN_NAME, ORDINAL_POSITION, DATA_TYPE FROM identifier(?) where TABLE_SCHEMA = ? AND TABLE_NAME = ? ORDER BY ORDINAL_POSITION'
             USING (v_info_schema_columns, v_schema_name, v_table_name));
     
     FOR rec in v_rs DO
@@ -176,6 +176,7 @@ BEGIN
             '       ' || :v_table_literal || ' AS TABLE_NAME,' || CHR(10) ||
             '       ' || :v_table_fqn_literal || ' AS TABLE_FQN,' || CHR(10) ||
             '       ' || :v_col_literal || ' AS COLUMN_NAME,' || CHR(10) ||
+            '       ' || rec.ORDINAL_POSITION || ' AS ORDINAL_POSITION,' || CHR(10) ||
             '       ' || :v_data_type_literal || ' AS DATA_TYPE,' || CHR(10) ||
             '       ' || :v_profiled_rows || ' AS ROW_COUNT,' || CHR(10) ||
             '       NULL_COUNT,' || CHR(10) ||
@@ -219,6 +220,7 @@ BEGIN
             TABLE_NAME,
             TABLE_FQN,
             COLUMN_NAME,
+            ORDINAL_POSITION,
             DATA_TYPE,
             ROW_COUNT,
             NULL_COUNT,
