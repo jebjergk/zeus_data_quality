@@ -23,6 +23,22 @@ st.session_state.setdefault("last_profile_err", None)
 st.session_state.setdefault("profile_debug_counts", {})
 
 SUGGESTIONS_TIMEOUT_SECONDS = 60
+_OVERVIEW_INTERNAL_COLUMNS = [
+    "include_in_dq_config",
+    "column_name",
+    "data_type",
+    "null_info",
+    "distinct_info",
+    "min_value",
+    "max_value",
+    "length_info",
+    "rule_id",
+    "check_type",
+    "severity",
+    "rationale",
+    "confidence",
+    "has_suggestion",
+]
 
 
 def _call_with_timeout(func, timeout_seconds: float, *args, **kwargs):
@@ -152,6 +168,17 @@ def _format_percent(value: Any) -> str:
     if pd.isna(numeric):
         return ui_strings.PROFILE_V2_VALUE_UNKNOWN
     return f"{numeric:.2f}%"
+
+
+def _normalize_checkbox_value(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return False
+    if isinstance(value, (int, float)):
+        return bool(value)
+    text = str(value).strip().lower()
+    return text in {"true", "t", "yes", "y", "1"}
 
 
 def _latest_run_record(run_history: pd.DataFrame) -> Optional[pd.Series]:
@@ -521,6 +548,89 @@ def _resolve_included_columns(table_fqn: str, overview: pd.DataFrame) -> List[st
     return _selected_suggestion_columns(table_fqn)
 
 
+def _prepare_overview_frame(overview: pd.DataFrame) -> pd.DataFrame:
+    if not isinstance(overview, pd.DataFrame) or overview.empty:
+        return pd.DataFrame(columns=_OVERVIEW_INTERNAL_COLUMNS)
+
+    working = overview.copy()
+    working.columns = [str(column).lower() for column in working.columns]
+    for column in _OVERVIEW_INTERNAL_COLUMNS:
+        if column not in working.columns:
+            working[column] = None
+
+    working["column_name"] = working["column_name"].astype(str)
+    working["has_suggestion"] = working["has_suggestion"].fillna(False).apply(bool)
+    working["include_in_dq_config"] = working["include_in_dq_config"].apply(
+        _normalize_checkbox_value
+    )
+    working.loc[~working["has_suggestion"], "include_in_dq_config"] = False
+    working = working.set_index("column_name", drop=False)
+
+    ordered = working[_OVERVIEW_INTERNAL_COLUMNS]
+    ordered.attrs = working.attrs
+    return ordered
+
+
+def _overview_grid_widget_key(table_fqn: str, nonce: int) -> str:
+    safe_table = (table_fqn or "table").replace(".", "_").replace(" ", "_")
+    return f"profile_overview_grid_{safe_table}_{nonce}"
+
+
+def _render_overview_grid(
+    overview: pd.DataFrame, suggestions: pd.DataFrame, table_fqn: str
+) -> pd.DataFrame:
+    st.subheader(ui_strings.PROFILE_V2_COLUMNS_SUBHEADER)
+    prepared = _prepare_overview_frame(overview)
+
+    debug_counts = prepared.attrs.get("dq_debug_counts", {}) or {}
+    suggestion_rows = len(suggestions) if isinstance(suggestions, pd.DataFrame) else 0
+    debug_counts["suggestion_row_count"] = suggestion_rows
+    debug_counts["grid_row_count"] = len(prepared)
+    if "feature_row_count" not in debug_counts:
+        debug_counts["feature_row_count"] = len(prepared)
+    prepared.attrs["dq_debug_counts"] = debug_counts
+
+    if prepared.empty:
+        st.info(ui_strings.PROFILE_V2_NO_FEATURES.format(table=table_fqn))
+        return prepared
+
+    column_config = {
+        "include_in_dq_config": st.column_config.CheckboxColumn(
+            "Include", help="Flag column for config suggestions", default=False
+        ),
+        "column_name": st.column_config.TextColumn("Column", disabled=True),
+        "data_type": st.column_config.TextColumn("Type", disabled=True),
+        "null_info": st.column_config.TextColumn("Nulls", disabled=True),
+        "distinct_info": st.column_config.TextColumn("Distinct", disabled=True),
+        "min_value": st.column_config.TextColumn("Min", disabled=True),
+        "max_value": st.column_config.TextColumn("Max", disabled=True),
+        "length_info": st.column_config.TextColumn("Length", disabled=True),
+        "rule_id": st.column_config.TextColumn("Rule id", disabled=True),
+        "check_type": st.column_config.TextColumn("Check type", disabled=True),
+        "severity": st.column_config.TextColumn("Severity", disabled=True),
+        "rationale": st.column_config.TextColumn("Rationale", disabled=True),
+        "confidence": st.column_config.TextColumn("Confidence", disabled=True),
+        "has_suggestion": st.column_config.CheckboxColumn(
+            "Has suggestion", disabled=True, default=False
+        ),
+    }
+
+    nonce = st.session_state.get("profile_data_nonce", 0)
+    grid_key = _overview_grid_widget_key(table_fqn, nonce)
+    edited_df = st.data_editor(
+        prepared,
+        key=grid_key,
+        use_container_width=True,
+        hide_index=True,
+        num_rows="fixed",
+        column_config=column_config,
+    )
+
+    edited = _prepare_overview_frame(edited_df)
+    edited.attrs["dq_debug_counts"] = debug_counts
+    return edited
+
+
 def _default_config_name(table_fqn: str) -> str:
     parts = (table_fqn or "").split(".")
     table_name = parts[-1] if parts else "TABLE"
@@ -673,6 +783,8 @@ def _render_overview_debug(
 
     classification_count = debug_counts.get("classification_row_count")
     rendered_count = debug_counts.get("columns_rendered")
+    suggestion_count = debug_counts.get("suggestion_row_count")
+    grid_count = debug_counts.get("grid_row_count") or rendered_count
     if rendered_count is None and isinstance(overview, pd.DataFrame):
         rendered_count = len(overview)
 
@@ -689,16 +801,21 @@ def _render_overview_debug(
         if "column_name" in overview.columns:
             feature_sample_columns = (
                 overview["column_name"].dropna().astype(str).head(3).tolist()
-            )
+    )
 
     with st.expander("Profiling debug", expanded=False):
         st.caption("Profiling grid source counts")
         st.text(f"feature_row_count: {feature_count if feature_count is not None else 0}")
+        st.text(f"features_df_rows: {feature_count if feature_count is not None else 0}")
         st.text(
             "classification_row_count: "
             f"{classification_count if classification_count is not None else 0}"
         )
         st.text(f"columns_rendered: {rendered_count if rendered_count is not None else 0}")
+        st.text(f"grid_df_rows: {grid_count if grid_count is not None else 0}")
+        st.text(
+            f"suggestions_df_rows: {suggestion_count if suggestion_count is not None else 0}"
+        )
         st.caption("Resolved metadata sources")
         st.text(f"metadata_db: {resolved_db}")
         st.text(f"metadata_schema: {resolved_schema}")
@@ -1557,6 +1674,9 @@ def render_profile(
     )
 
     with tab_overview:
+        overview_grid = _render_overview_grid(
+            overview_grid, data.suggested_checks, target_fqn
+        )
         _render_overview_debug(overview_grid, metadata_db, metadata_schema, target_fqn)
         _render_suggest_config_action(
             overview_grid,

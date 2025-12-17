@@ -849,9 +849,13 @@ def get_overview_grid(
         if "COLUMN_NAME" in features.columns
         else []
     )
+    suggestions = _normalize_dataframe_columns(
+        get_suggested_checks(session, normalized, metadata_db, metadata_schema)
+    )
 
     debug_counts = {
         "feature_row_count": feature_row_count,
+        "suggestion_row_count": len(suggestions),
         "classification_row_count": classification_row_count,
         "columns_rendered": 0,
         "metadata_db": tables["metadata_db"],
@@ -866,10 +870,6 @@ def get_overview_grid(
         empty_df = pd.DataFrame(columns=overview_columns)
         empty_df.attrs["dq_debug_counts"] = debug_counts
         return empty_df
-
-    suggestions = _normalize_dataframe_columns(
-        get_suggested_checks(session, normalized, metadata_db, metadata_schema)
-    )
 
     suggestion_lookup: Dict[str, Dict[str, Any]] = {}
     if not suggestions.empty and "COLUMN_NAME" in suggestions.columns:
@@ -936,7 +936,9 @@ def get_overview_grid(
         )
 
     overview = pd.DataFrame.from_records(overview_rows, columns=overview_columns)
-    debug_counts["columns_rendered"] = len(overview_rows)
+    rendered_rows = len(overview_rows)
+    debug_counts["columns_rendered"] = rendered_rows
+    debug_counts["grid_row_count"] = rendered_rows
     overview.attrs["dq_debug_counts"] = debug_counts
     return overview
 
