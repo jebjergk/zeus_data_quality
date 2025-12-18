@@ -873,7 +873,7 @@ def _normalize_overview_display(overview: pd.DataFrame) -> pd.DataFrame:
     return ordered
 
 
-def _render_overview_page(
+def _render_profile_listing(
     overview: pd.DataFrame,
     metadata_db: str,
     metadata_schema: str,
@@ -888,47 +888,69 @@ def _render_overview_page(
         _persist_selected_columns(table_fqn, normalized)
         return normalized
 
-    grid_key = _overview_grid_widget_key(
-        table_fqn,
-        nonce=st.session_state.get("profile_data_nonce", 0),
-    )
-    column_config = {
-        "include_in_dq_config": st.column_config.CheckboxColumn(
-            "Include",
-            help="Include this column when suggesting DQ config",
-        ),
-        "column_name": "Column",
-        "data_type": "Type",
-        "null_info": "Nulls",
-        "distinct_info": "Distinct",
-        "min_value": "Min",
-        "max_value": "Max",
-        "length_info": "Length",
-        "rule_id": "Rule ID",
-        "check_type": "Check type",
-        "severity": "Severity",
-        "rationale": "Rationale",
-        "confidence": "Confidence",
-        "suggested_rule_count": st.column_config.NumberColumn(
-            "Suggested rules",
-            format="%d",
-            help="Number of suggested rules found for this column",
-        ),
-        "suggested_rules": st.column_config.Column(
-            "Suggested rules",
-            help="Raw suggested rules for this column",
-            width="medium",
-        ),
-    }
-    disabled_columns = [col for col in normalized.columns if col != "include_in_dq_config"]
-    edited = st.data_editor(
-        normalized,
-        column_config=column_config,
-        disabled=disabled_columns,
-        hide_index=True,
-        use_container_width=True,
-        key=grid_key,
-    )
+    # Legacy grid removed in V1.3-profiling
+    st.caption("Review column stats in listing view. Legacy grid removed in V1.3-profiling.")
+
+    selection_rows: List[Dict[str, Any]] = []
+    for row in normalized.to_dict("records"):
+        column_name = str(row.get("column_name") or "").strip()
+        if not column_name:
+            continue
+        dtype_label = row.get("data_type") or ui_strings.PROFILE_V2_VALUE_UNKNOWN
+        include_default = _normalize_checkbox_value(row.get("include_in_dq_config"))
+        include_key = f"profile_listing_include_{table_fqn}_{column_name}"
+        with st.container(border=True):
+            include_value = st.checkbox(
+                "Include in DQ config",
+                key=include_key,
+                value=include_default,
+            )
+            header = f"**{column_name}**  · `{dtype_label}`"
+            st.markdown(header)
+            detail_values = []
+            for label, value in (
+                ("Nulls", row.get("null_info")),
+                ("Distinct", row.get("distinct_info")),
+                ("Min", row.get("min_value")),
+                ("Max", row.get("max_value")),
+                ("Length", row.get("length_info")),
+            ):
+                if value:
+                    detail_values.append(f"**{label}:** {value}")
+            if detail_values:
+                st.caption(" · ".join(detail_values))
+
+            metadata_bits = []
+            for label, value in (
+                ("Rule ID", row.get("rule_id")),
+                ("Check type", row.get("check_type")),
+                ("Severity", row.get("severity")),
+                ("Confidence", row.get("confidence")),
+            ):
+                if value:
+                    metadata_bits.append(f"**{label}:** {value}")
+            rationale = row.get("rationale")
+            if rationale:
+                metadata_bits.append(f"**Rationale:** {_truncate_details(rationale)}")
+            suggested_count = row.get("suggested_rule_count")
+            if suggested_count:
+                metadata_bits.append(f"**Suggested rules:** {suggested_count}")
+            if metadata_bits:
+                st.caption(" · ".join(metadata_bits))
+
+            suggested_rules = row.get("suggested_rules")
+            if suggested_rules:
+                st.json(suggested_rules)
+
+        updated_row = dict(row)
+        updated_row["include_in_dq_config"] = include_value
+        selection_rows.append(updated_row)
+
+    edited = pd.DataFrame(selection_rows)
+    for column in normalized.columns:
+        if column not in edited.columns:
+            edited[column] = None
+    edited = edited[normalized.columns]
     edited.attrs["dq_debug_counts"] = normalized.attrs.get("dq_debug_counts", {})
     _persist_selected_columns(table_fqn, edited)
     _render_overview_debug(edited, metadata_db, metadata_schema, table_fqn)
@@ -1477,6 +1499,7 @@ def render_profile(
 
     helpers = _resolve_helpers(profiling_helpers)
     st.header(ui_strings.PROFILE_V2_HEADER_TITLE)
+    st.caption("Active profiling renderer: V2 PAGE LISTING")
     preselect_fqn = st.session_state.get("profile_target_fqn") or st.session_state.get(
         "editor_target_fqn"
     )
@@ -1731,7 +1754,9 @@ def render_profile(
 
     edited_overview = overview_grid
     with tab_features:
-        edited_overview = _render_overview_page(overview_grid, metadata_db, metadata_schema, target_fqn)
+        edited_overview = _render_profile_listing(
+            overview_grid, metadata_db, metadata_schema, target_fqn
+        )
 
     with tab_semantic:
         _render_semantic_tags_page(
