@@ -17,7 +17,7 @@ $$
 import json
 import uuid
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
 from snowflake.snowpark import Session
 
@@ -100,12 +100,54 @@ def _is_numeric(data_type: str) -> bool:
     return any(token in dt for token in ['NUMBER', 'INT', 'DECIMAL', 'FLOAT', 'DOUBLE', 'REAL'])
 
 
+def _data_type_family(data_type: str) -> str:
+    dt = (data_type or '').upper()
+    if _is_numeric(dt):
+        return 'NUMERIC'
+    if any(token in dt for token in ['DATE', 'TIME', 'TIMESTAMP']):
+        return 'DATE'
+    if any(token in dt for token in ['CHAR', 'TEXT', 'STRING', 'VARCHAR']):
+        return 'STRING'
+    return 'ANY'
+
+
 def _default_rule_entry(rule_code: str, params: Dict[str, Any], column_name: str) -> Dict[str, Any]:
     return {
         'rule_code': rule_code,
         'column': column_name,
         'params': params or {},
     }
+
+
+def _as_upper_list(value: Any) -> List[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+            if isinstance(parsed, (list, tuple)):
+                value = parsed
+            else:
+                return [_normalize_name(value).upper()]
+        except Exception:
+            return [_normalize_name(value).upper()]
+    try:
+        return [_normalize_name(v).upper() for v in value if _normalize_name(v)]
+    except Exception:
+        return []
+
+
+def _coerce_params(value: Any) -> Dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+            if isinstance(parsed, dict):
+                return parsed
+        except Exception:
+            return {}
+    return {}
 
 
 def _existing_rules(session: Session, table_fqn: str, dq_check_cols: List[str]) -> Dict[Tuple[str, str], List[Dict[str, Any]]]:
@@ -140,6 +182,26 @@ def _rule_library(session: Session) -> Dict[str, Dict[str, Any]]:
     dq_rl_cols = _load_table_columns(session, 'DQ_RULE_LIBRARY')
     select_exprs = ['RULE_CODE']
 
+    if 'SCOPE' in dq_rl_cols:
+        select_exprs.append('SCOPE')
+    if 'ENABLED' in dq_rl_cols:
+        select_exprs.append('ENABLED')
+    if 'DEFAULT_SUGGEST' in dq_rl_cols:
+        select_exprs.append('DEFAULT_SUGGEST')
+
+    if 'ALLOWED_DATA_TYPES' in dq_rl_cols:
+        select_exprs.append('ALLOWED_DATA_TYPES')
+    if 'ALLOWED_CLASSIFICATIONS' in dq_rl_cols:
+        select_exprs.append('ALLOWED_CLASSIFICATIONS')
+    if 'DATA_TYPE_FAMILY' in dq_rl_cols:
+        select_exprs.append('DATA_TYPE_FAMILY')
+    if 'APPLICABILITY_TAGS' in dq_rl_cols:
+        select_exprs.append('APPLICABILITY_TAGS')
+    if 'DEFAULT_PARAMS' in dq_rl_cols:
+        select_exprs.append('DEFAULT_PARAMS')
+    if 'SUGGESTION_PRIORITY' in dq_rl_cols:
+        select_exprs.append('SUGGESTION_PRIORITY')
+
     severity_expr = None
     if 'SEVERITY' in dq_rl_cols:
         severity_expr = 'SEVERITY AS SEVERITY'
@@ -162,10 +224,34 @@ def _rule_library(session: Session) -> Dict[str, Dict[str, Any]]:
     out: Dict[str, Dict[str, Any]] = {}
     for r in rows:
         d = r.as_dict()
-        out[_normalize_name(d.get('RULE_CODE')).upper()] = {
+        rule_code = _normalize_name(d.get('RULE_CODE')).upper()
+        scope = _normalize_name(d.get('SCOPE')) or 'COLUMN'
+        enabled = d.get('ENABLED')
+        default_suggest = d.get('DEFAULT_SUGGEST')
+        allowed_data_types = _as_upper_list(d.get('ALLOWED_DATA_TYPES'))
+        allowed_classifications = _as_upper_list(d.get('ALLOWED_CLASSIFICATIONS'))
+        data_type_family = _normalize_name(d.get('DATA_TYPE_FAMILY')).upper()
+        applicability_tags = _as_upper_list(d.get('APPLICABILITY_TAGS'))
+        default_params = _coerce_params(d.get('DEFAULT_PARAMS'))
+        suggestion_priority_raw = d.get('SUGGESTION_PRIORITY')
+        try:
+            suggestion_priority = int(suggestion_priority_raw) if suggestion_priority_raw is not None else 0
+        except Exception:
+            suggestion_priority = 0
+        out[rule_code] = {
             'severity': d.get('SEVERITY'),
             'category': d.get('CATEGORY'),
             'rule_version': d.get('RULE_VERSION'),
+            'scope': scope,
+            'enabled': True if enabled is None else bool(enabled),
+            'default_suggest': True if default_suggest is None else bool(default_suggest),
+            'allowed_data_types': allowed_data_types,
+            'allowed_classifications': allowed_classifications,
+            'data_type_family': data_type_family or 'ANY',
+            'applicability_tags': applicability_tags,
+            'default_params': default_params,
+            'suggestion_priority': suggestion_priority,
+            'rule_code': rule_code,
         }
     return out
 
@@ -233,46 +319,126 @@ def _allowed_values(features: Dict[str, Any]) -> List[Any]:
     return top_values[:20]
 
 
-def _select_rules_for_column(column_name: str, features: Dict[str, Any], classification: Optional[str]) -> List[Dict[str, Any]]:
+def _matches_classification(meta: Dict[str, Any], classification: Optional[str]) -> bool:
+    allowed_classifications = meta.get('allowed_classifications') or []
+    tags = meta.get('applicability_tags') or []
+    if allowed_classifications:
+        if not classification:
+            return False
+        if classification.upper() not in allowed_classifications:
+            return False
+    if tags:
+        if not classification:
+            return False
+        if classification.upper() not in tags:
+            return False
+    return True
+
+
+def _matches_data_type(meta: Dict[str, Any], data_type: str, family: str) -> bool:
+    allowed_data_types = meta.get('allowed_data_types') or []
+    meta_family = _normalize_name(meta.get('data_type_family')).upper() or 'ANY'
+    if allowed_data_types:
+        if _normalize_name(data_type).upper() not in allowed_data_types:
+            return False
+    if meta_family not in ('', 'ANY') and meta_family != family:
+        return False
+    return True
+
+
+def _eligible_rules(rule_library: Dict[str, Dict[str, Any]], data_type: str, classification: Optional[str]) -> List[Dict[str, Any]]:
+    family = _data_type_family(data_type)
+    eligible: List[Dict[str, Any]] = []
+    for meta in rule_library.values():
+        if _normalize_name(meta.get('scope')).upper() not in ('', 'COLUMN'):
+            continue
+        if meta.get('enabled') is False:
+            continue
+        if meta.get('default_suggest') is False:
+            continue
+        if not _matches_data_type(meta, data_type, family):
+            continue
+        if not _matches_classification(meta, classification):
+            continue
+        eligible.append(meta)
+    eligible.sort(key=lambda m: m.get('suggestion_priority', 0), reverse=True)
+    return eligible
+
+
+def _pick_rule(candidates: List[Dict[str, Any]], used_codes: Set[str], keywords: List[str]) -> Optional[Dict[str, Any]]:
+    kw_upper = [k.upper() for k in keywords]
+    for keyword in kw_upper:
+        for meta in candidates:
+            if meta['rule_code'] in used_codes:
+                continue
+            if keyword in meta['rule_code']:
+                return meta
+    for meta in candidates:
+        if meta['rule_code'] not in used_codes:
+            return meta
+    return None
+
+
+def _merge_params(default_params: Dict[str, Any], override_params: Dict[str, Any]) -> Dict[str, Any]:
+    merged: Dict[str, Any] = {}
+    if isinstance(default_params, dict):
+        merged.update(default_params)
+    merged.update(override_params or {})
+    return merged
+
+
+def _select_rules_for_column(column_name: str, features: Dict[str, Any], classification: Optional[str], rule_library: Dict[str, Dict[str, Any]]) -> List[Dict[str, Any]]:
     suggestions: List[Dict[str, Any]] = []
     data_type = _normalize_name(features.get('DATA_TYPE'))
+    eligible_rules = _eligible_rules(rule_library, data_type, classification)
+    if not eligible_rules:
+        return suggestions
+
+    used_codes: Set[str] = set()
+
+    def add_rule(rule_meta: Optional[Dict[str, Any]], params: Dict[str, Any]):
+        if not rule_meta:
+            return
+        used_codes.add(rule_meta['rule_code'])
+        merged_params = _merge_params(rule_meta.get('default_params') or {}, params)
+        suggestions.append(_default_rule_entry(rule_meta['rule_code'], merged_params, column_name))
+
     null_ratio = _extract_null_ratio(features)
     if null_ratio is not None and null_ratio < 0.05:
-        suggestions.append(_default_rule_entry('NOT_NULL_GENERIC', {}, column_name))
+        rule = _pick_rule(eligible_rules, used_codes, ['NOT_NULL', 'NULL'])
+        add_rule(rule, {})
 
     if _is_numeric(data_type):
         min_val, max_val = _extract_min_max(features)
         if min_val is not None and max_val is not None:
-            suggestions.append(_default_rule_entry('RANGE_CHECK_GENERIC', {
-                'min_value': min_val,
-                'max_value': max_val,
-            }, column_name))
+            rule = _pick_rule(eligible_rules, used_codes, ['RANGE'])
+            add_rule(rule, {'min_value': min_val, 'max_value': max_val})
 
     if classification == 'COUNTRY_CODE':
-        suggestions.append(_default_rule_entry('COUNTRY_CODE_ISO2_PATTERN', {}, column_name))
-        suggestions.append(_default_rule_entry('IN_REFERENCE_TABLE_GENERIC', {
-            'reference_table': 'REF.COUNTRY',
-            'reference_column': 'COUNTRY_CODE',
-        }, column_name))
+        rule = _pick_rule(eligible_rules, used_codes, ['COUNTRY'])
+        add_rule(rule, {})
+        ref_rule = _pick_rule(eligible_rules, used_codes, ['REFERENCE'])
+        add_rule(ref_rule, {})
     elif classification == 'CURRENCY_CODE':
-        suggestions.append(_default_rule_entry('CURRENCY_CODE_ISO3_PATTERN', {}, column_name))
-        suggestions.append(_default_rule_entry('IN_REFERENCE_TABLE_GENERIC', {
-            'reference_table': 'REF.CURRENCY',
-            'reference_column': 'CURRENCY_CODE',
-        }, column_name))
+        rule = _pick_rule(eligible_rules, used_codes, ['CURRENCY'])
+        add_rule(rule, {})
+        ref_rule = _pick_rule(eligible_rules, used_codes, ['REFERENCE'])
+        add_rule(ref_rule, {})
     elif classification == 'ISIN':
-        suggestions.append(_default_rule_entry('ISIN_PATTERN_BASIC', {}, column_name))
+        rule = _pick_rule(eligible_rules, used_codes, ['ISIN'])
+        add_rule(rule, {})
     elif classification == 'IBAN':
-        suggestions.append(_default_rule_entry('IBAN_PATTERN_BASIC', {}, column_name))
+        rule = _pick_rule(eligible_rules, used_codes, ['IBAN'])
+        add_rule(rule, {})
 
     distinct_count, row_count = _extract_counts(features)
     allowed_values = _allowed_values(features)
     if row_count and distinct_count and row_count > 0:
         if distinct_count <= 20 or (distinct_count / row_count) < 0.2:
             if allowed_values:
-                suggestions.append(_default_rule_entry('ALLOWED_VALUES_GENERIC', {
-                    'allowed_values': allowed_values,
-                }, column_name))
+                rule = _pick_rule(eligible_rules, used_codes, ['ALLOWED_VALUES', 'ENUM', 'ALLOWED'])
+                add_rule(rule, {'allowed_values': allowed_values})
+
     return suggestions
 
 
@@ -283,12 +449,12 @@ def _as_param_json(params: Dict[str, Any]) -> str:
         return '{}'
 
 
-def _compile_rule(session: Session, rule_code: str, target_table_fqn: str, column_name: str, params: Dict[str, Any]) -> Optional[str]:
+def _compile_rule(session: Session, rule_code: str, target_table_fqn: str, column_name: str, params: Dict[str, Any]) -> Tuple[Optional[str], Optional[str]]:
     try:
         compiled = session.call(DQ_COMPILE_RULE_PROC, rule_code, target_table_fqn, [column_name], params)
-        return compiled
-    except Exception:
-        return None
+        return compiled, None
+    except Exception as exc:
+        return None, f"Compilation failed for rule_code={rule_code}: {exc}"
 
 
 def _insert_config(session: Session, config_id: str, config_name: str, target_table_fqn: str, dq_config_cols: List[str]):
@@ -313,7 +479,20 @@ def _insert_config(session: Session, config_id: str, config_name: str, target_ta
     ).collect()
 
 
+def _clear_session_suggest_cache(session: Session):
+    cache_keys = ['suggest_default_rules', 'suggest_rule_codes', 'cached_rule_candidates']
+    for key in cache_keys:
+        try:
+            session.sql(f'ALTER SESSION UNSET "{key}"').collect()
+        except Exception:
+            try:
+                session.sql(f"ALTER SESSION UNSET {key}").collect()
+            except Exception:
+                continue
+
+
 def suggest_from_profile(session: Session, PROFILE_RUN_ID: str, TARGET_TABLE_FQN: str, INCLUDED_COLUMNS: Sequence[str], CONFIG_NAME: Optional[str] = None):
+    _clear_session_suggest_cache(session)
     included = [c for c in (INCLUDED_COLUMNS or []) if _normalize_name(c)]
     dq_config_cols = _load_table_columns(session, 'DQ_CONFIG')
     dq_check_cols = _load_table_columns(session, 'DQ_CHECK')
@@ -357,7 +536,7 @@ def suggest_from_profile(session: Session, PROFILE_RUN_ID: str, TARGET_TABLE_FQN
     for col in included:
         features = _load_column_features(session, PROFILE_RUN_ID, col)
         classification = _load_column_classification(session, TARGET_TABLE_FQN, col)
-        suggestions = _select_rules_for_column(col, features, classification)
+        suggestions = _select_rules_for_column(col, features, classification, rule_library)
         for suggestion in suggestions:
             rule_code = suggestion['rule_code']
             params = suggestion.get('params') or {}
@@ -379,9 +558,24 @@ def suggest_from_profile(session: Session, PROFILE_RUN_ID: str, TARGET_TABLE_FQN
                 rules_skipped.append({'column': col, 'rule_code': rule_code, 'reason': 'already_exists'})
                 continue
 
-            compiled_rule = _compile_rule(session, rule_code, TARGET_TABLE_FQN, col, params)
+            library_meta = rule_library.get(rule_code.upper())
+            if not library_meta:
+                rules_skipped.append({
+                    'column': col,
+                    'rule_code': rule_code,
+                    'reason': 'rule_not_found',
+                    'message': 'Rule code not found in DQ_RULE_LIBRARY',
+                })
+                continue
+
+            compiled_rule, compile_error = _compile_rule(session, rule_code, TARGET_TABLE_FQN, col, params)
             if compiled_rule is None:
-                rules_skipped.append({'column': col, 'rule_code': rule_code, 'reason': 'compile_failed'})
+                rules_skipped.append({
+                    'column': col,
+                    'rule_code': rule_code,
+                    'reason': 'compile_failed',
+                    'message': compile_error or f'Failed to compile rule_code={rule_code}',
+                })
                 continue
 
             check_counter += 1
