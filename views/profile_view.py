@@ -38,6 +38,8 @@ _OVERVIEW_INTERNAL_COLUMNS = [
     "rationale",
     "confidence",
     "has_suggestion",
+    "suggested_rule_count",
+    "suggested_rules",
 ]
 
 
@@ -560,15 +562,26 @@ def _prepare_overview_frame(overview: pd.DataFrame) -> pd.DataFrame:
 
     working["column_name"] = working["column_name"].astype(str)
     working["has_suggestion"] = working["has_suggestion"].fillna(False).apply(bool)
+    working["suggested_rule_count"] = (
+        pd.to_numeric(working["suggested_rule_count"], errors="coerce")
+        .fillna(0)
+        .astype(int)
+    )
+    working["suggested_rules"] = working["suggested_rules"].apply(lambda value: value or [])
     working["include_in_dq_config"] = working["include_in_dq_config"].apply(
         _normalize_checkbox_value
     )
-    working.loc[~working["has_suggestion"], "include_in_dq_config"] = False
     working = working.set_index("column_name", drop=False)
 
     ordered = working[_OVERVIEW_INTERNAL_COLUMNS]
     ordered.attrs = working.attrs
     return ordered
+
+
+def _overview_grid_widget_key(table_fqn: str, nonce: int = 0) -> str:
+    normalized = (table_fqn or "").replace('"', "").replace(".", "_")
+    normalized = normalized or "table"
+    return f"profile_overview_grid_{normalized}_{nonce}"
 
 
 def _default_config_name(table_fqn: str) -> str:
@@ -724,9 +737,17 @@ def _render_overview_debug(
     classification_count = debug_counts.get("classification_row_count")
     rendered_count = debug_counts.get("columns_rendered")
     suggestion_count = debug_counts.get("suggestion_row_count")
-    grid_count = debug_counts.get("grid_row_count") or rendered_count
+    features_df_rows = debug_counts.get("features_df_rows", feature_count)
+    suggestions_df_rows = debug_counts.get("suggestions_df_rows", suggestion_count)
+    grid_df_rows = (
+        debug_counts.get("grid_df_rows")
+        or debug_counts.get("grid_row_count")
+        or rendered_count
+    )
     if rendered_count is None and isinstance(overview, pd.DataFrame):
         rendered_count = len(overview)
+    if grid_df_rows is None and isinstance(overview, pd.DataFrame):
+        grid_df_rows = len(overview)
 
     features_table_fqn = debug_counts.get("features_table_fqn") or (
         f"{resolved_db}.{resolved_schema}.DQ_COLUMN_FEATURES"
@@ -741,20 +762,24 @@ def _render_overview_debug(
         if "column_name" in overview.columns:
             feature_sample_columns = (
                 overview["column_name"].dropna().astype(str).head(3).tolist()
-    )
+            )
 
     with st.expander("Profiling debug", expanded=False):
         st.caption("Profiling feature source counts")
         st.text(f"feature_row_count: {feature_count if feature_count is not None else 0}")
+        st.text(f"features_df_rows: {features_df_rows if features_df_rows is not None else 0}")
         st.text(
             "classification_row_count: "
             f"{classification_count if classification_count is not None else 0}"
         )
-        st.text(f"columns_rendered: {rendered_count if rendered_count is not None else 0}")
-        st.text(f"feature_df_rows: {grid_count if grid_count is not None else 0}")
         st.text(
-            f"suggestions_df_rows: {suggestion_count if suggestion_count is not None else 0}"
+            f"suggestion_row_count: {suggestion_count if suggestion_count is not None else 0}"
         )
+        st.text(
+            f"suggestions_df_rows: {suggestions_df_rows if suggestions_df_rows is not None else 0}"
+        )
+        st.text(f"columns_rendered: {rendered_count if rendered_count is not None else 0}")
+        st.text(f"grid_df_rows: {grid_df_rows if grid_df_rows is not None else 0}")
         st.caption("Resolved metadata sources")
         st.text(f"metadata_db: {resolved_db}")
         st.text(f"metadata_schema: {resolved_schema}")
@@ -771,6 +796,7 @@ def _normalize_overview_display(overview: pd.DataFrame) -> pd.DataFrame:
         return prepared
 
     display_columns = [
+        "include_in_dq_config",
         "column_name",
         "data_type",
         "null_info",
@@ -783,30 +809,16 @@ def _normalize_overview_display(overview: pd.DataFrame) -> pd.DataFrame:
         "severity",
         "rationale",
         "confidence",
+        "suggested_rule_count",
+        "suggested_rules",
     ]
     for column in display_columns:
         if column not in prepared.columns:
             prepared[column] = None
 
-    display = prepared.reset_index(drop=True)[display_columns]
-    display = display.rename(
-        columns={
-            "column_name": "Column",
-            "data_type": "Type",
-            "null_info": "Nulls",
-            "distinct_info": "Distinct",
-            "min_value": "Min",
-            "max_value": "Max",
-            "length_info": "Length",
-            "rule_id": "Rule ID",
-            "check_type": "Check type",
-            "severity": "Severity",
-            "rationale": "Rationale",
-            "confidence": "Confidence",
-        }
-    )
-    display.attrs = prepared.attrs
-    return display
+    ordered = prepared.reset_index(drop=True)[display_columns]
+    ordered.attrs = prepared.attrs
+    return ordered
 
 
 def _render_overview_page(
@@ -823,9 +835,50 @@ def _render_overview_page(
         _render_overview_debug(normalized, metadata_db, metadata_schema, table_fqn)
         return normalized
 
-    st.dataframe(normalized, use_container_width=True)
-    _render_overview_debug(normalized, metadata_db, metadata_schema, table_fqn)
-    return normalized
+    grid_key = _overview_grid_widget_key(
+        table_fqn,
+        nonce=st.session_state.get("profile_data_nonce", 0),
+    )
+    column_config = {
+        "include_in_dq_config": st.column_config.CheckboxColumn(
+            "Include",
+            help="Include this column when suggesting DQ config",
+        ),
+        "column_name": "Column",
+        "data_type": "Type",
+        "null_info": "Nulls",
+        "distinct_info": "Distinct",
+        "min_value": "Min",
+        "max_value": "Max",
+        "length_info": "Length",
+        "rule_id": "Rule ID",
+        "check_type": "Check type",
+        "severity": "Severity",
+        "rationale": "Rationale",
+        "confidence": "Confidence",
+        "suggested_rule_count": st.column_config.NumberColumn(
+            "Suggested rules",
+            format="%d",
+            help="Number of suggested rules found for this column",
+        ),
+        "suggested_rules": st.column_config.Column(
+            "Suggested rules",
+            help="Raw suggested rules for this column",
+            width="medium",
+        ),
+    }
+    disabled_columns = [col for col in normalized.columns if col != "include_in_dq_config"]
+    edited = st.data_editor(
+        normalized,
+        column_config=column_config,
+        disabled=disabled_columns,
+        hide_index=True,
+        use_container_width=True,
+        key=grid_key,
+    )
+    edited.attrs["dq_debug_counts"] = normalized.attrs.get("dq_debug_counts", {})
+    _render_overview_debug(edited, metadata_db, metadata_schema, table_fqn)
+    return edited
 
 
 def _suggestion_selection_key(

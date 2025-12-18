@@ -68,16 +68,29 @@ BEGIN
             f.DISTINCT_COUNT,
             f.MIN_VALUE,
             f.MAX_VALUE,
-            COALESCE(c.CONTENT_TYPE, '') AS CONTENT_TYPE
+            COALESCE(c.CONTENT_TYPE, '') AS CONTENT_TYPE,
+            CASE
+                WHEN REGEXP_LIKE(f.DATA_TYPE, 'NUMBER|DECIMAL|INT|FLOAT|DOUBLE|REAL') THEN 'NUMERIC'
+                WHEN REGEXP_LIKE(f.DATA_TYPE, 'DATE|TIME|TIMESTAMP') THEN 'DATE'
+                WHEN REGEXP_LIKE(f.DATA_TYPE, 'CHAR|TEXT|STRING|VARCHAR') THEN 'STRING'
+                ELSE 'ANY'
+            END AS DATA_TYPE_FAMILY,
+            IFF(
+                NULLIF(c.CONTENT_TYPE, '') IS NULL,
+                ARRAY_CONSTRUCT(),
+                ARRAY_CONSTRUCT(UPPER(c.CONTENT_TYPE))
+            ) AS CLASS_LABELS
         FROM features f
         LEFT JOIN classification c
             ON f.TABLE_FQN = c.TABLE_FQN
            AND f.COLUMN_NAME = c.COLUMN_NAME
     ),
     active_rules AS (
-        SELECT RULE_ID, CHECK_TYPE, DEFAULT_SEVERITY
+        SELECT RULE_ID, CHECK_TYPE, DEFAULT_SEVERITY, DATA_TYPE_FAMILY, APPLICABILITY_TAGS
         FROM ZEUS_ANALYTICS_SIMU.DISCOVERY.DQ_RULE_LIBRARY
-        WHERE ACTIVE = True
+        WHERE COALESCE(ENABLED, TRUE) = TRUE
+          AND COALESCE(DEFAULT_SUGGEST, TRUE) = TRUE
+          AND COALESCE(SCOPE, 'COLUMN') = 'COLUMN'
     )
     SELECT
         ctx.TABLE_FQN,
@@ -90,6 +103,15 @@ BEGIN
     FROM column_context ctx
     JOIN active_rules rule_not_null
         ON rule_not_null.RULE_ID = 'NOT_NULL_BASIC'
+       AND (
+            rule_not_null.DATA_TYPE_FAMILY IN ('ANY', ctx.DATA_TYPE_FAMILY)
+            OR rule_not_null.DATA_TYPE_FAMILY IS NULL
+        )
+       AND (
+            rule_not_null.APPLICABILITY_TAGS IS NULL
+            OR ARRAY_SIZE(rule_not_null.APPLICABILITY_TAGS) = 0
+            OR ARRAY_SIZE(ARRAY_INTERSECTION(rule_not_null.APPLICABILITY_TAGS, ctx.CLASS_LABELS)) > 0
+        )
     WHERE ctx.NULL_RATIO < 0.1
 
     UNION ALL
@@ -105,6 +127,15 @@ BEGIN
     FROM column_context ctx
     JOIN active_rules rule_range
         ON rule_range.RULE_ID = 'RANGE_NUMERIC'
+       AND (
+            rule_range.DATA_TYPE_FAMILY IN ('ANY', ctx.DATA_TYPE_FAMILY)
+            OR rule_range.DATA_TYPE_FAMILY IS NULL
+        )
+       AND (
+            rule_range.APPLICABILITY_TAGS IS NULL
+            OR ARRAY_SIZE(rule_range.APPLICABILITY_TAGS) = 0
+            OR ARRAY_SIZE(ARRAY_INTERSECTION(rule_range.APPLICABILITY_TAGS, ctx.CLASS_LABELS)) > 0
+        )
     WHERE REGEXP_LIKE(ctx.DATA_TYPE, '^NUMBER')
 
     UNION ALL
@@ -120,6 +151,15 @@ BEGIN
     FROM column_context ctx
     JOIN active_rules rule_enum
         ON rule_enum.RULE_ID = 'ENUM_SMALL_CARDINALITY'
+       AND (
+            rule_enum.DATA_TYPE_FAMILY IN ('ANY', ctx.DATA_TYPE_FAMILY)
+            OR rule_enum.DATA_TYPE_FAMILY IS NULL
+        )
+       AND (
+            rule_enum.APPLICABILITY_TAGS IS NULL
+            OR ARRAY_SIZE(rule_enum.APPLICABILITY_TAGS) = 0
+            OR ARRAY_SIZE(ARRAY_INTERSECTION(rule_enum.APPLICABILITY_TAGS, ctx.CLASS_LABELS)) > 0
+        )
     WHERE ctx.DISTINCT_COUNT <= 20
 
     UNION ALL
@@ -135,6 +175,15 @@ BEGIN
     FROM column_context ctx
     JOIN active_rules rule_date
         ON rule_date.RULE_ID = 'NOT_FUTURE_DATE'
+       AND (
+            rule_date.DATA_TYPE_FAMILY IN ('ANY', ctx.DATA_TYPE_FAMILY)
+            OR rule_date.DATA_TYPE_FAMILY IS NULL
+        )
+       AND (
+            rule_date.APPLICABILITY_TAGS IS NULL
+            OR ARRAY_SIZE(rule_date.APPLICABILITY_TAGS) = 0
+            OR ARRAY_SIZE(ARRAY_INTERSECTION(rule_date.APPLICABILITY_TAGS, ctx.CLASS_LABELS)) > 0
+        )
     WHERE ctx.CONTENT_TYPE = 'date'
 
     UNION ALL
@@ -150,6 +199,15 @@ BEGIN
     FROM column_context ctx
     JOIN active_rules rule_pattern
         ON rule_pattern.RULE_ID = 'PATTERN_BASIC'
+       AND (
+            rule_pattern.DATA_TYPE_FAMILY IN ('ANY', ctx.DATA_TYPE_FAMILY)
+            OR rule_pattern.DATA_TYPE_FAMILY IS NULL
+        )
+       AND (
+            rule_pattern.APPLICABILITY_TAGS IS NULL
+            OR ARRAY_SIZE(rule_pattern.APPLICABILITY_TAGS) = 0
+            OR ARRAY_SIZE(ARRAY_INTERSECTION(rule_pattern.APPLICABILITY_TAGS, ctx.CLASS_LABELS)) > 0
+        )
     WHERE ctx.CONTENT_TYPE ILIKE '%code%'
        OR ctx.CONTENT_TYPE ILIKE '%identifier%';
     v_inserted := SQLROWCOUNT;
