@@ -7,6 +7,10 @@ st.session_state.setdefault("page", st.session_state["active_view"])  # keep if 
 st.session_state.setdefault("freeze_view", False)
 
 current_view = st.session_state.get("active_view", "home")
+if isinstance(current_view, str) and current_view.lower() in LEGACY_PROFILING_ALIASES:
+    current_view = "profile"
+    st.session_state["active_view"] = "profile"
+    st.session_state["page"] = "profile"
 
 logging.info(
     "rerun #%s route=%s fqn=%s",
@@ -30,7 +34,7 @@ logging.getLogger("snowflake").setLevel(logging.WARNING)
 from typing import Dict, List, Optional
 
 ALLOWED_PAGES = {"home", "cfg", "profile", "monitor", "monitor_v3", "docs", "rules"}
-LEGACY_PROFILING_PAGES = {"profiling", "profiling_legacy", "profile_legacy", "profiling_grid"}
+LEGACY_PROFILING_ALIASES = {"profiling", "profiling_legacy", "profile_legacy", "profiling_grid"}
 
 
 if st.session_state["_rerun_count"] == 1:
@@ -174,10 +178,6 @@ def _normalize_bool(value) -> bool:
     return text in {"TRUE", "T", "YES", "Y", "1"}
 
 
-def _is_legacy_profiling_page(value: Optional[str]) -> bool:
-    return isinstance(value, str) and value.lower() in LEGACY_PROFILING_PAGES
-
-
 def _get_page_from_query_params() -> Optional[str]:
     candidate: Optional[str] = None
     try:
@@ -191,10 +191,10 @@ def _get_page_from_query_params() -> Optional[str]:
         candidate = value
     if candidate:
         candidate_lower = candidate.lower()
-        if _is_legacy_profiling_page(candidate_lower):
-            return candidate_lower
         if candidate_lower in ALLOWED_PAGES:
             return candidate_lower
+        if candidate_lower in LEGACY_PROFILING_ALIASES:
+            return "profile"
     return None
 
 
@@ -499,26 +499,6 @@ state = get_state()
 st.session_state.setdefault("editor_target_fqn", None)
 query_page = _get_page_from_query_params()
 last_query_page = st.session_state.get("_last_query_page")
-legacy_page_candidate = next(
-    (
-        value
-        for value in (
-            query_page,
-            st.session_state.get("active_view"),
-            st.session_state.get("page"),
-            last_query_page,
-        )
-        if _is_legacy_profiling_page(value)
-    ),
-    None,
-)
-if legacy_page_candidate:
-    st.warning("Legacy profiling path is removed; update stale session state.")
-    set_view("profile")
-    query_page = "profile"
-    last_query_page = "profile"
-    st.session_state["page"] = "profile"
-    st.session_state["_last_query_page"] = "profile"
 if query_page and query_page != last_query_page:
     st.session_state["_last_query_page"] = query_page
     if query_page != st.session_state.get("active_view"):
@@ -532,6 +512,9 @@ elif query_page is None:
         st.session_state["_last_query_page"] = None
 
 page_state_value = st.session_state.get("page")
+if isinstance(page_state_value, str) and page_state_value.lower() in LEGACY_PROFILING_ALIASES:
+    page_state_value = "profile"
+    st.session_state["page"] = "profile"
 if (
     page_state_value in ALLOWED_PAGES
     and page_state_value != st.session_state.get("active_view")
