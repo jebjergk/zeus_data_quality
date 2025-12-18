@@ -6,7 +6,7 @@ from concurrent.futures import ThreadPoolExecutor, TimeoutError
 from dataclasses import dataclass
 from datetime import datetime
 import json
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterable, List, Optional
 import pandas as pd
 import streamlit as st, logging
 
@@ -41,6 +41,18 @@ _OVERVIEW_INTERNAL_COLUMNS = [
     "suggested_rule_count",
     "suggested_rules",
 ]
+
+LEGACY_PROFILE_STATE_KEYS = (
+    "profiling_mode",
+    "use_legacy_profiling",
+    "profile_view",
+    "profiling_view_version",
+)
+
+
+def _clear_legacy_profile_state() -> None:
+    for key in LEGACY_PROFILE_STATE_KEYS:
+        st.session_state.pop(key, None)
 
 
 def _call_with_timeout(func, timeout_seconds: float, *args, **kwargs):
@@ -508,18 +520,7 @@ def _included_overview_columns(overview: pd.DataFrame) -> List[str]:
             continue
         included.append(str(name_value))
 
-    seen = set()
-    unique_columns: List[str] = []
-    for column in included:
-        normalized = column.strip()
-        if not normalized:
-            continue
-        folded = normalized.casefold()
-        if folded in seen:
-            continue
-        seen.add(folded)
-        unique_columns.append(normalized)
-    return unique_columns
+    return _normalize_selected_columns(included)
 
 
 def _selected_suggestion_columns(table_fqn: str) -> List[str]:
@@ -543,7 +544,52 @@ def _selected_suggestion_columns(table_fqn: str) -> List[str]:
     return result
 
 
+def _normalize_selected_columns(columns: Iterable[Any]) -> List[str]:
+    seen = set()
+    result: List[str] = []
+    for column in columns:
+        name = str(column or "").strip()
+        if not name:
+            continue
+        folded = name.casefold()
+        if folded in seen:
+            continue
+        seen.add(folded)
+        result.append(name)
+    return result
+
+
+def _session_selected_columns(table_fqn: str) -> List[str]:
+    session_target = st.session_state.get("_profile_selection_target") or st.session_state.get(
+        "profile_target_fqn"
+    )
+    raw_selection = st.session_state.get("profile_selected_columns") or []
+    if not raw_selection:
+        return []
+    if table_fqn and session_target and session_target.casefold() != table_fqn.casefold():
+        return []
+    return _normalize_selected_columns(raw_selection)
+
+
+def _persist_selected_columns(table_fqn: str, overview: pd.DataFrame) -> None:
+    selected_columns = _included_overview_columns(overview)
+    st.session_state["profile_selected_columns"] = selected_columns
+    st.session_state["_profile_selection_target"] = table_fqn
+    st.session_state["profile_target_fqn"] = table_fqn
+
+
+def _reset_profile_selection_target(target_fqn: str) -> None:
+    current_target = st.session_state.get("_profile_selection_target")
+    if target_fqn and current_target and current_target.casefold() == target_fqn.casefold():
+        return
+    st.session_state["_profile_selection_target"] = target_fqn or ""
+    st.session_state["profile_selected_columns"] = []
+
+
 def _resolve_included_columns(table_fqn: str, overview: pd.DataFrame) -> List[str]:
+    session_selected = _session_selected_columns(table_fqn)
+    if session_selected:
+        return session_selected
     included = _included_overview_columns(overview)
     if included:
         return included
@@ -672,9 +718,9 @@ def _render_suggest_config_action(
             )
         return
 
-    included_columns = _resolve_included_columns(table_fqn, overview)
+    included_columns = _session_selected_columns(table_fqn)
     if not included_columns:
-        st.warning(ui_strings.PROFILE_V2_SUGGEST_CONFIG_NO_COLUMNS)
+        st.warning("Select at least one column")
         return
 
     if not profile_run_id:
@@ -724,6 +770,8 @@ def _render_overview_debug(
     debug_counts = {}
     if isinstance(overview, pd.DataFrame):
         debug_counts = overview.attrs.get("dq_debug_counts", {}) or {}
+    selected_columns = _session_selected_columns(table_fqn)
+    selected_sample = ", ".join(selected_columns[:5]) if selected_columns else "-"
 
     resolved_db, resolved_schema = _resolve_metadata_namespace(
         debug_counts.get("metadata_db") or metadata_db,
@@ -765,6 +813,10 @@ def _render_overview_debug(
             )
 
     with st.expander("Profiling debug", expanded=False):
+        st.caption("Renderer")
+        st.text("active_renderer: profiling_v2_page_listing")
+        st.text(f"selected_columns_count: {len(selected_columns)}")
+        st.text(f"selected_columns_sample: {selected_sample}")
         st.caption("Profiling feature source counts")
         st.text(f"feature_row_count: {feature_count if feature_count is not None else 0}")
         st.text(f"features_df_rows: {features_df_rows if features_df_rows is not None else 0}")
@@ -833,6 +885,7 @@ def _render_overview_page(
     if normalized.empty:
         st.info(ui_strings.PROFILE_V2_NO_FEATURES.format(table=table_fqn))
         _render_overview_debug(normalized, metadata_db, metadata_schema, table_fqn)
+        _persist_selected_columns(table_fqn, normalized)
         return normalized
 
     grid_key = _overview_grid_widget_key(
@@ -877,6 +930,7 @@ def _render_overview_page(
         key=grid_key,
     )
     edited.attrs["dq_debug_counts"] = normalized.attrs.get("dq_debug_counts", {})
+    _persist_selected_columns(table_fqn, edited)
     _render_overview_debug(edited, metadata_db, metadata_schema, table_fqn)
     return edited
 
@@ -1419,6 +1473,7 @@ def render_profile(
 
     st.session_state.setdefault("busy_profiling", False)
     st.session_state.setdefault("freeze_view", False)
+    _clear_legacy_profile_state()
 
     helpers = _resolve_helpers(profiling_helpers)
     st.header(ui_strings.PROFILE_V2_HEADER_TITLE)
@@ -1431,6 +1486,7 @@ def render_profile(
     if picker_fqn:
         st.session_state["profile_target_fqn"] = picker_fqn
     target_fqn = st.session_state.get("profile_target_fqn", "") or ""
+    _reset_profile_selection_target(target_fqn)
 
     st.divider()
 
@@ -1673,8 +1729,9 @@ def render_profile(
         ]
     )
 
+    edited_overview = overview_grid
     with tab_features:
-        _render_overview_page(overview_grid, metadata_db, metadata_schema, target_fqn)
+        edited_overview = _render_overview_page(overview_grid, metadata_db, metadata_schema, target_fqn)
 
     with tab_semantic:
         _render_semantic_tags_page(
@@ -1688,7 +1745,7 @@ def render_profile(
 
     with tab_suggestions:
         _render_suggest_config_action(
-            overview_grid,
+            edited_overview,
             target_fqn,
             helpers,
             session,
@@ -1697,7 +1754,7 @@ def render_profile(
             metadata_schema,
         )
         _render_suggestion_sections(
-            overview_grid,
+            edited_overview,
             data.suggested_checks,
             data.column_classification,
             target_fqn,
