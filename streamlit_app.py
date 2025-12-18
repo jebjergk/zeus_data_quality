@@ -1,5 +1,8 @@
 import streamlit as st, logging
 
+ALLOWED_PAGES = {"home", "cfg", "profile", "monitor", "monitor_v3", "docs", "rules"}
+LEGACY_PROFILING_ALIASES = {"profiling", "profiling_legacy", "profile_legacy", "profiling_grid"}
+
 # Safe inits (no rendering)
 st.session_state["_rerun_count"] = st.session_state.get("_rerun_count", 0) + 1
 st.session_state.setdefault("active_view", "home")
@@ -32,10 +35,6 @@ logging.getLogger("snowflake").setLevel(logging.WARNING)
 
 
 from typing import Dict, List, Optional
-
-ALLOWED_PAGES = {"home", "cfg", "profile", "monitor", "monitor_v3", "docs", "rules"}
-LEGACY_PROFILING_ALIASES = {"profiling", "profiling_legacy", "profile_legacy", "profiling_grid"}
-
 
 if st.session_state["_rerun_count"] == 1:
     logging.info("route:init %s", current_view)
