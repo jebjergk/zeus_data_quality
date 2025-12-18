@@ -792,6 +792,8 @@ def get_overview_grid(
         "rationale",
         "confidence",
         "has_suggestion",
+        "suggested_rule_count",
+        "suggested_rules",
     ]
 
     normalized = _normalize_table_fqn(table_fqn)
@@ -842,20 +844,23 @@ def get_overview_grid(
     classification = _normalize_dataframe_columns(
         _fetch_dataframe(session, classification_cte, params=[normalized])
     )
+    suggestions = _normalize_dataframe_columns(
+        get_suggested_checks(session, normalized, metadata_db, metadata_schema)
+    )
     feature_row_count = len(features)
     classification_row_count = len(classification)
+    suggestion_row_count = len(suggestions)
     feature_sample = (
         features["COLUMN_NAME"].dropna().astype(str).head(3).tolist()
         if "COLUMN_NAME" in features.columns
         else []
     )
-    suggestions = _normalize_dataframe_columns(
-        get_suggested_checks(session, normalized, metadata_db, metadata_schema)
-    )
 
     debug_counts = {
         "feature_row_count": feature_row_count,
-        "suggestion_row_count": len(suggestions),
+        "features_df_rows": feature_row_count,
+        "suggestion_row_count": suggestion_row_count,
+        "suggestions_df_rows": suggestion_row_count,
         "classification_row_count": classification_row_count,
         "columns_rendered": 0,
         "metadata_db": tables["metadata_db"],
@@ -896,6 +901,8 @@ def get_overview_grid(
                 "severity": _stringify(latest_row.get("SEVERITY")) or "-",
                 "rationale": _stringify(latest_row.get("RATIONALE")) or "-",
                 "has_suggestion": bool(len(group)),
+                "suggested_rule_count": len(group),
+                "suggested_rules": group.to_dict("records"),
             }
 
     latest_classifications = _latest_classifications(classification)
@@ -908,7 +915,9 @@ def get_overview_grid(
 
         overview_rows.append(
             {
-                "include_in_dq_config": bool(column_suggestions.get("has_suggestion", False)),
+                "include_in_dq_config": bool(
+                    column_suggestions.get("has_suggestion", False)
+                ),
                 "column_name": column_name,
                 "data_type": _stringify(row.get("DATA_TYPE")),
                 "null_info": _format_count_ratio(
@@ -932,6 +941,10 @@ def get_overview_grid(
                 ),
                 "confidence": norm_conf(classification_row.get("CONFIDENCE")),
                 "has_suggestion": bool(column_suggestions.get("has_suggestion", False)),
+                "suggested_rule_count": int(
+                    column_suggestions.get("suggested_rule_count", 0) or 0
+                ),
+                "suggested_rules": column_suggestions.get("suggested_rules", []),
             }
         )
 
@@ -939,6 +952,7 @@ def get_overview_grid(
     rendered_rows = len(overview_rows)
     debug_counts["columns_rendered"] = rendered_rows
     debug_counts["grid_row_count"] = rendered_rows
+    debug_counts["grid_df_rows"] = rendered_rows
     overview.attrs["dq_debug_counts"] = debug_counts
     return overview
 

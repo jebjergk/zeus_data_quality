@@ -34,6 +34,25 @@ def test_prepare_overview_frame_preserves_rule_columns():
     assert prepared.loc["orders_total", "has_suggestion"] is True
 
 
+def test_prepare_overview_frame_allows_manual_includes_without_suggestions():
+    overview = pd.DataFrame(
+        [
+            {
+                "column_name": "email",
+                "data_type": "STRING",
+                "has_suggestion": False,
+                "include_in_dq_config": True,
+            }
+        ]
+    )
+
+    prepared = profile_view._prepare_overview_frame(overview)
+
+    assert prepared.loc["email", "include_in_dq_config"] is True
+    assert prepared.loc["email", "suggested_rule_count"] == 0
+    assert prepared.loc["email", "suggested_rules"] == []
+
+
 def test_overview_grid_widget_key_changes_with_nonce():
     key_first = profile_view._overview_grid_widget_key(
         "DB.SCHEMA.TABLE",
@@ -63,5 +82,4 @@ def test_call_with_timeout_handles_timeout():
 
     assert result is None
     assert isinstance(error, TimeoutError)
-
 
