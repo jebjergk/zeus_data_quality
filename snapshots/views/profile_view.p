@@ -274,7 +274,7 @@ def _render_sampling_summary(run_info: Any) -> None:
     """Render sampling metadata and pie chart for the last profiling run.
 
     This MUST NOT call st.stop(), even if metadata is missing, so the rest of the
-    page (overview grid, classification) still renders.
+    page still renders.
     """
 
     if run_info is None:
@@ -571,66 +571,6 @@ def _prepare_overview_frame(overview: pd.DataFrame) -> pd.DataFrame:
     return ordered
 
 
-def _overview_grid_widget_key(table_fqn: str, nonce: int) -> str:
-    safe_table = (table_fqn or "table").replace(".", "_").replace(" ", "_")
-    return f"profile_overview_grid_{safe_table}_{nonce}"
-
-
-def _render_overview_grid(
-    overview: pd.DataFrame, suggestions: pd.DataFrame, table_fqn: str
-) -> pd.DataFrame:
-    st.subheader(ui_strings.PROFILE_V2_COLUMNS_SUBHEADER)
-    prepared = _prepare_overview_frame(overview)
-
-    debug_counts = prepared.attrs.get("dq_debug_counts", {}) or {}
-    suggestion_rows = len(suggestions) if isinstance(suggestions, pd.DataFrame) else 0
-    debug_counts["suggestion_row_count"] = suggestion_rows
-    debug_counts["grid_row_count"] = len(prepared)
-    if "feature_row_count" not in debug_counts:
-        debug_counts["feature_row_count"] = len(prepared)
-    prepared.attrs["dq_debug_counts"] = debug_counts
-
-    if prepared.empty:
-        st.info(ui_strings.PROFILE_V2_NO_FEATURES.format(table=table_fqn))
-        return prepared
-
-    column_config = {
-        "include_in_dq_config": st.column_config.CheckboxColumn(
-            "Include", help="Flag column for config suggestions", default=False
-        ),
-        "column_name": st.column_config.TextColumn("Column", disabled=True),
-        "data_type": st.column_config.TextColumn("Type", disabled=True),
-        "null_info": st.column_config.TextColumn("Nulls", disabled=True),
-        "distinct_info": st.column_config.TextColumn("Distinct", disabled=True),
-        "min_value": st.column_config.TextColumn("Min", disabled=True),
-        "max_value": st.column_config.TextColumn("Max", disabled=True),
-        "length_info": st.column_config.TextColumn("Length", disabled=True),
-        "rule_id": st.column_config.TextColumn("Rule id", disabled=True),
-        "check_type": st.column_config.TextColumn("Check type", disabled=True),
-        "severity": st.column_config.TextColumn("Severity", disabled=True),
-        "rationale": st.column_config.TextColumn("Rationale", disabled=True),
-        "confidence": st.column_config.TextColumn("Confidence", disabled=True),
-        "has_suggestion": st.column_config.CheckboxColumn(
-            "Has suggestion", disabled=True, default=False
-        ),
-    }
-
-    nonce = st.session_state.get("profile_data_nonce", 0)
-    grid_key = _overview_grid_widget_key(table_fqn, nonce)
-    edited_df = st.data_editor(
-        prepared,
-        key=grid_key,
-        use_container_width=True,
-        hide_index=True,
-        num_rows="fixed",
-        column_config=column_config,
-    )
-
-    edited = _prepare_overview_frame(edited_df)
-    edited.attrs["dq_debug_counts"] = debug_counts
-    return edited
-
-
 def _default_config_name(table_fqn: str) -> str:
     parts = (table_fqn or "").split(".")
     table_name = parts[-1] if parts else "TABLE"
@@ -804,15 +744,14 @@ def _render_overview_debug(
     )
 
     with st.expander("Profiling debug", expanded=False):
-        st.caption("Profiling grid source counts")
+        st.caption("Profiling feature source counts")
         st.text(f"feature_row_count: {feature_count if feature_count is not None else 0}")
-        st.text(f"features_df_rows: {feature_count if feature_count is not None else 0}")
         st.text(
             "classification_row_count: "
             f"{classification_count if classification_count is not None else 0}"
         )
         st.text(f"columns_rendered: {rendered_count if rendered_count is not None else 0}")
-        st.text(f"grid_df_rows: {grid_count if grid_count is not None else 0}")
+        st.text(f"feature_df_rows: {grid_count if grid_count is not None else 0}")
         st.text(
             f"suggestions_df_rows: {suggestion_count if suggestion_count is not None else 0}"
         )
@@ -824,6 +763,69 @@ def _render_overview_debug(
         st.text(f"table_fqn_filter: {table_fqn_filter or '-'}")
         sample_text = ", ".join(feature_sample_columns) if feature_sample_columns else "-"
         st.text(f"feature_sample_columns: {sample_text}")
+
+
+def _normalize_overview_display(overview: pd.DataFrame) -> pd.DataFrame:
+    prepared = _prepare_overview_frame(overview)
+    if prepared.empty:
+        return prepared
+
+    display_columns = [
+        "column_name",
+        "data_type",
+        "null_info",
+        "distinct_info",
+        "min_value",
+        "max_value",
+        "length_info",
+        "rule_id",
+        "check_type",
+        "severity",
+        "rationale",
+        "confidence",
+    ]
+    for column in display_columns:
+        if column not in prepared.columns:
+            prepared[column] = None
+
+    display = prepared.reset_index(drop=True)[display_columns]
+    display = display.rename(
+        columns={
+            "column_name": "Column",
+            "data_type": "Type",
+            "null_info": "Nulls",
+            "distinct_info": "Distinct",
+            "min_value": "Min",
+            "max_value": "Max",
+            "length_info": "Length",
+            "rule_id": "Rule ID",
+            "check_type": "Check type",
+            "severity": "Severity",
+            "rationale": "Rationale",
+            "confidence": "Confidence",
+        }
+    )
+    display.attrs = prepared.attrs
+    return display
+
+
+def _render_overview_page(
+    overview: pd.DataFrame,
+    metadata_db: str,
+    metadata_schema: str,
+    table_fqn: str,
+) -> pd.DataFrame:
+    st.subheader("Column statistics")
+    normalized = _normalize_overview_display(overview)
+
+    if normalized.empty:
+        st.info(ui_strings.PROFILE_V2_NO_FEATURES.format(table=table_fqn))
+        _render_overview_debug(normalized, metadata_db, metadata_schema, table_fqn)
+        return normalized
+
+    st.dataframe(normalized, use_container_width=True)
+    _render_overview_debug(normalized, metadata_db, metadata_schema, table_fqn)
+    return normalized
 
 
 def _suggestion_selection_key(
@@ -930,7 +932,44 @@ def _normalize_classification_value(value: Any) -> str:
     return str(value).strip()
 
 
-def _render_classification_grid(
+def _normalize_classification_table(classification: pd.DataFrame) -> pd.DataFrame:
+    if not isinstance(classification, pd.DataFrame) or classification.empty:
+        return pd.DataFrame()
+
+    working = classification.copy()
+    working.columns = [str(column).upper() for column in working.columns]
+    latest_records = _latest_classifications(working)
+    if latest_records:
+        working = pd.DataFrame.from_records(list(latest_records.values()))
+
+    required_columns = [
+        "COLUMN_NAME",
+        "CONTENT_TYPE",
+        "SEMANTIC_ROLE",
+        "SOURCE",
+        "CONFIDENCE",
+        "CLASSIFIED_AT",
+    ]
+    for column in required_columns:
+        if column not in working.columns:
+            working[column] = None
+
+    working["COLUMN_NAME"] = working["COLUMN_NAME"].astype(str)
+    working = working[required_columns].sort_values(by="COLUMN_NAME")
+    display = working.rename(
+        columns={
+            "COLUMN_NAME": "Column",
+            "CONTENT_TYPE": "Content type",
+            "SEMANTIC_ROLE": "Semantic role",
+            "SOURCE": "Source",
+            "CONFIDENCE": "Confidence",
+            "CLASSIFIED_AT": "Classified at",
+        }
+    )
+    return display
+
+
+def _render_semantic_tags_page(
     classification: pd.DataFrame,
     table_fqn: str,
     helpers: Any,
@@ -938,119 +977,17 @@ def _render_classification_grid(
     metadata_db: str,
     metadata_schema: str,
 ) -> None:
-    if not isinstance(classification, pd.DataFrame) or classification.empty:
+    st.subheader("Semantic tags")
+    normalized = _normalize_classification_table(classification)
+    if normalized.empty:
         st.info(ui_strings.PROFILE_V2_COLUMNS_EDIT_EMPTY)
-        return
-
-    latest_records = _latest_classifications(classification)
-    if isinstance(latest_records, dict) and latest_records:
-        working = pd.DataFrame.from_records(list(latest_records.values()))
     else:
-        working = classification.copy()
+        st.dataframe(normalized, use_container_width=True)
 
-    save_fn = getattr(helpers, "save_manual_classification", None)
-    if not callable(save_fn):
-        st.info(ui_strings.PROFILE_V2_COLUMNS_EDIT_UNAVAILABLE)
-        return
-
-    st.markdown(f"**{ui_strings.PROFILE_V2_COLUMNS_EDIT_HEADER}**")
-    st.caption(ui_strings.PROFILE_V2_COLUMNS_EDIT_HELP)
-
-    if "COLUMN_NAME" not in working.columns:
-        working["COLUMN_NAME"] = ""
-    editable_columns = ["CONTENT_TYPE", "SEMANTIC_ROLE", "SOURCE", "CONFIDENCE", "CLASSIFIED_AT"]
-    for column in editable_columns:
-        if column not in working.columns:
-            working[column] = ""
-
-    working["COLUMN_NAME"] = working["COLUMN_NAME"].astype(str)
-    working = working.sort_values(by="COLUMN_NAME")
-    working = working.set_index("COLUMN_NAME", drop=False)
-
-    display_columns = ["COLUMN_NAME", *editable_columns]
-    nonce = st.session_state.get("profile_data_nonce", 0)
-    grid_key = f"profile_classification_grid_{table_fqn}_{nonce}"
-    column_config = {}
-    for column in display_columns:
-        disabled = column in {"COLUMN_NAME", "SOURCE", "CONFIDENCE", "CLASSIFIED_AT"}
-        column_config[column] = st.column_config.TextColumn(column, disabled=disabled)
-
-    edited_df = st.data_editor(
-        working[display_columns],
-        key=grid_key,
-        use_container_width=True,
-        hide_index=True,
-        num_rows="fixed",
-        column_config=column_config,
-    )
-
-    apply_clicked = st.button(
-        ui_strings.PROFILE_V2_COLUMN_SAVE_BUTTON,
-        use_container_width=False,
-    )
-
-    if not apply_clicked or not isinstance(edited_df, pd.DataFrame):
-        return
-
-    edited_df = edited_df.copy()
-    edited_df["COLUMN_NAME"] = edited_df["COLUMN_NAME"].astype(str)
-    edited_df = edited_df.set_index("COLUMN_NAME", drop=False)
-
-    compare_columns = ["CONTENT_TYPE", "SEMANTIC_ROLE"]
-    changes: List[Dict[str, Any]] = []
-    for column_name, original_row in working[compare_columns].iterrows():
-        if column_name not in edited_df.index:
-            continue
-        edited_row = edited_df.loc[column_name]
-        original_values = {
-            field: _normalize_classification_value(original_row.get(field))
-            for field in compare_columns
-        }
-        new_values = {
-            field: _normalize_classification_value(edited_row.get(field))
-            for field in compare_columns
-        }
-        if original_values == new_values:
-            continue
-        changes.append(
-            {
-                "column": column_name,
-                "content": new_values["CONTENT_TYPE"],
-                "semantic": new_values["SEMANTIC_ROLE"],
-            }
+    if isinstance(classification, pd.DataFrame) and not classification.empty:
+        _render_column_editors(
+            classification, table_fqn, helpers, session, metadata_db, metadata_schema
         )
-
-    if not changes:
-        st.info(ui_strings.PROFILE_V2_COLUMN_EDIT_NO_CHANGES)
-        return
-
-    for change in changes:
-        column_name = change["column"]
-        try:
-            _call_helper_with_metadata(
-                save_fn,
-                session,
-                table_fqn,
-                column_name,
-                change["content"] or None,
-                change["semantic"] or None,
-                metadata_db=metadata_db,
-                metadata_schema=metadata_schema,
-            )
-        except Exception as exc:  # pragma: no cover - UI feedback only
-            st.error(
-                ui_strings.PROFILE_V2_COLUMN_EDIT_ERROR.format(
-                    column=column_name,
-                    error=str(exc),
-                )
-            )
-            return
-
-    column_label = "1 column" if len(changes) == 1 else f"{len(changes)} columns"
-    st.success(
-        ui_strings.PROFILE_V2_COLUMN_EDIT_SUCCESS.format(column=column_label)
-    )
-    st.session_state["profile_data_nonce"] = nonce + 1
 
 
 def _classification_source_detail(source: Any) -> str:
@@ -1669,15 +1606,34 @@ def render_profile(
     _render_sampling_summary(run_info)
     st.divider()
 
-    tab_overview, tab_classification = st.tabs(
-        ["Profiling overview", "Column classification"]
+    (
+        tab_features,
+        tab_semantic,
+        tab_suggestions,
+        tab_history,
+    ) = st.tabs(
+        [
+            "Column features",
+            "Semantic tags",
+            "Suggested checks",
+            "Run history",
+        ]
     )
 
-    with tab_overview:
-        overview_grid = _render_overview_grid(
-            overview_grid, data.suggested_checks, target_fqn
+    with tab_features:
+        _render_overview_page(overview_grid, metadata_db, metadata_schema, target_fqn)
+
+    with tab_semantic:
+        _render_semantic_tags_page(
+            data.column_classification,
+            target_fqn,
+            helpers,
+            session,
+            metadata_db,
+            metadata_schema,
         )
-        _render_overview_debug(overview_grid, metadata_db, metadata_schema, target_fqn)
+
+    with tab_suggestions:
         _render_suggest_config_action(
             overview_grid,
             target_fqn,
@@ -1694,12 +1650,9 @@ def render_profile(
             target_fqn,
         )
 
-    with tab_classification:
-        _render_classification_grid(
-            data.column_classification,
-            target_fqn,
-            helpers,
-            session,
-            metadata_db,
-            metadata_schema,
-        )
+    with tab_history:
+        st.subheader("Recent profiling runs")
+        if isinstance(data.recent_runs, pd.DataFrame) and not data.recent_runs.empty:
+            st.dataframe(data.recent_runs, use_container_width=True)
+        else:
+            st.info("No profiling runs have been logged yet.")
