@@ -116,6 +116,58 @@ def _normalize_bool(value):
     return False
 
 
+def _get_total_rows(session: Session, table_fqn: str, cache: dict[str, int | None]):
+    if not session or not table_fqn:
+        return None
+    if table_fqn in cache:
+        return cache[table_fqn]
+
+    try:
+        row_count = session.sql(f"SELECT COUNT(*) AS TOTAL FROM {table_fqn}").collect()[0][0]
+        cache[table_fqn] = int(row_count or 0)
+    except Exception:
+        cache[table_fqn] = None
+
+    return cache[table_fqn]
+
+
+def _observed_payload(failure_count: int, total_rows: int | None = None, extras: Dict[str, Any] | None = None):
+    observed = {
+        "failure_count": int(failure_count or 0),
+        "total_rows": total_rows if total_rows is None else int(total_rows or 0),
+        "failure_rate": None,
+    }
+    if total_rows not in (None, 0):
+        observed["failure_rate"] = float(observed["failure_count"]) / float(total_rows)
+
+    if extras:
+        observed.update(extras)
+
+    return observed
+
+
+def _sample_failures(session: Session, table_fqn: str, column_name: str, predicate: str, limit: int = 5):
+    if not session or not table_fqn or not column_name or not predicate:
+        return []
+
+    sample_sql = f"""
+        SELECT OBJECT_CONSTRUCT('row_number', RN, 'value', {column_name}) AS SAMPLE
+        FROM (
+            SELECT ROW_NUMBER() OVER (ORDER BY (SELECT NULL)) AS RN, {column_name}
+            FROM {table_fqn} AS T
+            WHERE NOT ({predicate})
+        )
+        WHERE RN <= {int(limit or 0) or 5}
+    """
+
+    try:
+        sample_rows = session.sql(sample_sql).collect()
+    except Exception:
+        return []
+
+    return [row[0] for row in sample_rows]
+
+
 def _rowcount_anomaly_stats(session: Session, table_fqn: str, params: Dict[str, Any]):
     if not session or not table_fqn or not params:
         return None
@@ -209,6 +261,7 @@ def _rowcount_anomaly_stats(session: Session, table_fqn: str, params: Dict[str, 
 def run_dq_config(session: Session, CONFIG_ID: str) -> str:
     run_id = str(uuid.uuid4())
     rule_categories = {}
+    total_rows_cache: Dict[str, int | None] = {}
     try:
         for row in session.sql(
             """
@@ -258,11 +311,6 @@ def run_dq_config(session: Session, CONFIG_ID: str) -> str:
             "rule_code": rule_code,
             "rule_category": rule_category,
             "parameters": params,
-            "observed": None,
-            "expected_min": None,
-            "expected_max": None,
-            "mean": None,
-            "stddev": None,
             "samples": [],
         }
 
@@ -311,16 +359,10 @@ def run_dq_config(session: Session, CONFIG_ID: str) -> str:
                 failure_count = session.sql(failure_sql).collect()[0][0]
                 failures = int(failure_count or 0)
                 ok = failures == 0
-                detail["observed"] = failures
-                detail["expected_min"] = 0
-                detail["expected_max"] = 0
+                total_rows = _get_total_rows(session, table_fqn, total_rows_cache)
+                detail["observed"] = _observed_payload(failures, total_rows)
                 if failures > 0 and column_name:
-                    try:
-                        sample_sql = f"SELECT {column_name} FROM {table_fqn} AS T WHERE NOT ({predicate}) LIMIT 5"
-                        sample_rows = session.sql(sample_sql).collect()
-                        detail["samples"] = [r[0] for r in sample_rows]
-                    except Exception:
-                        detail["samples"] = []
+                    detail["samples"] = _sample_failures(session, table_fqn, column_name, predicate)
         except Exception as exc:
             ok = False
             failures = 0
@@ -330,13 +372,18 @@ def run_dq_config(session: Session, CONFIG_ID: str) -> str:
             else:
                 error_msg = str(exc)
 
-        if not ok and not error_msg:
-            context_sql = agg_sql or failure_sql or rule_expr_raw
-            detail_msg = context_sql[:200] if context_sql else ""
-            error_msg = (
-                f"{check_type or 'Check'} evaluated to FALSE"
-                + (f" | SQL[:200]={detail_msg}" if detail_msg else "")
-            )
+        if detail.get("observed") is None:
+            if rule_code.upper() == "TABLE_ROWCOUNT_ANOMALY" and 'stats' in locals():
+                detail["observed"] = _observed_payload(failures, None, {"row_count": stats.get("observed")})
+                detail.update({
+                    "expected_min": stats.get("expected_min"),
+                    "expected_max": stats.get("expected_max"),
+                    "mean": stats.get("mean"),
+                    "stddev": stats.get("stddev"),
+                    "history_points": stats.get("history_points"),
+                })
+            else:
+                detail["observed"] = _observed_payload(failures)
 
         session.sql(
             """
